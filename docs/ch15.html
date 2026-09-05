@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 15 章 · 路由深入 — Hono 全栈开发教程</title>
+<title>第 15 章 · 文件与媒体 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="15">
@@ -12,485 +12,625 @@
 <main>
 
 <span class="chapter-eyebrow">第 15 章</span>
-<h1>路由深入</h1>
+<h1>文件与媒体</h1>
 <p class="lede">
-  路由是网站的目录结构，也是唯一会被用户收藏、被搜索引擎收录、被别人写进文章里的东西。
-  这一章先讲怎么设计 URL，再讲 Hono 的路由能力和它为什么这么快。
+  第 8 章教了怎么<em>接住</em>一个上传的文件。这一章讲后面那一整条链路：
+  文件该存哪、怎么控制谁能看、图片怎么处理、大文件怎么办，
+  以及那些「上传了但从没被用到」的文件最后去了哪。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>掌握 URL 设计的原则，写出十年后还能用的地址</li>
-    <li>用好路径参数、通配符和正则约束</li>
-    <li>用 <code>app.route()</code> 和 <code>basePath()</code> 把大应用拆成小模块</li>
-    <li>理解 Hono 的多路由器机制，知道什么时候该换预设</li>
-    <li>处理子域名路由</li>
+    <li>设计一条不经过你服务器的上传链路（预签名直传）</li>
+    <li>设计存储键和数据库记录，让文件可追溯、可清理</li>
+    <li>区分公开文件和私有文件，用签名 URL 做访问控制</li>
+    <li>处理图片：什么时候预生成、什么时候按需生成</li>
+    <li>防住上传相关的几类真实攻击</li>
+    <li>处理大文件与断点续传</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="ia">先想清楚 URL</h2>
+<h2 id="path">上传的三条路径</h2>
 
-<blockquote style="border-left:3px solid var(--line-2);margin:20px 0;padding:8px 18px;color:var(--fg-soft)">
-  网站管理员有责任分配那些两年后、二十年后、两百年后依然站得住的 URI。
-  这需要思考、组织和承诺。
-  <br><span style="font-size:13px">—— Tim Berners-Lee，1998 年</span>
-</blockquote>
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="三种上传路径的对比">
+  <text class="ttl on-r" x="20" y="22">① 经过服务器（第 8 章的做法）</text>
+  <rect class="bx" x="20" y="34" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="56" text-anchor="middle">浏览器</text>
+  <path class="ln-r" d="M114 51 H196" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="155" y="45" text-anchor="middle">整个文件</text>
+  <rect class="bx-r" x="200" y="34" width="110" height="34" rx="6"/>
+  <text class="sm" x="255" y="56" text-anchor="middle">你的服务器</text>
+  <path class="ln-r" d="M314 51 H396" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="355" y="45" text-anchor="middle">再传一次</text>
+  <rect class="bx" x="400" y="34" width="110" height="34" rx="6"/>
+  <text class="sm" x="455" y="56" text-anchor="middle">对象存储</text>
+  <text class="sm on-r" x="524" y="46">文件走两遍网络，占内存，</text>
+  <text class="sm on-r" x="524" y="62">受平台请求体大小限制</text>
 
-<p>
-  这段话写于 1998 年，今天读依然成立。URL 改一次，所有收藏、外链、搜索排名全部作废。
-  下面这些原则值得在动手前花十分钟想一想：
-</p>
+  <text class="ttl on-g" x="20" y="104">② 预签名直传（推荐）</text>
+  <rect class="bx" x="20" y="116" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="138" text-anchor="middle">浏览器</text>
+  <path class="ln-b" d="M114 126 H196" marker-end="url(#ar)"/>
+  <text class="sm on-b" x="155" y="120" text-anchor="middle">要一个上传许可</text>
+  <rect class="bx-a" x="200" y="116" width="110" height="34" rx="6"/>
+  <text class="sm on-a" x="255" y="138" text-anchor="middle">你的服务器</text>
+  <path class="ln-b" d="M196 146 H118" marker-end="url(#ar)"/>
+  <text class="sm on-b" x="155" y="160" text-anchor="middle">签名 URL</text>
+  <path class="ln-g" d="M65 156 V186 H450 V72" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="250" y="180" text-anchor="middle">文件直接传到对象存储，不经过你</text>
 
-<div class="tw">
-<table>
-  <tr><th>原则</th><th>反面例子</th><th>好的写法</th></tr>
-  <tr>
-    <td>不暴露技术细节</td>
-    <td><code>/vacation.php</code><br><code>/api/v1/getVacationList</code></td>
-    <td><code>/vacations</code><br><code>/api/v1/vacations</code></td>
-  </tr>
-  <tr>
-    <td>不放无意义的词</td>
-    <td><code>/home/about</code><br><code>/pages/contact</code></td>
-    <td><code>/about</code><br><code>/contact</code></td>
-  </tr>
-  <tr>
-    <td>用连字符分词</td>
-    <td><code>/hood_river_day_trip</code><br><code>/HoodRiverDayTrip</code></td>
-    <td><code>/hood-river-day-trip</code></td>
-  </tr>
-  <tr>
-    <td>全小写</td>
-    <td><code>/Vacations/HoodRiver</code></td>
-    <td><code>/vacations/hood-river</code></td>
-  </tr>
-  <tr>
-    <td>层级反映内容结构</td>
-    <td><code>/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
-  </tr>
-  <tr>
-    <td>别为 SEO 硬塞关键词</td>
-    <td><code>/vacations/oregon-coast-portland-hood-river/oregon-coast/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
-  </tr>
-</table>
+  <text class="ttl on-b" x="20" y="216">③ 平台代理上传</text>
+  <rect class="bx-d" x="20" y="228" width="720" height="34" rx="6"/>
+  <text class="sm" x="380" y="250" text-anchor="middle">Cloudflare Images、Uploadthing 之类的服务，把整条链路（上传+处理+CDN）打包好</text>
+
+  <rect class="bx-a" x="20" y="274" width="720" height="40" rx="8"/>
+  <text class="sm on-a" x="380" y="298" text-anchor="middle">小文件（头像、几百 KB）用 ①；用户可能传大文件时一定要用 ②；不想自己管就用 ③</text>
+</svg>
+<figcaption>图 15-1　让文件不经过你的服务器，是这一章最重要的一个决定</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么直传如此重要</div>
+  <ul>
+    <li><strong>边缘平台有硬限制。</strong>Cloudflare Workers 的请求体上限是几百 MB 甚至更低，
+        而且整个文件要过一遍你的 CPU 时间预算 —— 一个 200 MB 的视频直接就超了。</li>
+    <li><strong>省带宽和内存。</strong>1000 个用户同时传 50 MB 的文件，
+        经过服务器意味着你要吞下 50 GB 流量并且在内存里缓冲。</li>
+    <li><strong>用户更快。</strong>浏览器直连对象存储的边缘节点，比绕道你的服务器近得多。</li>
+  </ul>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 非改不可的时候，用 301</div>
-  <p>
-    真的需要调整 URL 结构时，<strong>保留旧地址并 301 永久重定向到新地址</strong>。
-    搜索引擎会把权重转移过去，老书签也不会失效。留着这些重定向，别急着删。
-  </p>
-  <div class="code" data-lang="ts"><pre>
-app.get('/old-vacations/:slug', (c) =&gt;
-  c.redirect(`/vacations/${c.req.param('slug')}`, 301)
-)
-</pre></div>
+<h2 id="presigned">预签名直传</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="预签名上传的完整时序">
+  <path class="ln-d" d="M120 40 V280"/>
+  <path class="ln-d" d="M400 40 V280"/>
+  <path class="ln-d" d="M660 40 V280"/>
+  <text class="ttl on-b" x="60" y="34">浏览器</text>
+  <text class="ttl on-a" x="345" y="34">你的服务器</text>
+  <text class="ttl on-g" x="615" y="34">对象存储</text>
+
+  <path class="ln-b" d="M124 62 H396" marker-end="url(#ar)"/>
+  <text class="sm" x="260" y="56" text-anchor="middle">① 我要传 photo.jpg，2.4 MB，image/jpeg</text>
+
+  <rect class="bx-a" x="300" y="72" width="200" height="46" rx="6"/>
+  <text class="sm on-a" x="400" y="90" text-anchor="middle">校验：登录了吗？配额够吗？</text>
+  <text class="sm on-a" x="400" y="108" text-anchor="middle">类型允许吗？先在库里建一条记录</text>
+
+  <path class="ln-a" d="M396 138 H128" marker-end="url(#ar-a)"/>
+  <text class="sm" x="260" y="132" text-anchor="middle">② 返回签名 URL + 文件 id（有效期 5 分钟）</text>
+
+  <path class="ln-g" d="M124 168 H656" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="390" y="162" text-anchor="middle">③ PUT 文件内容　—— 完全不经过你的服务器</text>
+
+  <path class="ln-b" d="M124 200 H396" marker-end="url(#ar)"/>
+  <text class="sm" x="260" y="194" text-anchor="middle">④ 传完了，id 是 f_123</text>
+
+  <path class="ln-a" d="M404 224 H656" marker-end="url(#ar-a)"/>
+  <text class="sm" x="530" y="218" text-anchor="middle">⑤ 核实：真的存在吗？大小对吗？</text>
+
+  <rect class="bx-g" x="300" y="238" width="200" height="40" rx="6"/>
+  <text class="sm on-g" x="400" y="256" text-anchor="middle">⑥ 标记为 ready</text>
+  <text class="sm on-g" x="400" y="272" text-anchor="middle">投递缩略图任务（第 25 章）</text>
+</svg>
+<figcaption>图 15-2　第 ⑤ 步是最容易被省略的 —— 但没有它，客户端就能撒谎</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+export const uploads = sqliteTable('uploads', {
+  id: text('id').primaryKey(),
+  ownerId: text('owner_id').notNull(),
+  // 对象存储里的键，由服务端生成，客户端无权指定
+  storageKey: text('storage_key').notNull().unique(),
+  originalName: text('original_name').notNull(),
+  contentType: text('content_type').notNull(),
+  sizeBytes: integer('size_bytes').notNull(),
+  // pending = 已签发但还没确认；ready = 可用；failed = 校验没过
+  status: text('status', { enum: ['pending', 'ready', 'failed'] }).notNull(),
+  // 关联到哪个业务对象。为 null 的就是「孤儿」，等着被清理
+  attachedTo: text('attached_to'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
+</pre>
 </div>
 
-<h2 id="patterns">路径模式</h2>
+<div class="code" data-lang="ts" data-file="src/routes/uploads.ts">
+<pre>
+import { AwsClient } from 'aws4fetch'
+
+const MAX_BYTES = 20 * 1024 * 1024
+const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf'])
+
+const requestSchema = z.object({
+  filename: z.string().min(1).max(255),
+  contentType: z.string(),
+  sizeBytes: z.number().int().positive(),
+})
+
+app.post('/api/v1/uploads', requireLogin, zValidator('json', requestSchema), async (c) =&gt; {
+  const { filename, contentType, sizeBytes } = c.req.valid('json')
+  const user = c.get('user')
+
+  // ① 在签发之前校验 —— 而不是在文件传完之后
+  if (!ALLOWED.has(contentType)) {
+    throw new HTTPException(415, { message: '不支持的文件类型' })
+  }
+  if (sizeBytes &gt; MAX_BYTES) {
+    throw new HTTPException(413, { message: '文件不能超过 20 MB' })
+  }
+  if (await isOverQuota(c.env.DB, user.id)) {
+    throw new HTTPException(403, { message: '存储配额已用完' })
+  }
+
+  // ② 键由服务端生成：用户 ID 做前缀便于配额统计和批量删除
+  const id = crypto.randomUUID()
+  const ext = safeExtension(filename, contentType)
+  const storageKey = `u/${user.id}/${id}${ext}`
+
+  await db.insert(uploads).values({
+    id, ownerId: user.id, storageKey,
+    originalName: filename.slice(0, 255),
+    contentType, sizeBytes,
+    status: 'pending', createdAt: new Date(),
+  })
+
+  // ③ 签一个短期有效的 PUT URL
+  const aws = new AwsClient({
+    accessKeyId: c.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
+    service: 's3',
+  })
+  const signed = await aws.sign(
+    new Request(`${c.env.R2_ENDPOINT}/${c.env.R2_BUCKET}/${storageKey}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType, 'Content-Length': String(sizeBytes) },
+    }),
+    { aws: { signQuery: true }, headers: { 'X-Amz-Expires': '300' } }
+  )
+
+  return c.json({ id, uploadUrl: signed.url })
+})
+</pre>
+</div>
 
 <div class="code" data-lang="ts">
 <pre>
-// 静态路径
-app.get('/about', handler)
+// 确认端点：客户端传完后调用，服务端去核实
+app.post('/api/v1/uploads/:id/complete', requireLogin, async (c) =&gt; {
+  const record = await getUpload(c.env.DB, c.req.param('id'))
 
-// 路径参数
-app.get('/vacations/:slug', (c) =&gt; {
-  const slug = c.req.param('slug')          // 'hood-river-day-trip'
+  if (!record || record.ownerId !== c.get('user').id) {
+    throw new HTTPException(404, { message: '找不到这个上传记录' })
+  }
+
+  // 关键：去对象存储实际核对，不要相信客户端说「我传好了」
+  const head = await c.env.BUCKET.head(record.storageKey)
+
+  if (!head) {
+    throw new HTTPException(400, { message: '文件不存在，可能上传失败了' })
+  }
+  if (head.size !== record.sizeBytes) {
+    await c.env.BUCKET.delete(record.storageKey)
+    await markFailed(c.env.DB, record.id)
+    throw new HTTPException(400, { message: '文件大小与声明不符' })
+  }
+
+  await markReady(c.env.DB, record.id)
+  await c.env.TASKS.send({ type: 'process-upload', id: record.id })
+
+  return c.json({ id: record.id, status: 'ready' })
 })
+</pre>
+</div>
 
-// 多个参数
-app.get('/contest/:year/:month', (c) =&gt; {
-  const { year, month } = c.req.param()     // 一次拿全部
-})
+<div class="box warn">
+  <div class="t">&#9888; 没有第 ⑤ 步的话会怎样</div>
+  <p>
+    客户端声明「我要传 1 MB 的 jpeg」，拿到签名 URL 之后<strong>传了一个 500 MB 的文件</strong>，
+    然后直接调 complete 说传好了。<br>
+    虽然签名里可以约束 <code>Content-Length</code>（上面就这么做了），
+    但不同存储服务的支持程度不一 —— <strong>服务端 <code>head()</code> 核实一遍是唯一可靠的兜底。</strong>
+  </p>
+</div>
 
-// 可选参数
-app.get('/vacations/:region?', (c) =&gt; {
-  const region = c.req.param('region')      // 可能是 undefined
-})
+<h2 id="keys">存储键怎么设计</h2>
 
-// 正则约束：只匹配数字
-app.get('/orders/:id{[0-9]+}', (c) =&gt; {
-  const id = Number(c.req.param('id'))      // 保证能转成数字
-})
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>问题</th></tr>
+  <tr><td><code>photo.jpg</code></td><td>两个用户传同名文件会互相覆盖</td></tr>
+  <tr><td><code>uploads/{原始文件名}</code></td><td>路径穿越、特殊字符、大小写敏感性差异 —— 全是坑</td></tr>
+  <tr><td><code>{uuid}</code></td><td>安全，但没法按用户批量查询或删除</td></tr>
+  <tr><td><code>u/{userId}/{uuid}.jpg</code></td><td><strong>推荐</strong>：唯一、可按前缀列举、便于配额统计和账号注销时清理</td></tr>
+</table>
+</div>
 
-// 约束版本号格式
-app.get('/api/:version{v[0-9]+}/vacations', handler)
+<div class="code" data-lang="ts">
+<pre>
+/** 扩展名只从白名单取，且以 contentType 为准 —— 不信任用户给的文件名 */
+const EXT_BY_TYPE: Record&lt;string, string&gt; = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'application/pdf': '.pdf',
+}
 
-// 通配符
-app.get('/files/*', (c) =&gt; {
-  const path = c.req.path                   // '/files/a/b/c.png'
-})
-
-// 包含斜杠的参数
-app.get('/files/:path{.+}', (c) =&gt; {
-  const path = c.req.param('path')          // 'a/b/c.png'
-})
+function safeExtension(filename: string, contentType: string): string {
+  return EXT_BY_TYPE[contentType] ?? ''
+}
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 正则约束能省掉一堆校验</div>
+  <div class="t">&#9733; 原始文件名只用于「显示」和「下载时的名字」</div>
   <p>
-    <code>/orders/:id{[0-9]+}</code> 意味着 <code>/orders/abc</code> 根本不会进你的处理函数，
-    而是走 404。你不用在函数里写 <code>if (isNaN(id)) return 400</code>。
-    <strong>让路由层挡掉明显非法的请求，处理函数就能只关心正常情况。</strong>
+    它是用户提供的数据，和留言内容没有本质区别 —— 存进数据库、渲染时转义（第 7 章）、
+    <strong>但永远不用它来构造路径</strong>。<br>
+    下载时通过响应头把它还给用户：
   </p>
+  <div class="code" data-lang="ts"><pre>
+// filename* 用 RFC 5987 编码，中文文件名才不会乱码
+c.header('Content-Disposition',
+  `attachment; filename="file"; filename*=UTF-8''${encodeURIComponent(record.originalName)}`)
+</pre></div>
 </div>
 
-<h3>匹配顺序</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// ❌ /vacations/new 会被第一条抢走，当成 slug='new'
-app.get('/vacations/:slug', showVacation)
-app.get('/vacations/new', newVacationForm)
-
-// ✅ 具体的写前面
-app.get('/vacations/new', newVacationForm)
-app.get('/vacations/:slug', showVacation)
-</pre>
-</div>
-
-<h2 id="middleware-route">路由处理函数也是中间件</h2>
-
-<p>
-  第 10 章说过：中间件和处理函数本质是一回事。
-  一个路由可以挂多个函数，只要不返回响应就继续往下走：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-app.get(
-  '/admin/vacations/:sku',
-  requireLogin,          // 中间件：没登录就重定向
-  requireRole('admin'),  // 中间件：不是管理员就 403
-  loadVacation,          // 中间件：查数据库，塞进 c
-  (c) =&gt; c.html(&lt;AdminVacationPage vacation={c.get('vacation')} /&gt;)
-)
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// loadVacation 长这样
-const loadVacation = createMiddleware&lt;{ Variables: { vacation: Vacation } }&gt;(
-  async (c, next) =&gt; {
-    const v = await repo.findBySku(c.req.param('sku'))
-    if (!v) return c.notFound()      // 拦截，后面不执行
-    c.set('vacation', v)
-    await next()
-  }
-)
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 这是消除重复的好办法</div>
-  <p>
-    如果有五个路由都要「按 sku 查出度假套餐，查不到就 404」，
-    把它写成中间件，五个处理函数就都能假设「<code>c.get('vacation')</code> 一定存在且有效」。
-  </p>
-</div>
-
-<h2 id="organize">拆分大应用</h2>
-
-<p>
-  所有路由堆在一个文件里，超过一两百行就没法看了。Hono 用 <code>app.route()</code> 组合子应用：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/routes/vacations.tsx">
-<pre>
-import { Hono } from 'hono'
-
-export const vacationRoutes = new Hono()
-  .get('/', listVacations)                 // 实际路径 /vacations
-  .get('/:slug', showVacation)             // 实际路径 /vacations/:slug
-  .post('/:slug/notify', notifyWhenInSeason)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/routes/api.ts">
-<pre>
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
-
-export const apiRoutes = new Hono()
-  .use('*', cors())                        // 只对 API 生效
-  .get('/vacations', apiListVacations)
-  .get('/vacations/:sku', apiGetVacation)
-  .delete('/vacations/:sku', apiDeleteVacation)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/app.tsx">
-<pre>
-import { Hono } from 'hono'
-import { vacationRoutes } from './routes/vacations'
-import { apiRoutes } from './routes/api'
-import { adminRoutes } from './routes/admin'
-
-export const app = new Hono()
-
-app.get('/', handlers.home)
-app.get('/about', handlers.about)
-
-app.route('/vacations', vacationRoutes)
-app.route('/api/v1', apiRoutes)
-app.route('/admin', adminRoutes)
-</pre>
-</div>
+<h2 id="access">访问控制</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="用 app.route 组合子应用">
-  <rect class="bx-a" x="280" y="20" width="200" height="46" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">app（主应用）</text>
-  <text class="mono sm" x="380" y="58" text-anchor="middle">/ · /about</text>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="公开文件与私有文件的两种访问方式">
+  <rect class="bx-g" x="20" y="20" width="350" height="110" rx="10"/>
+  <text class="ttl on-g" x="36" y="44">公开文件</text>
+  <text class="sm" x="36" y="68">商品图、头像、博客配图</text>
+  <text class="mono sm" x="36" y="90">https://cdn.example.com/u/…/a.jpg</text>
+  <text class="sm on-g" x="36" y="112">直接走 CDN，长缓存，不经过你的服务器</text>
 
-  <path class="ln" d="M330 70 L150 108" marker-end="url(#ar)"/>
-  <path class="ln" d="M380 70 V108" marker-end="url(#ar)"/>
-  <path class="ln" d="M430 70 L610 108" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="390" y="20" width="350" height="110" rx="10"/>
+  <text class="ttl on-r" x="406" y="44">私有文件</text>
+  <text class="sm" x="406" y="68">发票、体检报告、合同、聊天图片</text>
+  <text class="sm on-r" x="406" y="90">桶必须设为私有，绝不能公开可读</text>
+  <text class="sm" x="406" y="112">每次访问都要签一个短期 URL</text>
 
-  <rect class="bx-b" x="30" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-b" x="150" y="134" text-anchor="middle">vacationRoutes</text>
-  <text class="mono sm" x="150" y="154" text-anchor="middle">挂载于 /vacations</text>
-  <text class="mono sm" x="150" y="172" text-anchor="middle">'/' → /vacations</text>
-
-  <rect class="bx-g" x="290" y="112" width="180" height="74" rx="10"/>
-  <text class="ttl on-g" x="380" y="134" text-anchor="middle">apiRoutes</text>
-  <text class="mono sm" x="380" y="154" text-anchor="middle">挂载于 /api/v1</text>
-  <text class="sm" x="380" y="172" text-anchor="middle">自带 CORS 中间件</text>
-
-  <rect class="bx-p" x="490" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-p" x="610" y="134" text-anchor="middle">adminRoutes</text>
-  <text class="mono sm" x="610" y="154" text-anchor="middle">挂载于 /admin</text>
-  <text class="sm" x="610" y="172" text-anchor="middle">自带权限中间件</text>
-
-  <rect class="bx-d" x="120" y="204" width="520" height="34" rx="8"/>
-  <text class="sm" x="380" y="226" text-anchor="middle">子应用内部只关心相对路径，挂载前缀由主应用决定 —— 换前缀不用改子应用</text>
+  <rect class="bx-a" x="20" y="146" width="720" height="100" rx="10"/>
+  <text class="ttl on-a" x="380" y="168" text-anchor="middle">最常见的事故：用「猜不到的 URL」当作访问控制</text>
+  <text class="sm" x="380" y="192" text-anchor="middle">「文件名是 UUID，别人猜不到」—— 但 URL 会出现在浏览器历史、Referer 头、</text>
+  <text class="sm" x="380" y="210" text-anchor="middle">分享链接、客服工单、日志文件、第三方统计脚本里</text>
+  <text class="sm on-r" x="380" y="234" text-anchor="middle">一旦泄露就是永久有效。这叫「隐晦式安全」，不是安全</text>
 </svg>
-<figcaption>图 15-1　子应用可以独立开发、独立测试、独立挂载</figcaption>
+<figcaption>图 15-3　判断标准：这个文件被陌生人看到会有问题吗？会 → 私有桶 + 签名 URL</figcaption>
 </figure>
 
-<h3>basePath</h3>
-
 <div class="code" data-lang="ts">
 <pre>
-// 给整个应用加前缀
-const app = new Hono().basePath('/api/v2')
+// 私有文件：每次访问都做权限判断，然后签一个短期 URL
+app.get('/files/:id', requireLogin, async (c) =&gt; {
+  const record = await getUpload(c.env.DB, c.req.param('id'))
+  if (!record || record.status !== 'ready') return c.notFound()
 
-app.get('/vacations', handler)    // 实际是 /api/v2/vacations
-</pre>
-</div>
+  // 权限判断在这里做 —— 下一章会讲怎么让它成为结构性保证
+  if (!(await canAccess(c.get('user'), record))) {
+    throw new HTTPException(403, { message: '没有权限访问这个文件' })
+  }
 
-<h3>为什么推荐链式写法</h3>
+  const url = await signGetUrl(c.env, record.storageKey, { expiresIn: 300 })
 
-<div class="vs">
-  <div class="old">
-    <div class="h">分开写：类型信息丢失</div>
-    <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-api.get('/vacations', h1)
-api.get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 里没有路由信息
-// RPC 客户端用不了
-</pre></div>
-  </div>
-  <div class="new">
-    <div class="h">链式写：类型一路累加</div>
-    <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-  .get('/vacations', h1)
-  .get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 包含全部路由的
-// 路径、参数和返回值类型
-</pre></div>
-  </div>
-</div>
-
-<p>
-  这个差别在第 16 章（RPC 客户端）和第 5 章（<code>testClient</code>）时会变得非常重要。
-  <strong>养成链式写的习惯</strong>，将来想用这些特性时不用回头重构。
-</p>
-
-<h2 id="subdomain">子域名</h2>
-
-<p>
-  子域名适合承载「和主站关系不大」的部分：<code>api.example.com</code>、<code>admin.example.com</code>。
-  Hono 的路由默认不看域名，需要自己判断：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-const mainApp = new Hono()
-const adminApp = new Hono()
-const apiApp = new Hono()
-
-const root = new Hono()
-
-root.all('*', async (c) =&gt; {
-  const host = c.req.header('host') ?? ''
-
-  if (host.startsWith('admin.')) return adminApp.fetch(c.req.raw, c.env)
-  if (host.startsWith('api.'))   return apiApp.fetch(c.req.raw, c.env)
-  return mainApp.fetch(c.req.raw, c.env)
+  // 302 到签名 URL，文件内容仍然由对象存储直接吐给浏览器
+  return c.redirect(url, 302)
 })
-
-export default root
 </pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; 本地怎么测子域名</div>
-  <p>
-    改 hosts 文件（macOS/Linux 是 <code>/etc/hosts</code>，Windows 是
-    <code>C:\Windows\System32\drivers\etc\hosts</code>）：
-  </p>
-  <div class="code" data-lang="text"><pre>
-127.0.0.1  meadowlark.local
-127.0.0.1  admin.meadowlark.local
-127.0.0.1  api.meadowlark.local
-</pre></div>
-  <p>用 <code>.local</code> 后缀，避免和真实域名冲突。</p>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 子域名对 SEO 不利</div>
+  <div class="t">&#9888; 私有文件的响应绝不能被缓存</div>
   <p>
-    搜索引擎倾向于把子域名当作<strong>独立站点</strong>，权重不共享。
-    所以博客放 <code>example.com/blog</code> 比 <code>blog.example.com</code> 好。
-    子域名留给 API、后台这些不需要 SEO 的部分。
+    上面这个 <code>/files/:id</code> 端点如果被 CDN 缓存了，
+    <strong>第二个用户会拿到第一个用户的 302 目标</strong>。<br>
+    必须设 <code>Cache-Control: private, no-store</code>（第 19 章讲过这条铁律）。
+    签名 URL 的有效期也要短 —— 它一旦被复制出去，在过期前就是有效的。
   </p>
 </div>
 
-<h2 id="router">Hono 为什么快</h2>
+<h2 id="images">图片处理</h2>
 
 <p>
-  Hono 有个别的框架没有的设计：<strong>它内置了多个路由器实现，启动时自动选一个。</strong>
+  原图往往是 4000×3000 的几 MB 大图，而页面上只显示 400px 宽。
+  直接发原图是第 19 章说的「体积」问题里最大的一块。
 </p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="Hono 的多路由器架构">
-  <rect class="bx-a" x="270" y="20" width="220" height="48" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">SmartRouter（默认）</text>
-  <text class="sm" x="380" y="60" text-anchor="middle">第一个请求到来时，挑一个最合适的</text>
-
-  <path class="ln-a" d="M330 72 L190 108" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M430 72 L570 108" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-g" x="50" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-g" x="190" y="134" text-anchor="middle">RegExpRouter</text>
-  <text class="sm" x="66" y="156">把所有路由编译成<tspan>一个</tspan>大正则</text>
-  <text class="sm" x="66" y="176">匹配是 O(1)，不随路由数量变慢</text>
-  <text class="sm on-r" x="66" y="194">但少数复杂模式它处理不了</text>
-
-  <rect class="bx-b" x="430" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-b" x="570" y="134" text-anchor="middle">TrieRouter</text>
-  <text class="sm" x="446" y="156">用前缀树逐段匹配</text>
-  <text class="sm" x="446" y="176">稍慢一点，但<tspan>支持全部模式</tspan></text>
-  <text class="sm on-g" x="446" y="194">作为兜底方案</text>
-
-  <rect class="bx-d" x="120" y="220" width="520" height="46" rx="8"/>
-  <text class="sm" x="380" y="242" text-anchor="middle">SmartRouter 先试 RegExpRouter；如果你的路由里有它搞不定的模式，</text>
-  <text class="sm" x="380" y="260" text-anchor="middle">就自动退回 TrieRouter。你什么都不用配。</text>
-</svg>
-<figcaption>图 15-2　「自动挑最快的那个」是 Hono 性能的来源</figcaption>
-</figure>
-
-<h3>预设</h3>
-
-<p>大多数人不需要改。但如果你的场景特殊，可以换预设：</p>
 
 <div class="tw">
 <table>
-  <tr><th>引入方式</th><th>用的路由器</th><th>适合</th></tr>
+  <tr><th>策略</th><th>做法</th><th>取舍</th></tr>
   <tr>
-    <td><code>import { Hono } from 'hono'</code></td>
-    <td>SmartRouter [RegExp + Trie]</td>
-    <td><strong>默认，绝大多数情况</strong>。长驻服务器，注册一次跑很久</td>
+    <td><strong>预生成</strong></td>
+    <td>上传后用队列生成固定的几个尺寸</td>
+    <td>访问快、可预测；但尺寸写死，加一个新尺寸要重跑全量</td>
   </tr>
   <tr>
-    <td><code>import { Hono } from 'hono/quick'</code></td>
-    <td>SmartRouter [Linear + Trie]</td>
-    <td>每个请求都要重新注册路由的环境（某些 FaaS）。注册极快，匹配稍慢</td>
+    <td><strong>按需生成</strong></td>
+    <td>请求 <code>?w=400</code> 时现场处理并缓存</td>
+    <td>灵活；但首次访问慢，<strong>而且必须限制参数</strong></td>
   </tr>
   <tr>
-    <td><code>import { Hono } from 'hono/tiny'</code></td>
-    <td>PatternRouter</td>
-    <td>对体积极度敏感的场景。代码最小，性能够用</td>
+    <td><strong>托管服务</strong></td>
+    <td>Cloudflare Images、imgix、Cloudinary</td>
+    <td>省事，功能全；按量付费</td>
   </tr>
 </table>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 怎么判断该不该换</div>
+<div class="code" data-lang="ts" data-file="src/tasks/process-upload.ts">
+<pre>
+const SIZES = [
+  { name: 'thumb', width: 200 },
+  { name: 'medium', width: 800 },
+  { name: 'large', width: 1600 },
+]
+
+export async function processUpload(id: string, env: Bindings) {
+  const record = await getUpload(env.DB, id)
+  if (!record || !record.contentType.startsWith('image/')) return
+
+  const object = await env.BUCKET.get(record.storageKey)
+  if (!object) return
+
+  const original = await object.arrayBuffer()
+
+  for (const size of SIZES) {
+    // 生成 WebP：体积通常比 JPEG 小 30%（第 19 章）
+    const resized = await resizeImage(original, { width: size.width, format: 'webp' })
+    await env.BUCKET.put(`${record.storageKey}/${size.name}.webp`, resized, {
+      httpMetadata: {
+        contentType: 'image/webp',
+        // 派生图是不可变的：键变了内容才变，可以长缓存（第 19 章的内容指纹思路）
+        cacheControl: 'public, max-age=31536000, immutable',
+      },
+    })
+  }
+
+  await markProcessed(env.DB, id)
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 按需生成必须限制参数取值</div>
   <p>
-    默认预设的取舍是：<strong>启动时多花一点时间做编译，换取之后每个请求都快</strong>。
-    这在服务器上是划算的（编译一次，服务几百万个请求）。
-    只有当「进程存活时间极短、每次只处理一两个请求」时，<code>hono/quick</code> 才更划算。
-    不确定就别改。
+    <code>/img/abc?w=400</code> 看起来很方便，但攻击者可以请求
+    <code>?w=1</code>、<code>?w=2</code>、<code>?w=3</code>……<strong>几千个不同的宽度</strong>，
+    每一个都触发一次真实的图片处理，把你的 CPU 和账单打爆。<br>
+    对策：<strong>只接受白名单里的几个宽度</strong>（<code>[200, 400, 800, 1600]</code>），
+    或者给参数加签名。
   </p>
 </div>
 
-<h2 id="debug">看看路由表长什么样</h2>
+<h2 id="security">上传相关的攻击</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 用户上传的文件是你系统里最危险的输入</div>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>攻击</th><th>原理</th><th>对策</th></tr>
+  <tr>
+    <td><strong>伪装类型</strong></td>
+    <td>把 <code>.php</code> / <code>.svg</code> 改名成 <code>.jpg</code>；<code>Content-Type</code> 是客户端说了算的</td>
+    <td>读文件头几个字节验真实类型（magic number），不信任声明</td>
+  </tr>
+  <tr>
+    <td><strong>SVG 里的脚本</strong></td>
+    <td>SVG 是 XML，可以内嵌 <code>&lt;script&gt;</code>。用户头像变成 XSS</td>
+    <td>要么禁用 SVG，要么用 DOMPurify 清洗，要么用独立域名承载用户内容</td>
+  </tr>
+  <tr>
+    <td><strong>解压炸弹</strong></td>
+    <td>一张 10 KB 的 PNG 解压后是 50000×50000 像素，处理时吃光内存</td>
+    <td>处理前检查图片尺寸，设置像素总数上限</td>
+  </tr>
+  <tr>
+    <td><strong>EXIF 隐私</strong></td>
+    <td>手机照片带 GPS 坐标 —— 用户发张自拍就暴露了家庭住址</td>
+    <td><strong>默认剥离 EXIF</strong>（保留方向信息即可）</td>
+  </tr>
+  <tr>
+    <td><strong>恶意文档</strong></td>
+    <td>带宏的 Office 文件、恶意 PDF，你成了分发渠道</td>
+    <td>公开分发的文件要接病毒扫描（ClamAV / VirusTotal）</td>
+  </tr>
+  <tr>
+    <td><strong>路径穿越</strong></td>
+    <td>文件名是 <code>../../config</code></td>
+    <td>键由服务端生成（前面已解决）</td>
+  </tr>
+</table>
+</div>
 
 <div class="code" data-lang="ts">
 <pre>
-import { showRoutes } from 'hono/dev'
+/** 读文件头判断真实类型，不看扩展名也不看 Content-Type */
+const MAGIC: [string, number[]][] = [
+  ['image/jpeg', [0xff, 0xd8, 0xff]],
+  ['image/png',  [0x89, 0x50, 0x4e, 0x47]],
+  ['application/pdf', [0x25, 0x50, 0x44, 0x46]],
+  // WebP: RIFF....WEBP
+  ['image/webp', [0x52, 0x49, 0x46, 0x46]],
+]
 
-// 在所有路由注册完之后
-showRoutes(app, { verbose: true })
+export function sniffType(head: Uint8Array): string | null {
+  for (const [type, sig] of MAGIC) {
+    if (sig.every((b, i) =&gt; head[i] === b)) return type
+  }
+  return null
+}
 </pre>
 </div>
 
-<div class="code" data-lang="text">
+<div class="box key">
+  <div class="t">&#9733; 用独立域名承载用户上传的内容</div>
+  <p>
+    把用户文件放在 <code>usercontent-example.net</code>（<strong>不是</strong>你主域名的子域名），
+    这样即使某个文件被当作 HTML 执行，它也拿不到你主站的 Cookie，
+    因为同源策略把它隔离开了（第 20 章）。<br>
+    <em>GitHub 用 <code>githubusercontent.com</code>、Google 用 <code>googleusercontent.com</code>
+    —— 都是这个原因。</em>
+  </p>
+</div>
+
+<h2 id="large">大文件</h2>
+
+<div class="code" data-lang="ts">
 <pre>
-GET     /
-GET     /about
-GET     /vacations
-GET     /vacations/:slug
-POST    /vacations/:slug/notify
-GET     /api/v1/vacations
-GET     /api/v1/vacations/:sku
-DELETE  /api/v1/vacations/:sku
-GET     /admin/vacations
+// 超过 100 MB 用分片上传：并发传、能续传、单片失败只重传那一片
+app.post('/api/v1/uploads/multipart', requireLogin, async (c) =&gt; {
+  const { filename, contentType, sizeBytes } = c.req.valid('json')
+  const storageKey = `u/${c.get('user').id}/${crypto.randomUUID()}`
+
+  const upload = await c.env.BUCKET.createMultipartUpload(storageKey, {
+    httpMetadata: { contentType },
+  })
+
+  const PART_SIZE = 10 * 1024 * 1024
+  const partCount = Math.ceil(sizeBytes / PART_SIZE)
+
+  // 给每一片签一个 URL，客户端可以并发上传
+  const parts = await Promise.all(
+    Array.from({ length: partCount }, (_, i) =&gt;
+      signPartUrl(c.env, storageKey, upload.uploadId, i + 1)
+    )
+  )
+
+  return c.json({ uploadId: upload.uploadId, partSize: PART_SIZE, parts })
+})
 </pre>
 </div>
+
+<div class="box warn">
+  <div class="t">&#9888; 未完成的分片上传会一直占着存储费用</div>
+  <p>
+    用户传到一半关掉浏览器，那些已上传的分片<strong>不会自动消失，但也不可见</strong>
+    —— 你在桶里看不到它们，账单上却看得到。<br>
+    对策：在对象存储上配一条生命周期规则，「7 天未完成的分片上传自动中止」。
+    这是一条设置一次就永久生效的规则，值得现在就去配。
+  </p>
+</div>
+
+<h2 id="orphan">孤儿文件</h2>
 
 <p>
-  排查「为什么这个路由不生效」时，先看这张表 ——
-  经常会发现路径拼错了，或者顺序被前面的通配符抢了。
+  这是文件存储最容易被忽略的一块：<strong>上传了但从来没被用上的文件</strong>。
 </p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="孤儿文件产生的两种途径">
+  <text class="ttl on-r" x="20" y="22">孤儿是怎么来的</text>
+
+  <rect class="bx-r" x="20" y="34" width="350" height="86" rx="10"/>
+  <text class="ttl on-r" x="36" y="56">用户放弃了</text>
+  <text class="sm" x="36" y="78">在发帖界面传了三张图，</text>
+  <text class="sm" x="36" y="96">然后关掉页面没有提交</text>
+  <text class="sm on-r" x="36" y="114">文件在，但没有任何记录引用它</text>
+
+  <rect class="bx-r" x="390" y="34" width="350" height="86" rx="10"/>
+  <text class="ttl on-r" x="406" y="56">业务对象被删了</text>
+  <text class="sm" x="406" y="78">帖子删除时只删了数据库记录，</text>
+  <text class="sm" x="406" y="96">忘了删对象存储里的图</text>
+  <text class="sm on-r" x="406" y="114">这类最隐蔽，因为功能看起来完全正常</text>
+
+  <rect class="bx-g" x="20" y="136" width="720" height="100" rx="10"/>
+  <text class="ttl on-g" x="380" y="158" text-anchor="middle">清理策略</text>
+  <text class="sm" x="40" y="182">① 定时任务：删除 status=pending 且创建超过 24 小时的记录及其文件</text>
+  <text class="sm" x="40" y="204">② 定时任务：删除 attachedTo 为 null 且创建超过 7 天的（用户放弃的草稿）</text>
+  <text class="sm" x="40" y="226">③ 对账：列举桶里的对象，找出数据库里没有记录的 —— 反过来也查一遍（第 26 章的思路）</text>
+</svg>
+<figcaption>图 15-4　没有清理机制的话，存储成本会随时间单调增长，而且你不知道钱花在哪</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+/** 每天跑一次 */
+export async function cleanupOrphans(env: Bindings) {
+  const cutoffPending = new Date(Date.now() - 24 * 3600_000)
+  const cutoffUnattached = new Date(Date.now() - 7 * 24 * 3600_000)
+
+  const orphans = await db.select().from(uploads).where(
+    or(
+      and(eq(uploads.status, 'pending'), lt(uploads.createdAt, cutoffPending)),
+      and(isNull(uploads.attachedTo), lt(uploads.createdAt, cutoffUnattached))
+    )
+  ).limit(1000)
+
+  for (const o of orphans) {
+    // 顺序很重要：先删文件，再删记录。
+    // 反过来的话，删记录成功、删文件失败，就再也找不到这个文件了
+    await env.BUCKET.delete(o.storageKey)
+    await env.BUCKET.delete(`${o.storageKey}/thumb.webp`)
+    await db.delete(uploads).where(eq(uploads.id, o.id))
+  }
+
+  log('info', 'orphans_cleaned', { count: orphans.length })
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 删除也可以先软后硬</div>
+  <p>
+    直接删对象是不可逆的。更稳的做法是先移到 <code>trash/</code> 前缀下，
+    再用存储的生命周期规则「trash/ 下的对象 30 天后自动删除」。<br>
+    这样误删有 30 天的后悔窗口，而且不用你写代码去做最终清理。
+  </p>
+</div>
+
+<h2 id="cost">成本</h2>
+
+<div class="tw">
+<table>
+  <tr><th>费用项</th><th>说明</th></tr>
+  <tr><td>存储量</td><td>按 GB·月计。派生图（缩略图）会让总量翻倍甚至三倍，别忘了算进去</td></tr>
+  <tr><td>出站流量</td><td><strong>通常是最贵的一项</strong>。S3 出站流量费远高于存储费；R2 免出站费，这是它最大的卖点</td></tr>
+  <tr><td>请求数</td><td>PUT 通常比 GET 贵一个数量级。别在循环里频繁小写入</td></tr>
+  <tr><td>处理</td><td>按需生成图片时，CPU 时间也是钱（见上面的参数白名单）</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 控制成本的三招</div>
+  <ol>
+    <li><strong>CDN 缓存。</strong>派生图设 <code>immutable</code> 长缓存（第 19 章），
+        绝大部分请求根本到不了对象存储。</li>
+    <li><strong>该删就删。</strong>孤儿清理 + 生命周期规则。</li>
+    <li><strong>按用户配额。</strong>不设上限的话，一个用户就能把你的账单顶穿。</li>
+  </ol>
+</div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>URL 是长期承诺。全小写、连字符分词、不暴露技术细节、层级反映结构。</li>
-  <li>路径参数支持正则约束，用它把非法请求挡在处理函数之外。</li>
-  <li>具体路由写在通配路由前面。</li>
-  <li>用 <code>app.route()</code> 拆分子应用，用链式写法保住类型信息。</li>
-  <li>子域名要自己判断 <code>host</code>；子域名对 SEO 不友好，留给 API 和后台。</li>
-  <li>Hono 的多路由器机制默认就是最优解，不确定就别换预设。</li>
+  <li>让文件<strong>不经过你的服务器</strong>：签发短期 URL 让浏览器直传对象存储。</li>
+  <li>签发<em>之前</em>校验类型、大小、配额；传完<em>之后</em>服务端 <code>head()</code> 核实。</li>
+  <li>存储键由服务端生成（<code>u/{userId}/{uuid}.ext</code>），原始文件名只用于显示和下载。</li>
+  <li>私有文件放私有桶 + 签名 URL；「猜不到的 URL」不是访问控制。</li>
+  <li>图片预生成几个固定尺寸；按需生成必须限制参数取值，否则是账单炸弹。</li>
+  <li>用文件头判断真实类型；剥离 EXIF；用独立域名承载用户内容。</li>
+  <li>大文件用分片上传，并配生命周期规则清理未完成的分片。</li>
+  <li>孤儿文件必须有定时清理，删除时<strong>先删文件后删记录</strong>。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>把云雀旅行的路由按 <code>vacations</code> / <code>api</code> / <code>admin</code> 拆成三个子应用，用 <code>app.route()</code> 挂载。全部用链式写法。</li>
-    <li>加一条 <code>/vacations/:region/:slug</code> 路由，并确保 <code>/vacations/new</code> 仍然能进到「新建」页面。</li>
-    <li>给 <code>/orders/:id</code> 加上数字约束，然后访问 <code>/orders/abc</code>，确认返回的是 404 而不是处理函数里的报错。</li>
-    <li>用 <code>showRoutes(app)</code> 打印路由表，检查有没有你意料之外的重复或遮蔽。</li>
-    <li>为你的项目写一份「URL 规划」文档，列出所有计划中的路径。想一想哪些两年后可能要改。</li>
+    <li>把第 8 章那个「经过服务器」的上传改成预签名直传。在浏览器 Network 面板确认文件请求的目标域名不是你的服务器。</li>
+    <li>拿到签名 URL 后，故意用它上传一个比声明大得多的文件，然后调 complete。确认服务端拒绝了并清理掉了文件。</li>
+    <li>实现 <code>sniffType</code>，把一个 <code>.txt</code> 改名成 <code>.jpg</code> 上传，确认被识别出来。</li>
+    <li>做一个私有文件端点，用另一个账号的登录态去访问，确认返回 403。再检查响应头有没有 <code>no-store</code>。</li>
+    <li>写孤儿清理任务。先手动造几条 pending 记录，把创建时间改成两天前，跑一遍看是否被清掉。</li>
+    <li>算一笔账：如果 1 万个用户各传 20 张 3 MB 的照片，每张生成 3 个尺寸，总存储是多少？按你选的服务商，一个月多少钱？</li>
   </ol>
 </div>
 

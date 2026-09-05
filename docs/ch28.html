@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 28 章 · 维护 — Hono 全栈开发教程</title>
+<title>第 28 章 · 可观测性 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="28">
@@ -12,444 +12,702 @@
 <main>
 
 <span class="chapter-eyebrow">第 28 章</span>
-<h1>维护</h1>
+<h1>可观测性</h1>
 <p class="lede">
-  上线不是终点。一个项目八成的生命周期是在上线之后度过的。
-  这一章讲怎么让它活过三年 —— 而不是变成一个没人敢碰的黑箱。
+  下一章讲调试 —— 那是你已经知道哪里坏了之后的事。
+  这一章讲更前面的一步：<strong>怎么让系统自己告诉你哪里不对</strong>，
+  在用户投诉之前，在你还没意识到有问题之前。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>为项目制定一个符合实际的长期计划</li>
-    <li>建立依赖更新的日常节奏，避免「三年不动，一动就崩」</li>
-    <li>识别并处理技术债</li>
-    <li>让「隐形故障」显形</li>
-    <li>把重复的代码提炼成可复用的中间件和库</li>
+    <li>分清「监控」和「可观测性」，知道后者多解决了什么问题</li>
+    <li>掌握三大支柱：日志、指标、追踪，各自回答什么问题</li>
+    <li>用 RED 方法设计服务指标</li>
+    <li>用 SLO 和错误预算把「好不好」变成一个可以争论的数字</li>
+    <li>设计不会让人麻木的告警</li>
+    <li>在 Hono 里把这一套落地</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="plan">先想清楚这个项目要活多久</h2>
+<h2 id="what">监控 vs 可观测性</h2>
 
 <p>
-  不同寿命的项目，值得投入的维护成本完全不同。上线前就该说清楚：
+  <strong>监控</strong>回答你<em>预先想到</em>的问题：CPU 超过 80% 了吗？错误率超过 1% 了吗？
+  你事先列出一堆指标，盯着它们。
+</p>
+<p>
+  <strong>可观测性</strong>回答你<em>没想到</em>的问题：
+  「为什么只有华南地区的安卓用户在下午三点下单会失败？」
+  这个问题你不可能提前配一个仪表盘，但系统里必须留下足够的线索让你能<em>事后</em>问出来。
 </p>
 
-<div class="tw">
-<table>
-  <tr><th>类型</th><th>预期寿命</th><th>该做什么</th></tr>
-  <tr>
-    <td>活动页 / 一次性项目</td>
-    <td>几周到几个月</td>
-    <td>写好下线日期。<strong>到期真的下线</strong>，不要让它变成没人管的僵尸</td>
-  </tr>
-  <tr>
-    <td>内部工具</td>
-    <td>一到三年</td>
-    <td>基本的测试和文档。明确写出「谁负责」</td>
-  </tr>
-  <tr>
-    <td>核心产品</td>
-    <td>多年</td>
-    <td>完整的测试、监控、依赖更新流程、值班机制</td>
-  </tr>
-</table>
+<div class="box key">
+  <div class="t">&#9733; 一句话区分</div>
+  <p>
+    监控告诉你<strong>「有问题」</strong>，可观测性让你能查出<strong>「什么问题」</strong>。<br>
+    前者是有限个预设的仪表盘，后者是能任意切片、任意下钻的原始数据。
+    <em>小项目先做好监控就够；一旦系统复杂到「不知道该看哪个仪表盘」，就需要可观测性了。</em>
+  </p>
+</div>
+
+<h2 id="pillars">三大支柱</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="日志、指标、追踪三大支柱">
+  <rect class="bx-b" x="20" y="20" width="230" height="200" rx="10"/>
+  <text class="ttl on-b" x="135" y="46" text-anchor="middle">日志 Logs</text>
+  <text class="sm on-b" x="36" y="72">回答：那一刻发生了什么？</text>
+  <text class="sm" x="36" y="98">离散的事件记录</text>
+  <text class="sm" x="36" y="118">信息最全，能带任意字段</text>
+  <text class="sm" x="36" y="138">适合：查一个具体请求</text>
+  <text class="sm on-r" x="36" y="164">代价最高：</text>
+  <text class="sm on-r" x="36" y="182">量大、存储贵、检索慢</text>
+  <text class="sm" x="36" y="206">「用户 u_9 的订单为什么失败」</text>
+
+  <rect class="bx-a" x="266" y="20" width="230" height="200" rx="10"/>
+  <text class="ttl on-a" x="381" y="46" text-anchor="middle">指标 Metrics</text>
+  <text class="sm on-a" x="282" y="72">回答：整体健康吗？</text>
+  <text class="sm" x="282" y="98">聚合后的数字，随时间变化</text>
+  <text class="sm" x="282" y="118">极其便宜，可以长期保留</text>
+  <text class="sm" x="282" y="138">适合：告警、趋势、容量规划</text>
+  <text class="sm on-r" x="282" y="164">代价：</text>
+  <text class="sm on-r" x="282" y="182">丢失了单个请求的细节</text>
+  <text class="sm" x="282" y="206">「过去一小时错误率 2.3%」</text>
+
+  <rect class="bx-p" x="512" y="20" width="228" height="200" rx="10"/>
+  <text class="ttl on-p" x="626" y="46" text-anchor="middle">追踪 Traces</text>
+  <text class="sm on-p" x="528" y="72">回答：慢在哪一段？</text>
+  <text class="sm" x="528" y="98">一个请求穿过所有组件的路径</text>
+  <text class="sm" x="528" y="118">每段耗时一目了然</text>
+  <text class="sm" x="528" y="138">适合：定位性能瓶颈</text>
+  <text class="sm on-r" x="528" y="164">代价：</text>
+  <text class="sm on-r" x="528" y="182">要埋点，通常要采样</text>
+  <text class="sm" x="528" y="206">「2 秒里 1.8 秒在调支付」</text>
+
+  <rect class="bx-g" x="20" y="234" width="720" height="56" rx="10"/>
+  <text class="ttl on-g" x="380" y="256" text-anchor="middle">把它们串起来的东西：请求 ID</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">指标告警 → 用 trace 找到最慢的那个请求 → 用它的请求 ID 捞出全部日志。这条链路必须打通</text>
+</svg>
+<figcaption>图 28-1　三者不是替代关系，而是从「宏观」到「微观」的三个不同焦距</figcaption>
+</figure>
+
+<h2 id="logs">日志：写给机器看</h2>
+
+<p>第 12 章已经引入了结构化日志。这里把它做扎实。</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 写给人看</div>
+    <div class="code" data-lang="text"><pre>
+用户 u_9 的订单 o_123 创建失败：
+库存不足
+
+无法检索、无法聚合、
+无法按用户过滤
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 写给机器看</div>
+    <div class="code" data-lang="json"><pre>
+{
+  "level": "warn",
+  "msg": "order_failed",
+  "reason": "out_of_stock",
+  "userId": "u_9",
+  "orderId": "o_123",
+  "sku": "HR199",
+  "requestId": "5f3a...",
+  "traceId": "9b2c...",
+  "time": "2026-09-07T10:00:01Z"
+}
+</pre></div>
+  </div>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 「没有计划」也是一种计划，而且是最糟的那种</div>
+  <div class="t">&#9733; 关键差别：<code>msg</code> 是一个<strong>固定的标识符</strong></div>
   <p>
-    最常见的情况是：一个「临时」项目上线了，三年后它变成了业务关键系统，
-    但从来没人给过它测试、文档或维护预算。原作者早就离职了，
-    没人知道它怎么部署，也没人敢改它。<br>
-    <strong>在 README 里写一句「这个项目预期服务到 X 时间，负责人是 Y」，
-    成本是一分钟，价值是三年。</strong>
+    不要写 <code>"用户 u_9 的订单创建失败"</code>，而要写
+    <code>msg: "order_failed"</code> 加上独立的字段。<br>
+    这样你才能查询「过去 24 小时所有 <code>order_failed</code> 且 <code>reason=out_of_stock</code> 的记录，
+    按 sku 分组」。把变量拼进消息文本里，这个查询就永远做不了。
   </p>
 </div>
 
-<h2 id="deps">依赖更新</h2>
+<h3>一个够用的日志器</h3>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="定期小更新与长期不更新的对比">
-  <rect class="bx-g" x="20" y="20" width="345" height="180" rx="10"/>
-  <text class="ttl on-g" x="192" y="44" text-anchor="middle">每周花 15 分钟</text>
-  <text class="sm" x="36" y="72">每次只升几个小版本</text>
-  <text class="sm" x="36" y="94">改动小，出问题一眼能看出是谁</text>
-  <text class="sm" x="36" y="116">CHANGELOG 短，读得完</text>
-  <text class="sm" x="36" y="138">出事了容易回滚</text>
-  <text class="sm on-g" x="36" y="168">安全补丁及时到位</text>
-  <text class="sm on-g" x="36" y="188">年成本：约 13 小时</text>
-
-  <rect class="bx-r" x="395" y="20" width="345" height="180" rx="10"/>
-  <text class="ttl on-r" x="567" y="44" text-anchor="middle">两年不动一次</text>
-  <text class="sm" x="411" y="72">几十个包跨了多个大版本</text>
-  <text class="sm" x="411" y="94">破坏性变更堆在一起</text>
-  <text class="sm" x="411" y="116">升级 A 要求先升 B，B 又和 C 冲突</text>
-  <text class="sm" x="411" y="138">出了问题不知道是哪个包引起的</text>
-  <text class="sm on-r" x="411" y="168">期间一直带着已知漏洞在跑</text>
-  <text class="sm on-r" x="411" y="188">一次成本：两周起，而且很痛苦</text>
-</svg>
-<figcaption>图 28-1　依赖更新的成本不是线性的，是指数的</figcaption>
-</figure>
-
-<div class="code" data-lang="bash">
+<div class="code" data-lang="ts" data-file="src/lib/logger.ts">
 <pre>
-# 看看有哪些可以升
-npm outdated
+type Level = 'debug' | 'info' | 'warn' | 'error'
 
-# 安全漏洞
-npm audit
-npm audit fix
+const LEVELS: Record&lt;Level, number&gt; = { debug: 10, info: 20, warn: 30, error: 40 }
+const MIN = LEVELS[(process.env.LOG_LEVEL as Level) ?? 'info']
 
-# 交互式升级（推荐，能看清每个包跨了几个版本）
-npx npm-check-updates -i
-</pre>
-</div>
+/** 绝不能进日志的字段名 */
+const REDACT = new Set([
+  'password', 'passwordHash', 'token', 'accessToken', 'refreshToken',
+  'authorization', 'cookie', 'secret', 'apiKey', 'creditCard', 'cvv', 'idCard',
+])
 
-<p>更好的做法是让机器人来提醒你。GitHub 自带的 Dependabot 配一个文件就行：</p>
-
-<div class="code" data-lang="yaml" data-file=".github/dependabot.yml">
-<pre>
-version: 2
-updates:
-  - package-ecosystem: npm
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # 把小版本更新合并成一个 PR，减少噪音
-      minor-and-patch:
-        update-types: ["minor", "patch"]
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 有测试，升级才敢点合并</div>
-  <p>
-    Dependabot 开的 PR 会自动跑你的 CI。如果测试是绿的，
-    小版本更新基本可以直接合并；大版本更新则需要人工看 CHANGELOG。<br>
-    <strong>没有测试的项目，依赖更新只能靠祈祷。</strong>这是第 5 章那些测试的长期回报。
-  </p>
-</div>
-
-<h3>Node 和运行时版本</h3>
-
-<p>
-  Node.js 的 LTS 版本大约 30 个月后停止支持。到期后不再有安全补丁 ——
-  这不是「可以拖一拖」的事。在 <code>package.json</code> 里声明你支持的版本，
-  并在日历上标好升级时间：
-</p>
-
-<div class="code" data-lang="json">
-<pre>
-{
-  "engines": { "node": "&gt;=20.0.0" }
+function scrub(obj: Record&lt;string, unknown&gt;): Record&lt;string, unknown&gt; {
+  const out: Record&lt;string, unknown&gt; = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (REDACT.has(k)) out[k] = '[已脱敏]'
+    else if (v &amp;&amp; typeof v === 'object' &amp;&amp; !Array.isArray(v)) out[k] = scrub(v as never)
+    else out[k] = v
+  }
+  return out
 }
-</pre>
-</div>
 
-<h2 id="debt">技术债</h2>
+export function log(level: Level, msg: string, fields: Record&lt;string, unknown&gt; = {}) {
+  if (LEVELS[level] &lt; MIN) return
+  console.log(JSON.stringify({ level, msg, time: new Date().toISOString(), ...scrub(fields) }))
+}
 
-<p>
-  技术债不全是坏事。为了赶上线期而临时写的糙代码，是<strong>主动借的债</strong> ——
-  只要你记得它存在，并且打算还。
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-// TODO(2026-03): 支持多币种后要重构这里
-// FIXME: 大数据量下这个查询会超时，需要加分页。见 issue #142
-// HACK: 临时绕过第三方接口的 bug，对方修复后（预计 4 月）删掉这段
+/** 绑定一组固定字段，后续每条日志自动带上 */
+export function child(base: Record&lt;string, unknown&gt;) {
+  return (level: Level, msg: string, fields: Record&lt;string, unknown&gt; = {}) =&gt;
+    log(level, msg, { ...base, ...fields })
+}
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 不带上下文的 TODO 等于垃圾</div>
+  <div class="t">&#9888; 主动脱敏，不要靠自觉</div>
   <p>
-    <code>// TODO: 优化一下</code> —— 优化什么？谁写的？还需要吗？<br>
-    三年后没人敢删（万一有用呢），也没人会做（不知道要做什么）。<br>
-    <strong>每条 TODO 要包含：要做什么、为什么、什么时候、关联的 issue 编号。</strong>
-    做不到就别写，直接开个 issue。
+    「我不会把密码打进日志」这个假设总有一天会被打破 —— 通常是某天有人写了
+    <code>log('debug', 'req_body', body)</code> 来排查问题，然后忘了删。<br>
+    <strong>把脱敏做进日志器本身</strong>，让它成为默认行为。日志会被很多人看到、
+    同步到第三方、保留很久 —— 一旦写进去就等于泄露。
   </p>
 </div>
 
-<h3>什么时候该还债</h3>
+<h3>请求级中间件</h3>
+
+<div class="code" data-lang="ts" data-file="src/middleware/observability.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+import { child } from '../lib/logger'
+
+export const observability = createMiddleware&lt;{
+  Variables: { log: ReturnType&lt;typeof child&gt;; requestId: string; traceId: string }
+}&gt;(async (c, next) =&gt; {
+  // 上游传来的 trace id 要延续，没有才新建 —— 这是跨服务串联的关键
+  const traceId = c.req.header('x-trace-id') ?? crypto.randomUUID()
+  const requestId = c.req.header('x-request-id') ?? crypto.randomUUID()
+
+  const logger = child({ requestId, traceId })
+  c.set('log', logger)
+  c.set('requestId', requestId)
+  c.set('traceId', traceId)
+
+  const start = Date.now()
+
+  try {
+    await next()
+  } catch (err) {
+    logger('error', 'request_error', { error: String(err) })
+    throw err
+  } finally {
+    const durationMs = Date.now() - start
+    const status = c.res.status
+
+    logger(status &gt;= 500 ? 'error' : status &gt;= 400 ? 'warn' : 'info', 'request', {
+      method: c.req.method,
+      // 用路由模式而不是实际路径 —— 否则 /orders/o_1、/orders/o_2 会变成无数个不同的值
+      route: c.req.routePath,
+      path: c.req.path,
+      status,
+      durationMs,
+      userId: c.get('user')?.id,
+    })
+  }
+
+  c.res.headers.set('X-Request-Id', requestId)
+})
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 用 <code>routePath</code> 而不是 <code>path</code> 做聚合维度</div>
+  <p>
+    <code>/vacations/hood-river</code>、<code>/vacations/oregon-coast</code>……
+    如果按实际路径统计，你会得到成千上万个只出现过几次的指标 ——
+    这叫<strong>高基数问题</strong>，会撑爆监控系统的存储和查询。<br>
+    <code>c.req.routePath</code> 返回的是 <code>/vacations/:slug</code>，
+    是<em>有限</em>的一组值。<strong>把它当聚合维度，把具体路径放进日志字段。</strong>
+  </p>
+</div>
+
+<h3>把请求 ID 交给用户</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+app.onError((err, c) =&gt; {
+  const requestId = c.get('requestId')
+  c.get('log')('error', 'unhandled_error', { error: String(err), stack: err.stack })
+
+  return c.html(
+    &lt;ErrorPage&gt;
+      &lt;p&gt;服务器出了点问题，我们已经记录下来了。&lt;/p&gt;
+      &lt;p&gt;如需帮助，请把这个编号告诉客服：&lt;code&gt;{requestId}&lt;/code&gt;&lt;/p&gt;
+    &lt;/ErrorPage&gt;,
+    500
+  )
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 这一招的价值远超它的成本</div>
+  <p>
+    用户报错时说「刚才下单失败了」——你要在几百万条日志里大海捞针。<br>
+    用户报错时说「编号 5f3a-9b2c」——<strong>一次查询直接定位到那个请求的全部上下文</strong>。<br>
+    十行代码，把排查时间从两小时降到两分钟。
+  </p>
+</div>
+
+<h2 id="metrics">指标：RED 方法</h2>
+
+<p>
+  指标该测什么？对于「请求驱动」的服务，有一个久经考验的极简答案：<strong>RED</strong>。
+</p>
 
 <div class="tw">
 <table>
-  <tr><th>信号</th><th>说明</th></tr>
-  <tr><td>同一个地方反复出 bug</td><td>这里的设计有问题，不只是这次写错了</td></tr>
-  <tr><td>「改这个要小心，会牵一发动全身」</td><td>耦合太紧，该拆了</td></tr>
-  <tr><td>估一个小需求要三天</td><td>不是需求复杂，是代码在阻碍你</td></tr>
-  <tr><td>新人上手要两周</td><td>结构不清晰或文档缺失</td></tr>
-  <tr><td>没人敢碰某个文件</td><td>最危险的信号。它迟早会炸</td></tr>
+  <tr><th>字母</th><th>指标</th><th>回答的问题</th></tr>
+  <tr><td><strong>R</strong>ate</td><td>每秒请求数</td><td>流量多大？突然掉到 0 了吗？</td></tr>
+  <tr><td><strong>E</strong>rrors</td><td>失败请求数 / 比例</td><td>有多少用户在报错？</td></tr>
+  <tr><td><strong>D</strong>uration</td><td>响应时间分布</td><td>用户要等多久？</td></tr>
 </table>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 别搞「重构冲刺」</div>
-  <p>
-    「我们花两周专门重构」这种计划几乎总是失败：它没有产出可见价值，
-    第一个紧急需求来了就被砍掉，留下一堆半成品，比原来更乱。<br>
-    <strong>更有效的是「童子军规则」：每次经过一段代码，让它比你来的时候好一点点。</strong>
-    改 bug 时顺手补个测试，加功能时顺手拆掉一个太长的函数。积少成多，而且永远不会被砍。
-  </p>
-</div>
-
-<h2 id="invisible">让隐形故障显形</h2>
-
 <p>
-  最危险的故障是那种「网站看起来一切正常」的故障：
+  这三个按 <code>route</code> 和 <code>status</code> 拆开，就能覆盖绝大多数「服务是否健康」的问题。
 </p>
 
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128231;</span><h4>邮件停了</h4>
-    <p>API Key 过期，发信全部失败，但代码里 catch 住了没抛出来。用户注册后收不到确认邮件，也没人报告。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128179;</span><h4>支付回调失败</h4>
-    <p>用户付了钱，但你的系统没收到通知，订单一直是「待支付」。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128200;</span><h4>数据没同步</h4>
-    <p>定时任务在两个月前就悄悄失败了，报表数据一直停在那天。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128190;</span><h4>备份停了</h4>
-    <p>存储桶权限变了，备份任务每次都失败。等到需要恢复时才发现。</p>
-  </div>
+<div class="box warn">
+  <div class="t">&#9888; 永远不要看平均响应时间</div>
+  <p>
+    100 个请求，99 个花 10 ms，1 个花 5 秒。平均值是 60 ms —— 看起来很健康，
+    但有 1% 的用户体验糟糕透顶。<br>
+    <strong>要看分位数</strong>：p50（一半用户的体验）、p95、p99（最差的那批人）。
+    第 12 章压测时已经强调过一次，在线上监控里同样成立。
+    <em>而且请求量越大，p99 影响的绝对人数越多。</em>
+  </p>
+</div>
+
+<h3>记录指标</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 最省事的做法：从结构化日志里派生指标
+// 日志平台（Axiom、Datadog、Grafana Loki）都支持基于日志字段做聚合，
+// 于是你不用额外埋点，上面那条 msg="request" 的日志就够算出 RED 了
+
+// 需要更细的自定义指标时再单独记录
+c.get('log')('info', 'metric', {
+  metric: 'checkout_amount',
+  value: order.total,
+  currency: order.currency,
+})
+
+// 业务指标同样重要 —— 技术指标全绿但没人下单，也是故障
+c.get('log')('info', 'metric', { metric: 'order_created', value: 1, sku: order.sku })
+</pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 解法：监控「应该发生的事」，而不只是「不该发生的事」</div>
+  <div class="t">&#9733; 业务指标往往比技术指标更早发现问题</div>
   <p>
-    错误监控只能发现「发生了错误」。但上面这些故障的特征是<strong>什么都没发生</strong>。
-    所以要反过来监控：
+    支付回调因为一个配置错误全部失败 —— CPU 正常、内存正常、错误率正常
+    （因为回调的 5xx 是<em>对方</em>看到的，你这边只是没收到请求）。<br>
+    唯一的异常信号是：<strong>「过去一小时成功支付订单数 = 0」</strong>。<br>
+    <em>这就是第 31 章「隐形故障」的核心 —— 要监控「应该发生的事」。</em>
   </p>
-  <ul>
-    <li><strong>心跳</strong>：定时任务每次成功后 ping 一个监控服务（如 Healthchecks.io）。
-        超时没收到 ping 就告警。</li>
-    <li><strong>业务指标</strong>：「过去一小时的订单数为 0」在半夜可能正常，在中午一定是出事了。</li>
-    <li><strong>合成监控</strong>：定期用脚本走一遍关键流程（注册 → 下单 → 收邮件），确认端到端是通的。</li>
-  </ul>
+</div>
+
+<h2 id="traces">追踪</h2>
+
+<p>
+  当一个请求要经过网关 → 你的服务 → 数据库 → 第三方 API → 队列时，
+  「慢了 2 秒」这句话毫无信息量。追踪把这 2 秒拆开：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="一个请求的 trace 瀑布图">
+  <text class="ttl" x="20" y="22">trace 9b2c… ：POST /api/v1/orders　总耗时 2140 ms</text>
+
+  <path class="ln-d" d="M170 34 V226"/>
+  <path class="ln-d" d="M700 34 V226"/>
+  <text class="sm" x="170" y="246" text-anchor="middle">0 ms</text>
+  <text class="sm" x="700" y="246" text-anchor="middle">2140 ms</text>
+
+  <text class="sm" x="20" y="56">HTTP 处理</text>
+  <rect class="bx-a" x="170" y="42" width="528" height="20" rx="4"/>
+
+  <text class="sm" x="20" y="84">　校验参数</text>
+  <rect class="bx-g" x="174" y="70" width="12" height="20" rx="3"/>
+  <text class="sm" x="196" y="84">8 ms</text>
+
+  <text class="sm" x="20" y="112">　查用户</text>
+  <rect class="bx-g" x="188" y="98" width="26" height="20" rx="3"/>
+  <text class="sm" x="224" y="112">22 ms</text>
+
+  <text class="sm" x="20" y="140">　写订单（事务）</text>
+  <rect class="bx-g" x="216" y="126" width="42" height="20" rx="3"/>
+  <text class="sm" x="268" y="140">45 ms</text>
+
+  <text class="sm on-r" x="20" y="168">　调支付接口</text>
+  <rect class="bx-r" x="260" y="154" width="420" height="20" rx="3"/>
+  <text class="sm on-r" x="450" y="168" text-anchor="middle">1840 ms　←　瓶颈在这里</text>
+
+  <text class="sm" x="20" y="196">　投递队列</text>
+  <rect class="bx-g" x="682" y="182" width="14" height="20" rx="3"/>
+  <text class="sm" x="702" y="196">12 ms</text>
+
+  <rect class="bx-d" x="20" y="210" width="720" height="24" rx="6"/>
+  <text class="sm" x="380" y="227" text-anchor="middle">没有 trace 时你只知道「慢」；有了 trace，问题在第一眼就锁定了</text>
+</svg>
+<figcaption>图 28-2　每一段叫一个 span，span 之间有父子关系，构成一棵树</figcaption>
+</figure>
+
+<h3>手工实现一个够用的版本</h3>
+
+<div class="code" data-lang="ts" data-file="src/lib/trace.ts">
+<pre>
+type Span = { name: string; startMs: number; endMs?: number; attrs: Record&lt;string, unknown&gt; }
+
+export function createTracer(traceId: string) {
+  const spans: Span[] = []
+
+  async function span&lt;T&gt;(
+    name: string,
+    fn: () =&gt; Promise&lt;T&gt;,
+    attrs: Record&lt;string, unknown&gt; = {}
+  ): Promise&lt;T&gt; {
+    const s: Span = { name, startMs: Date.now(), attrs }
+    spans.push(s)
+    try {
+      return await fn()
+    } catch (err) {
+      s.attrs.error = String(err)
+      throw err
+    } finally {
+      s.endMs = Date.now()
+    }
+  }
+
+  function flush() {
+    log('info', 'trace', {
+      traceId,
+      spans: spans.map((s) =&gt; ({
+        name: s.name,
+        durationMs: (s.endMs ?? Date.now()) - s.startMs,
+        ...s.attrs,
+      })),
+    })
+  }
+
+  return { span, flush }
+}
+</pre>
 </div>
 
 <div class="code" data-lang="ts">
 <pre>
-// 定时任务的心跳
-export async function syncDailyReports(env: Env) {
+app.post('/api/v1/orders', async (c) =&gt; {
+  const t = createTracer(c.get('traceId'))
+
   try {
-    await doTheWork()
-    // 成功了才 ping
-    await fetch(env.HEARTBEAT_URL)
-  } catch (err) {
-    reportToSentry(err)
-    throw err     // 让平台知道这次执行失败了
+    const user = await t.span('db.get_user', () =&gt; getUser(userId))
+    const order = await t.span('db.create_order', () =&gt; createOrder(user, body))
+    await t.span('payment.charge', () =&gt; chargeCard(order), { provider: 'stripe' })
+    await t.span('queue.send', () =&gt; c.env.TASKS.send({ type: 'send-order-email' }))
+    return c.json({ orderId: order.id }, 201)
+  } finally {
+    t.flush()
   }
-}
-</pre>
-</div>
-
-<h2 id="reuse">提炼可复用的东西</h2>
-
-<p>
-  维护期最常做的一件事，是发现「这段逻辑我已经写第三遍了」。
-  Hono 里最自然的复用单位是<strong>中间件</strong>：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/middleware/pagination.ts">
-<pre>
-import { createMiddleware } from 'hono/factory'
-import { z } from 'zod'
-
-const schema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  perPage: z.coerce.number().int().min(1).max(100).default(20),
 })
-
-export const pagination = createMiddleware&lt;{
-  Variables: { pagination: { limit: number; offset: number } }
-}&gt;(async (c, next) =&gt; {
-  const parsed = schema.safeParse(c.req.query())
-  if (!parsed.success) {
-    return c.json({ error: { message: '分页参数不合法' } }, 400)
-  }
-
-  const { page, perPage } = parsed.data
-  c.set('pagination', { limit: perPage, offset: (page - 1) * perPage })
-
-  await next()
-})
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// 现在所有列表接口都能直接用
-app.get('/api/v1/vacations', pagination, async (c) =&gt; {
-  const { limit, offset } = c.get('pagination')
-  const data = await repo.list({ limit, offset })
-  return c.json({ data })
-})
-</pre>
-</div>
-
-<h3>什么时候抽出去</h3>
-
-<div class="box tip">
-  <div class="t">&#128161; 三次规则</div>
-  <p>
-    第一次写：就那么写。<br>
-    第二次写：注意到了，但还不动 —— 两处相似不代表它们会一直相似。<br>
-    <strong>第三次写：抽出来。</strong>这时候你已经见过三个变体，
-    知道哪些部分是真的通用，哪些应该做成参数。<br>
-    <em>过早抽象的代价，往往比重复更高。</em>
-  </p>
-</div>
-
-<h3>跨项目复用</h3>
-
-<p>
-  如果你有多个 Hono 项目共用同一套中间件，可以发成私有 npm 包：
-</p>
-
-<div class="code" data-lang="json" data-file="package.json">
-<pre>
-{
-  "name": "@meadowlark/hono-kit",
-  "version": "1.2.0",
-  "type": "module",
-  "exports": {
-    "./pagination": "./dist/pagination.js",
-    "./session": "./dist/session.js",
-    "./rate-limit": "./dist/rate-limit.js"
-  },
-  "peerDependencies": { "hono": "^4.0.0" }
-}
 </pre>
 </div>
 
 <div class="box note">
-  <div class="t">&#9432; 注意 <code>peerDependencies</code></div>
+  <div class="t">&#9432; 什么时候该上 OpenTelemetry</div>
   <p>
-    共享库不应该把 <code>hono</code> 列进 <code>dependencies</code>，否则项目里会装两份 Hono，
-    导致类型不兼容和奇怪的运行时问题。用 <code>peerDependencies</code> 声明「我需要宿主项目提供 Hono」。
+    上面这个手写版本对单体服务完全够用，而且零依赖。<br>
+    当你有<strong>多个服务互相调用</strong>时，才需要 <a href="https://opentelemetry.io">OpenTelemetry</a>
+    —— 它的价值在于标准化的<strong>上下文传播</strong>（把 trace id 通过
+    <code>traceparent</code> 请求头自动带到下游服务），这样一条 trace 能跨越整个系统。
+    Hono 有 <code>@hono/otel</code> 中间件可以直接接。
   </p>
 </div>
 
-<h2 id="docs">文档</h2>
+<div class="code" data-lang="ts">
+<pre>
+// 调用下游服务时，把 trace 上下文传下去
+await fetch(downstreamUrl, {
+  headers: {
+    'X-Trace-Id': c.get('traceId'),        // 自己的简易方案
+    // 或标准的 W3C 格式：
+    // traceparent: `00-${traceId}-${spanId}-01`,
+  },
+})
+</pre>
+</div>
+
+<h2 id="slo">SLO 与错误预算</h2>
 
 <p>
-  文档不用多，但有几样是必须的。而且要放在<strong>代码仓库里</strong>，
-  这样它才会跟着代码一起演进：
+  「我们的服务稳定吗？」这个问题没法争论，因为没有共同标准。
+  SLO 把它变成一个数字。
 </p>
 
 <div class="tw">
 <table>
-  <tr><th>文件</th><th>回答什么问题</th></tr>
-  <tr><td><code>README.md</code></td><td>这是什么？怎么在本地跑起来？（新人第一天要看的）</td></tr>
-  <tr><td><code>CONTRIBUTING.md</code></td><td>怎么提交改动？分支怎么命名？提交信息什么格式？</td></tr>
-  <tr><td><code>docs/architecture.md</code></td><td>系统由哪几块组成？数据怎么流动？</td></tr>
-  <tr><td><code>docs/runbook.md</code></td><td><strong>半夜出故障时看的</strong>：怎么回滚？日志在哪？谁能联系上？</td></tr>
-  <tr><td><code>docs/decisions/</code></td><td>为什么选了 A 而不是 B？（避免三年后有人重新纠结同一个问题）</td></tr>
+  <tr><th>概念</th><th>含义</th><th>例子</th></tr>
+  <tr><td><strong>SLI</strong> 指标</td><td>你实际测量的那个数</td><td>成功请求数 ÷ 总请求数</td></tr>
+  <tr><td><strong>SLO</strong> 目标</td><td>你承诺达到的水平</td><td>30 天内成功率 ≥ 99.9%</td></tr>
+  <tr><td><strong>错误预算</strong></td><td>SLO 允许你失败的额度</td><td>30 天内可以失败 0.1%</td></tr>
 </table>
 </div>
 
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="错误预算的消耗">
+  <text class="ttl" x="20" y="22">SLO = 99.9%　→　30 天里允许约 43 分钟不可用</text>
+
+  <rect class="bx-d" x="20" y="36" width="720" height="34" rx="6"/>
+  <rect class="bx-g" x="20" y="36" width="300" height="34" rx="6"/>
+  <rect class="bx-a" x="320" y="36" width="180" height="34" rx="6"/>
+  <text class="sm on-g" x="170" y="58" text-anchor="middle">已用 32%</text>
+  <text class="sm on-a" x="410" y="58" text-anchor="middle">本次事故又用掉 20%</text>
+  <text class="sm" x="620" y="58" text-anchor="middle">剩余 48%</text>
+
+  <rect class="bx-g" x="20" y="90" width="350" height="130" rx="10"/>
+  <text class="ttl on-g" x="36" y="114">预算充足时</text>
+  <text class="sm" x="36" y="140">· 可以大胆发新功能</text>
+  <text class="sm" x="36" y="162">· 可以做有风险的重构</text>
+  <text class="sm" x="36" y="184">· 可以加快发布节奏</text>
+  <text class="sm on-g" x="36" y="210">「稳定性有余量，拿它换速度」</text>
+
+  <rect class="bx-r" x="390" y="90" width="350" height="130" rx="10"/>
+  <text class="ttl on-r" x="406" y="114">预算耗尽时</text>
+  <text class="sm" x="406" y="140">· 冻结新功能发布</text>
+  <text class="sm" x="406" y="162">· 全员转去修稳定性问题</text>
+  <text class="sm" x="406" y="184">· 直到预算恢复</text>
+  <text class="sm on-r" x="406" y="210">「这是事先约定好的规则，不是临时吵架」</text>
+</svg>
+<figcaption>图 28-3　错误预算把「稳定 vs 速度」的争论变成了一条预先商定的规则</figcaption>
+</figure>
+
 <div class="box key">
-  <div class="t">&#9733; 记录「为什么」，而不是「是什么」</div>
+  <div class="t">&#9733; 别把 SLO 定成 100%</div>
   <p>
-    「这里用了 Drizzle」—— 看代码就知道，不用写。<br>
-    「<strong>为什么</strong>用 Drizzle 而不是 Prisma：因为要跑在 Cloudflare Workers 上，
-    Prisma 当时的边缘支持还不成熟」—— 这个必须写。<br>
-    代码能表达「是什么」，只有文档能保存「为什么」。而「为什么」恰恰是最容易随人流失的东西。
+    100% 可用意味着<strong>任何变更都不能做</strong>，因为变更就有风险。
+    这不是目标，是瘫痪。<br>
+    而且成本是指数级的：99% → 99.9% 可能只要加个健康检查，
+    99.9% → 99.99% 可能要多区域部署、自动故障转移、24 小时值班 —— 贵几十倍。<br>
+    <strong>先问「用户真的能感知到这个差别吗」，再决定要不要花这个钱。</strong>
   </p>
 </div>
 
-<h2 id="routine">日常节奏</h2>
-
-<div class="box tip">
-  <div class="t">&#128161; 一个可执行的维护清单</div>
-  <p><strong>每周（15 分钟）</strong></p>
-  <ul>
-    <li>处理 Dependabot 的 PR</li>
-    <li>扫一眼错误监控里的新增错误</li>
-    <li>看一眼响应时间趋势有没有异常</li>
-  </ul>
-  <p><strong>每月（1 小时）</strong></p>
-  <ul>
-    <li><code>npm audit</code> 并处理高危项</li>
-    <li>检查证书、API Key、订阅的到期时间</li>
-    <li>看看日志里有没有反复出现但没人管的告警</li>
-  </ul>
-  <p><strong>每季度（半天）</strong></p>
-  <ul>
-    <li>做一次备份恢复演练</li>
-    <li>回顾技术债清单，挑一两项还掉</li>
-    <li>更新 README 和架构文档</li>
-    <li>检查运行时和主要依赖的大版本升级计划</li>
-  </ul>
+<div class="tw">
+<table>
+  <tr><th>可用性</th><th>每月允许不可用</th><th>大致意味着</th></tr>
+  <tr><td>99%</td><td>7 小时 18 分</td><td>个人项目、内部工具</td></tr>
+  <tr><td>99.9%</td><td>43 分钟</td><td><strong>大多数商业应用的合理起点</strong></td></tr>
+  <tr><td>99.99%</td><td>4 分 22 秒</td><td>需要多区域和自动故障转移</td></tr>
+  <tr><td>99.999%</td><td>26 秒</td><td>电信级，成本极高</td></tr>
+</table>
 </div>
 
+<h2 id="alert">告警</h2>
+
+<p>
+  告警设计得不好，后果不是「收不到通知」，而是更糟的 ——
+  <strong>大家开始无视所有通知</strong>。
+</p>
+
 <figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="每周、每月、每季度的维护节奏">
-  <rect class="bx-g" x="20" y="20" width="230" height="240" rx="10"/>
-  <text class="ttl on-g" x="135" y="46" text-anchor="middle">每周 · 15 分钟</text>
-  <text class="sm" x="36" y="76">· 处理依赖更新 PR</text>
-  <text class="sm" x="36" y="98">· 扫一眼新增错误</text>
-  <text class="sm" x="36" y="120">· 看响应时间趋势</text>
-  <text class="sm on-g" x="36" y="158">目标：不让问题攒起来</text>
-  <text class="sm" x="36" y="196">花的是最便宜的时间：</text>
-  <text class="sm" x="36" y="216">此刻改一行，</text>
-  <text class="sm" x="36" y="236">胜过半年后改一百行</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="好告警与坏告警的对比">
+  <rect class="bx-r" x="20" y="20" width="350" height="210" rx="10"/>
+  <text class="ttl on-r" x="36" y="44">会造成告警疲劳的</text>
+  <text class="sm" x="36" y="70">「CPU 超过 80%」</text>
+  <text class="sm" x="36" y="88">　→ 那又怎样？用户有感觉吗？</text>
+  <text class="sm" x="36" y="112">「有一个请求返回了 500」</text>
+  <text class="sm" x="36" y="130">　→ 半夜把人叫醒，为了一个偶发错误</text>
+  <text class="sm" x="36" y="154">「磁盘使用率 71%」</text>
+  <text class="sm" x="36" y="172">　→ 没有行动指引，不知道要干嘛</text>
+  <text class="sm on-r" x="36" y="200">结果：一天 200 条告警，</text>
+  <text class="sm on-r" x="36" y="218">全部静音，真出事时没人看见</text>
 
-  <rect class="bx-b" x="266" y="20" width="230" height="240" rx="10"/>
-  <text class="ttl on-b" x="381" y="46" text-anchor="middle">每月 · 1 小时</text>
-  <text class="sm" x="282" y="76">· npm audit 并修高危</text>
-  <text class="sm" x="282" y="98">· 检查证书 / Key 到期</text>
-  <text class="sm" x="282" y="120">· 清理反复出现的告警</text>
-  <text class="sm on-b" x="282" y="158">目标：不被到期日偷袭</text>
-  <text class="sm" x="282" y="196">「证书忘了续」是</text>
-  <text class="sm" x="282" y="216">最愚蠢也最常见的</text>
-  <text class="sm" x="282" y="236">线上事故原因之一</text>
-
-  <rect class="bx-p" x="512" y="20" width="228" height="240" rx="10"/>
-  <text class="ttl on-p" x="626" y="46" text-anchor="middle">每季度 · 半天</text>
-  <text class="sm" x="528" y="76">· 备份恢复演练</text>
-  <text class="sm" x="528" y="98">· 还一两项技术债</text>
-  <text class="sm" x="528" y="120">· 更新文档</text>
-  <text class="sm" x="528" y="142">· 规划大版本升级</text>
-  <text class="sm on-p" x="528" y="180">目标：让系统不腐化</text>
-  <text class="sm" x="528" y="216">这是唯一会被</text>
-  <text class="sm" x="528" y="236">「更紧急的事」挤掉的一项</text>
+  <rect class="bx-g" x="390" y="20" width="350" height="210" rx="10"/>
+  <text class="ttl on-g" x="406" y="44">值得半夜叫醒人的</text>
+  <text class="sm" x="406" y="70">「错误率连续 5 分钟 &gt; 5%」</text>
+  <text class="sm" x="406" y="88">　→ 用户正在受影响</text>
+  <text class="sm" x="406" y="112">「p99 延迟连续 10 分钟 &gt; 3 秒」</text>
+  <text class="sm" x="406" y="130">　→ 体验已经不可接受</text>
+  <text class="sm" x="406" y="154">「过去 30 分钟成功订单数 = 0」</text>
+  <text class="sm" x="406" y="172">　→ 业务停了，哪怕技术指标全绿</text>
+  <text class="sm on-g" x="406" y="200">「死信队列非空」</text>
+  <text class="sm on-g" x="406" y="218">　→ 有任务彻底失败了，需要人介入</text>
 </svg>
-<figcaption>图 28-2　把维护变成日程，而不是靠想起来</figcaption>
+<figcaption>图 28-4　告警的标准只有一个：<strong>需要人立刻做点什么吗</strong></figcaption>
 </figure>
+
+<div class="box key">
+  <div class="t">&#9733; 三条规则</div>
+  <ol>
+    <li><strong>基于症状，不是基于原因。</strong>「用户在报错」是症状，「CPU 高」是可能的原因之一。
+        原因有无数种，症状就那么几个 —— 盯症状，覆盖面反而更全。</li>
+    <li><strong>每条告警都要可操作。</strong>收到它之后，接收人应该知道<em>下一步做什么</em>。
+        做不到就别设成告警，放进仪表盘。</li>
+    <li><strong>分级。</strong>页面级（立刻叫醒）、工单级（上班处理）、看板级（有空看看）。
+        <em>只有第一类才配得上半夜的电话。</em></li>
+  </ol>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 告警要带上足够的上下文，让人一眼知道该干什么
+await notifySlack({
+  level: 'page',
+  title: '订单接口错误率 8.2%（阈值 5%）',
+  fields: {
+    影响范围: '过去 5 分钟约 340 个请求失败',
+    主要错误: 'payment.timeout（占 91%）',
+    最近变更: 'v1.24.0 于 12 分钟前部署',
+    仪表盘: 'https://…/orders',
+    运维手册: 'https://…/runbook#payment-timeout',
+  },
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 「最近变更」这一行特别值钱</div>
+  <p>
+    绝大多数线上故障是由变更引起的。告警里自动带上「最近一次部署是什么时候、哪个版本」，
+    能让很多故障在 30 秒内定位 —— 而且直接指向第 30 章的答案：<strong>先回滚</strong>。
+  </p>
+</div>
+
+<h2 id="cost">采样与成本</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 可观测性的账单可能超过服务器</div>
+  <p>
+    每天一亿个请求，每个请求一条 1 KB 的日志 = 100 GB/天 = 3 TB/月。
+    按主流平台的价格，这个量级的费用能轻松超过你的计算成本。
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>策略</th><th>做法</th></tr>
+  <tr><td>分级采样</td><td>成功请求采样 1%，<strong>错误请求 100% 保留</strong>。出问题的那些才是你要看的</td></tr>
+  <tr><td>慢请求全留</td><td>耗时超过 p99 的请求 100% 保留 trace</td></tr>
+  <tr><td>尾部采样</td><td>先缓存整条 trace，等请求结束后再决定留不留（有错或很慢就留）</td></tr>
+  <tr><td>分层保留</td><td>原始日志留 7 天，聚合后的指标留 13 个月（用于同比）</td></tr>
+  <tr><td>控制基数</td><td>别把 userId、订单号放进<strong>指标标签</strong>；它们属于日志字段</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+function shouldSample(status: number, durationMs: number): boolean {
+  if (status &gt;= 500) return true            // 错误全留
+  if (durationMs &gt; 1000) return true         // 慢请求全留
+  return Math.random() &lt; 0.01                // 其余 1%
+}
+</pre>
+</div>
+
+<h2 id="wire">在 Hono 里串起来</h2>
+
+<div class="code" data-lang="ts" data-file="src/app.ts">
+<pre>
+import { requestId } from 'hono/request-id'
+import { timing, startTime, endTime } from 'hono/timing'
+import { observability } from './middleware/observability'
+
+const app = new Hono&lt;Env&gt;()
+
+app.use(requestId())
+app.use(observability)          // 结构化日志 + trace id + 耗时
+app.use(timing())               // 输出 Server-Timing 头，浏览器 DevTools 里能直接看到
+
+app.get('/vacations', async (c) =&gt; {
+  startTime(c, 'db')
+  const vacations = await c.get('repo').list({ available: true })
+  endTime(c, 'db')
+
+  startTime(c, 'render')
+  const html = &lt;VacationsPage vacations={vacations} /&gt;
+  endTime(c, 'render')
+
+  return c.html(html)
+})
+
+// 健康检查（第 12 章）也算可观测性的一部分
+app.get('/health', (c) =&gt; c.json({ status: 'ok' }))
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; <code>Server-Timing</code> 是个被忽视的好东西</div>
+  <p>
+    它把服务端各阶段耗时放进响应头，浏览器 DevTools 的 Network 面板会
+    <strong>直接画出来</strong>。前端同事抱怨「接口慢」时，
+    他自己打开面板就能看到是数据库慢还是渲染慢，不用来找你要日志。
+  </p>
+</div>
+
+<h2 id="start">从零开始的优先级</h2>
+
+<p>不要一上来就搭全套。按这个顺序做，每一步都有立竿见影的回报：</p>
+
+<div class="tw">
+<table>
+  <tr><th>顺序</th><th>做什么</th><th>成本</th></tr>
+  <tr><td>1</td><td>结构化日志 + 请求 ID，错误页展示请求 ID</td><td>半天</td></tr>
+  <tr><td>2</td><td>错误追踪（Sentry 之类），接上 <code>app.onError</code></td><td>一小时</td></tr>
+  <tr><td>3</td><td>外部可用性监控打 <code>/health</code></td><td>十分钟</td></tr>
+  <tr><td>4</td><td>RED 指标看板（多数日志平台能直接从日志算出来）</td><td>半天</td></tr>
+  <tr><td>5</td><td>定两三条真正可操作的告警</td><td>一小时</td></tr>
+  <tr><td>6</td><td>关键业务指标（订单数、注册数）</td><td>半天</td></tr>
+  <tr><td>7</td><td>定 SLO，开始跟踪错误预算</td><td>一天</td></tr>
+  <tr><td>8</td><td>分布式追踪（<em>确实有多个服务时才做</em>）</td><td>数天</td></tr>
+</table>
+</div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>上线前就写清楚项目预期寿命和负责人。</li>
-  <li>依赖更新的成本是指数增长的，每周一点点远比两年一次便宜。</li>
-  <li>技术债要么带上下文记录下来，要么当场还掉。别写没有信息的 TODO。</li>
-  <li>用童子军规则代替重构冲刺。</li>
-  <li>监控「应该发生的事」，让隐形故障显形。</li>
-  <li>三次规则决定什么时候抽象；共享库用 <code>peerDependencies</code>。</li>
-  <li>文档记录「为什么」，尤其是运维手册和技术决策记录。</li>
+  <li>监控回答「有没有问题」，可观测性回答「是什么问题」。</li>
+  <li>日志看单个请求、指标看整体趋势、追踪看耗时分布；<strong>请求 ID 把三者串起来</strong>。</li>
+  <li>日志的 <code>msg</code> 要是固定标识符，变量放独立字段；脱敏做进日志器本身。</li>
+  <li>用 <code>routePath</code> 做聚合维度，避免高基数问题。</li>
+  <li>RED 三个指标够用；<strong>永远看分位数，不看平均值</strong>。</li>
+  <li>业务指标常常比技术指标更早发现故障。</li>
+  <li>SLO 别定 100%；错误预算把「稳定 vs 速度」变成预先商定的规则。</li>
+  <li>告警基于症状、必须可操作、要分级 —— 否则只会制造麻木。</li>
+  <li>错误和慢请求 100% 保留，其余采样。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>给项目配上 Dependabot，看看第一批 PR 里有哪些包已经落后了很多个版本。</li>
-    <li>跑 <code>npm audit</code>，把高危漏洞处理掉。如果某个漏洞暂时无法修复，写下原因和影响评估。</li>
-    <li>搜一遍代码里的 <code>TODO</code> 和 <code>FIXME</code>。有多少条你已经不记得是什么意思了？把它们补全或删掉。</li>
-    <li>写一份 <code>docs/runbook.md</code>：假设你今晚不在，同事要处理线上故障，他需要知道什么？</li>
-    <li>找出你项目里写了三遍以上的逻辑，把它抽成一个中间件。</li>
-    <li>给一个定时任务加上心跳监控，然后故意让它失败，确认你收到了告警。</li>
+    <li>实现本章的结构化日志器和 observability 中间件。访问几个路由，确认输出的 JSON 里 <code>route</code> 是路由模式而非具体路径。</li>
+    <li>在日志字段里故意传一个 <code>password</code>，确认它被替换成了 <code>[已脱敏]</code>。</li>
+    <li>把请求 ID 显示在 500 错误页上。故意触发一个错误，然后用这个 ID 在日志里把它捞出来。</li>
+    <li>接上 <code>timing()</code> 并给数据库查询加 <code>startTime/endTime</code>。在浏览器 DevTools 的 Network → Timing 里找到它们。</li>
+    <li>给你的项目定一个 SLO。想清楚：这个数字对用户意味着什么？达不到会怎样？</li>
+    <li>列出你现在会收到的所有告警。逐条问：收到之后我知道该做什么吗？把回答不了的那些降级或删掉。</li>
   </ol>
 </div>
 

@@ -406,7 +406,7 @@ export const checkout = async (c: Context) =&gt; {
   <p>
     订单已经落库了，邮件没发出去是个次要问题。如果这里不 catch，用户会看到 500 错误页，
     以为下单失败又下了一单。<br>
-    更好的做法：把发信丢进队列异步处理，这样还能自动重试 —— <strong>第 22 章</strong>会完整实现一遍。
+    更好的做法：把发信丢进队列异步处理，这样还能自动重试 —— <strong>第 25 章</strong>会完整实现一遍。
     临时方案是在 Cloudflare Workers 上用
     <code>c.executionCtx.waitUntil(promise)</code> —— 响应立即返回，发信在后台继续。
   </p>

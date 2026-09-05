@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 22 章 · 后台任务与队列 — Hono 全栈开发教程</title>
+<title>第 22 章 · 集成第三方 API — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="22">
@@ -12,840 +12,592 @@
 <main>
 
 <span class="chapter-eyebrow">第 22 章</span>
-<h1>后台任务与队列</h1>
+<h1>集成第三方 API</h1>
 <p class="lede">
-  第 11 章发邮件时，用户要一直等着邮件发完才能看到「下单成功」。
-  这一章讲一个能改变你系统架构的思路：<strong>请求路径上只做必须立刻做的事，其余的丢到后面去。</strong>
+  天气、地图、支付、短信、AI —— 现代应用的很大一部分能力来自别人的服务。
+  这一章讲怎么调用它们，以及更重要的：<strong>怎么在它们出问题时不被拖垮</strong>。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>判断哪些操作该移出请求路径</li>
-    <li>掌握三种「延后执行」的手段及各自的可靠性边界</li>
-    <li>理解「至少一次投递」意味着什么，以及它为什么强制要求消费者幂等</li>
-    <li>用 Cloudflare Queues 和 BullMQ 各实现一遍</li>
-    <li>设计重试、退避与死信队列</li>
-    <li>知道什么时候<strong>不该</strong>用队列</li>
+    <li>在服务端用 <code>fetch</code> 调外部 API，处理超时和重试</li>
+    <li>给云雀旅行的天气组件接上真实数据</li>
+    <li>用缓存把外部调用次数降下来</li>
+    <li>做地理编码并在页面上显示地图</li>
+    <li>用降级和熔断保证「第三方挂了，我不挂」</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="why">请求路径上的时间预算</h2>
-
-<p>回顾第 11 章那个下单接口，把每一步的耗时列出来：</p>
+<h2 id="where">在哪里调：前端还是后端</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="同步处理与异步处理的响应时间对比">
-  <text class="ttl on-r" x="20" y="22">同步做完所有事</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="前端直连与后端代理两种方式">
+  <rect class="bx-r" x="20" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-r" x="192" y="44" text-anchor="middle">浏览器直接调第三方</text>
+  <text class="sm" x="36" y="72">浏览器 → api.weather.gov</text>
+  <text class="sm on-r" x="36" y="102">&#10007; API Key 会暴露在前端代码里</text>
+  <text class="sm on-r" x="36" y="124">&#10007; 每个用户都消耗一次配额</text>
+  <text class="sm on-r" x="36" y="146">&#10007; 对方不支持 CORS 就调不通</text>
+  <text class="sm on-r" x="36" y="168">&#10007; 没法缓存，没法统一处理错误</text>
+  <text class="sm on-g" x="36" y="198">&#10003; 唯一合适的情况：地图 SDK 这类</text>
+  <text class="sm on-g" x="36" y="216">&nbsp;&nbsp;&nbsp;本来就为前端设计、Key 可域名限制的</text>
 
-  <rect class="bx" x="20" y="34" width="90" height="34" rx="6"/>
-  <text class="sm" x="65" y="55" text-anchor="middle">校验 5ms</text>
-  <rect class="bx-g" x="114" y="34" width="120" height="34" rx="6"/>
-  <text class="sm" x="174" y="55" text-anchor="middle">写订单 30ms</text>
-  <rect class="bx-r" x="238" y="34" width="180" height="34" rx="6"/>
-  <text class="sm on-r" x="328" y="55" text-anchor="middle">发确认邮件 800ms</text>
-  <rect class="bx-r" x="422" y="34" width="150" height="34" rx="6"/>
-  <text class="sm on-r" x="497" y="55" text-anchor="middle">生成 PDF 600ms</text>
-  <rect class="bx-r" x="576" y="34" width="150" height="34" rx="6"/>
-  <text class="sm on-r" x="651" y="55" text-anchor="middle">同步 CRM 900ms</text>
-
-  <path class="ln-r" d="M20 80 H726" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="380" y="100" text-anchor="middle">用户盯着转圈：2335 ms　·　任何一个外部服务抖动，整个下单就失败</text>
-
-  <path class="ln-d" d="M20 116 H740"/>
-
-  <text class="ttl on-g" x="20" y="146">只做必须立刻做的</text>
-
-  <rect class="bx" x="20" y="158" width="90" height="34" rx="6"/>
-  <text class="sm" x="65" y="179" text-anchor="middle">校验 5ms</text>
-  <rect class="bx-g" x="114" y="158" width="120" height="34" rx="6"/>
-  <text class="sm" x="174" y="179" text-anchor="middle">写订单 30ms</text>
-  <rect class="bx-a" x="238" y="158" width="120" height="34" rx="6"/>
-  <text class="sm on-a" x="298" y="179" text-anchor="middle">投递任务 10ms</text>
-
-  <path class="ln-g" d="M20 204 H362" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="190" y="224" text-anchor="middle">用户拿到响应：45 ms</text>
-
-  <rect class="bx-p" x="400" y="158" width="326" height="34" rx="6"/>
-  <text class="sm on-p" x="563" y="179" text-anchor="middle">邮件 · PDF · CRM 在后台慢慢做</text>
-  <path class="ln-d" d="M362 175 H396" marker-end="url(#ar)"/>
-  <text class="sm" x="563" y="212" text-anchor="middle">失败了可以重试，不影响用户</text>
-
-  <rect class="bx-a" x="20" y="244" width="720" height="40" rx="8"/>
-  <text class="sm on-a" x="380" y="268" text-anchor="middle">响应快了 50 倍，而且下单的成功率不再取决于三个外部服务是否健康</text>
+  <rect class="bx-g" x="395" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">后端代理（推荐）</text>
+  <text class="sm" x="411" y="72">浏览器 → 你的 Hono → api.weather.gov</text>
+  <text class="sm on-g" x="411" y="102">&#10003; Key 留在服务端，永不外泄</text>
+  <text class="sm on-g" x="411" y="124">&#10003; 一次调用可以服务成千上万用户</text>
+  <text class="sm on-g" x="411" y="146">&#10003; 没有 CORS 问题</text>
+  <text class="sm on-g" x="411" y="168">&#10003; 能缓存、能重试、能降级</text>
+  <text class="sm on-g" x="411" y="190">&#10003; 能把对方的数据格式转成你想要的</text>
+  <text class="sm" x="411" y="216">代价：多一跳延迟（缓存后可忽略）</text>
 </svg>
-<figcaption>图 22-1　同样的功能，两种架构，用户体验和可靠性差一个数量级</figcaption>
+<figcaption>图 22-1　默认走后端代理，除非有明确理由</figcaption>
 </figure>
-
-<h3>怎么判断该不该移出去</h3>
-
-<p>问一个问题：<strong>「用户看到响应时，这件事必须已经完成吗？」</strong></p>
-
-<div class="tw">
-<table>
-  <tr><th>必须同步做</th><th>可以异步做</th></tr>
-  <tr><td>校验输入（不合法就不该继续）</td><td>发确认邮件 / 短信</td></tr>
-  <tr><td>写入核心业务数据（订单、支付记录）</td><td>生成 PDF / 发票 / 报表</td></tr>
-  <tr><td>扣减库存（涉及正确性，见第 21 章）</td><td>压缩、裁剪、转码上传的图片视频</td></tr>
-  <tr><td>返回用户马上要看的数据</td><td>同步数据到 CRM / 数据仓库 / 搜索引擎</td></tr>
-  <tr><td>权限判断</td><td>推送通知、发 webhook 给第三方</td></tr>
-  <tr><td></td><td>写审计日志、统计埋点</td></tr>
-  <tr><td></td><td>调用 AI 生成摘要、翻译、推荐</td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 一个额外的好处：故障隔离</div>
-  <p>
-    同步架构下，邮件服务挂了 → 下单接口报 500 → <strong>用户下不了单，公司损失收入</strong>。<br>
-    异步架构下，邮件服务挂了 → 任务在队列里堆着 → 下单照常 → 服务恢复后邮件自动补发。<br>
-    <em>队列把「外部依赖的可用性」和「核心业务的可用性」解耦开了。</em>这往往比性能提升更值钱。
-  </p>
-</div>
-
-<h2 id="three">三种延后执行的手段</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种延后执行手段的可靠性对比">
-  <rect class="bx-b" x="20" y="20" width="230" height="180" rx="10"/>
-  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① waitUntil</text>
-  <text class="sm" x="36" y="70">响应先返回，任务在同一个</text>
-  <text class="sm" x="36" y="88">进程里继续跑完</text>
-  <text class="mono sm" x="36" y="114">c.executionCtx.waitUntil(p)</text>
-  <text class="sm on-g" x="36" y="142">&#10003; 零基础设施，一行代码</text>
-  <text class="sm on-r" x="36" y="164">&#10007; 失败了没人知道</text>
-  <text class="sm on-r" x="36" y="182">&#10007; 进程挂了任务就没了</text>
-
-  <rect class="bx-a" x="266" y="20" width="230" height="180" rx="10"/>
-  <text class="ttl on-a" x="381" y="44" text-anchor="middle">② 队列</text>
-  <text class="sm" x="282" y="70">任务写进持久化的队列，</text>
-  <text class="sm" x="282" y="88">由独立的消费者取出执行</text>
-  <text class="mono sm" x="282" y="114">await QUEUE.send(task)</text>
-  <text class="sm on-g" x="282" y="142">&#10003; 不会丢，自动重试</text>
-  <text class="sm on-g" x="282" y="160">&#10003; 可观测、可限速</text>
-  <text class="sm on-r" x="282" y="182">&#10007; 多一个组件要维护</text>
-
-  <rect class="bx-p" x="512" y="20" width="228" height="180" rx="10"/>
-  <text class="ttl on-p" x="626" y="44" text-anchor="middle">③ 定时任务</text>
-  <text class="sm" x="528" y="70">按时间表周期性执行，</text>
-  <text class="sm" x="528" y="88">不由请求触发</text>
-  <text class="mono sm" x="528" y="114">Cron: 0 3 * * *</text>
-  <text class="sm on-g" x="528" y="142">&#10003; 适合批处理、清理、对账</text>
-  <text class="sm on-r" x="528" y="164">&#10007; 有延迟（下次执行才做）</text>
-  <text class="sm on-r" x="528" y="182">&#10007; 要自己防重复执行</text>
-
-  <rect class="bx-d" x="20" y="216" width="720" height="70" rx="10"/>
-  <text class="ttl" x="36" y="240">怎么选</text>
-  <text class="sm" x="36" y="262">丢了也无所谓（统计埋点、缓存预热）→ waitUntil　　丢了会出问题（邮件、支付回调、扣款）→ 队列</text>
-  <text class="sm" x="36" y="280">不由用户触发、要扫全表（日报、清理过期数据、对账）→ 定时任务</text>
-</svg>
-<figcaption>图 22-2　可靠性从左到右递增，复杂度也是</figcaption>
-</figure>
-
-<h3>① waitUntil：最轻量的那个</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-app.post('/api/v1/orders', async (c) =&gt; {
-  const order = await createOrder(...)
-
-  // 响应立刻返回，但运行时会等这个 Promise 结束才回收执行环境
-  c.executionCtx.waitUntil(
-    recordAnalytics({ event: 'order_created', orderId: order.id })
-      .catch((err) =&gt; console.error('埋点失败', err))   // ← 必须自己 catch
-  )
-
-  return c.json({ orderId: order.id }, 201)
-})
-</pre>
-</div>
 
 <div class="box warn">
-  <div class="t">&#9888; waitUntil 的三个限制</div>
-  <ol>
-    <li><strong>没有重试。</strong>失败就是失败了，没有任何人会再试一次。</li>
-    <li><strong>没有持久化。</strong>进程/实例在任务跑完前被回收，任务直接消失，不留痕迹。</li>
-    <li><strong>受执行时间上限约束。</strong>边缘平台对单次调用的 CPU 时间和墙钟时间都有限制。</li>
-  </ol>
+  <div class="t">&#9888; API Key 放前端 = 公开你的信用卡</div>
   <p>
-    所以它只适合<strong>「做成了最好，没做成也不影响正确性」</strong>的事。
-    发确认邮件用它是不合适的 —— 用户没收到邮件是个真问题。
+    「打包压缩之后看不出来」是错觉 —— 打开浏览器的 Network 面板，
+    Key 就明晃晃写在请求头或 URL 里。有人写过爬虫专门扫 GitHub 和网页找泄露的 Key。
+    <strong>能计费的 Key 一律不进前端。</strong>
   </p>
 </div>
 
-<div class="box note">
-  <div class="t">&#9432; Node.js 上没有 waitUntil</div>
-  <p>
-    <code>c.executionCtx</code> 是 Workers 等边缘运行时提供的。在 Node 上，
-    进程是长驻的，你直接 <code>promise.catch(...)</code> 不 await 就行 ——
-    但同样没有重试和持久化保证，而且要小心第 12 章讲的「未处理的 Promise 拒绝」。
-  </p>
-</div>
-
-<h2 id="queue">队列的心智模型</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="生产者、队列、消费者的关系">
-  <rect class="bx-b" x="20" y="60" width="150" height="70" rx="10"/>
-  <text class="ttl on-b" x="95" y="86" text-anchor="middle">生产者</text>
-  <text class="sm" x="95" y="106" text-anchor="middle">你的 Hono 路由</text>
-  <text class="sm" x="95" y="122" text-anchor="middle">投递任务后立刻返回</text>
-
-  <path class="ln-b" d="M174 95 H236" marker-end="url(#ar)"/>
-  <text class="sm" x="205" y="86" text-anchor="middle">send</text>
-
-  <rect class="bx-a" x="240" y="46" width="200" height="98" rx="10"/>
-  <text class="ttl on-a" x="340" y="70" text-anchor="middle">队列</text>
-  <rect class="bx" x="254" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="292" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="330" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="368" y="80" width="34" height="26" rx="4"/>
-  <text class="sm" x="340" y="128" text-anchor="middle">持久化存储，进程重启不丢</text>
-
-  <path class="ln-a" d="M444 95 H506" marker-end="url(#ar-a)"/>
-  <text class="sm" x="475" y="86" text-anchor="middle">拉取</text>
-
-  <rect class="bx-g" x="510" y="46" width="230" height="98" rx="10"/>
-  <text class="ttl on-g" x="625" y="70" text-anchor="middle">消费者</text>
-  <text class="sm" x="625" y="90" text-anchor="middle">独立进程 / Worker</text>
-  <text class="sm" x="625" y="110" text-anchor="middle">处理完显式确认（ack）</text>
-  <text class="sm" x="625" y="130" text-anchor="middle">没确认 → 任务会被重新投递</text>
-
-  <rect class="bx-d" x="20" y="164" width="720" height="120" rx="10"/>
-  <text class="ttl" x="36" y="188">解耦带来的四件事</text>
-  <text class="sm" x="36" y="212">① 削峰：突然来了一万个任务，队列存着，消费者按自己的速度慢慢做，不会被压垮</text>
-  <text class="sm" x="36" y="234">② 重试：消费失败了，任务回到队列，稍后再试，不用生产者操心</text>
-  <text class="sm" x="36" y="256">③ 扩容：处理不过来就多开几个消费者，生产者一行代码不用改</text>
-  <text class="sm" x="36" y="278">④ 隔离：消费者崩了，Web 服务照常响应用户</text>
-</svg>
-<figcaption>图 22-3　队列是生产者和消费者之间的缓冲带</figcaption>
-</figure>
-
-<h3>「至少一次投递」是什么意思</h3>
+<h2 id="fetch">服务端的 fetch</h2>
 
 <p>
-  绝大多数队列（SQS、Cloudflare Queues、RabbitMQ 默认配置、BullMQ）提供的是
-  <strong>at-least-once</strong> 保证：任务<em>至少</em>会被投递一次，但可能投递多次。
+  Hono 的运行时都内置了 <code>fetch</code>，不用装 axios 之类的库。但直接裸用有几个问题：
 </p>
 
-<div class="code" data-lang="text">
+<div class="code" data-lang="ts">
 <pre>
-消费者收到任务 → 处理成功 → 准备发送 ack → 此时网络断了 / 进程崩了
-                                          ↓
-                          队列没收到 ack，认为处理失败
-                                          ↓
-                                    重新投递这个任务
-                                          ↓
-                              同一个任务被处理了第二次
+// ❌ 三个隐患
+const res = await fetch(url)      // ① 对方不响应就永远挂着
+const data = await res.json()     // ② 返回 500 时 res.ok 是 false，但这里不会抛错
+</pre>
+</div>
+
+<p>写一个带超时、重试和错误检查的封装：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/http.ts">
+<pre>
+export class HttpError extends Error {
+  constructor(public status: number, public url: string, message: string) {
+    super(message)
+  }
+}
+
+type Options = RequestInit &amp; {
+  timeoutMs?: number
+  retries?: number
+}
+
+export async function fetchJson&lt;T&gt;(url: string, opts: Options = {}): Promise&lt;T&gt; {
+  const { timeoutMs = 5000, retries = 2, ...init } = opts
+
+  for (let attempt = 0; attempt &lt;= retries; attempt++) {
+    // AbortSignal.timeout 是标准 API，所有运行时都有
+    const signal = AbortSignal.timeout(timeoutMs)
+
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal,
+        headers: {
+          'User-Agent': 'MeadowlarkTravel/1.0 (contact@meadowlarktravel.com)',
+          Accept: 'application/json',
+          ...init.headers,
+        },
+      })
+
+      // 4xx 是我们的问题，重试没用，直接抛
+      if (res.status &gt;= 400 &amp;&amp; res.status &lt; 500) {
+        throw new HttpError(res.status, url, `客户端错误 ${res.status}`)
+      }
+
+      // 5xx 和 429 可以重试
+      if (!res.ok) {
+        throw new HttpError(res.status, url, `服务端错误 ${res.status}`)
+      }
+
+      return (await res.json()) as T
+    } catch (err) {
+      const isLast = attempt === retries
+      const notRetryable = err instanceof HttpError &amp;&amp; err.status &lt; 500 &amp;&amp; err.status !== 429
+
+      if (isLast || notRetryable) throw err
+
+      // 指数退避 + 随机抖动，避免所有实例同时重试
+      const delay = 2 ** attempt * 200 + Math.random() * 200
+      await new Promise((r) =&gt; setTimeout(r, delay))
+    }
+  }
+
+  throw new Error('unreachable')
+}
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 这个推论极其重要</div>
+  <div class="t">&#9733; 为什么要「指数退避 + 抖动」</div>
   <p>
-    <strong>至少一次投递 ⇒ 你的任务处理逻辑必须是幂等的。</strong><br>
-    这不是「最好做一下」，而是「不做就一定会出事」—— 只是时间问题。<br>
-    第 21 章讲的幂等技巧在这里全部适用，而且这次是<strong>强制</strong>的。
+    对方服务过载时，如果所有客户端都在固定 1 秒后重试，就会形成一波又一波的冲击，
+    让它永远缓不过来 —— 这叫<strong>惊群效应</strong>。<br>
+    每次等待时间翻倍（200ms、400ms、800ms）给对方喘息时间；
+    再加一点随机抖动，把重试时刻打散。
   </p>
-</div>
-
-<div class="vs">
-  <div class="old">
-    <div class="h">&#10060; 非幂等的任务</div>
-    <div class="code" data-lang="ts"><pre>
-async function handle(task) {
-  await mailer.send({
-    to: task.email,
-    subject: '订单确认',
-  })
-  await db.update(accounts)
-    .set({ points: sql`points + 100` })
-    .where(eq(accounts.id, task.userId))
-}
-// 重投一次 = 用户收到两封邮件
-//            + 多得 100 积分
-</pre></div>
-  </div>
-  <div class="new">
-    <div class="h">&#9989; 幂等的任务</div>
-    <div class="code" data-lang="ts"><pre>
-async function handle(task) {
-  // 用任务自带的唯一 id 做去重
-  const claimed = await claimOnce(task.id)
-  if (!claimed) return          // 处理过了，直接结束
-
-  await mailer.send({
-    to: task.email,
-    subject: '订单确认',
-    // 很多邮件服务也支持幂等键
-    idempotencyKey: task.id,
-  })
-  await db.update(accounts)
-    .set({ points: sql`points + 100` })
-    .where(eq(accounts.id, task.userId))
-}
-</pre></div>
-  </div>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-/** 用一张表 + 唯一约束实现「只处理一次」*/
-async function claimOnce(taskId: string): Promise&lt;boolean&gt; {
-  try {
-    await db.insert(processedTasks).values({ id: taskId, at: new Date() })
-    return true            // 插入成功 = 我是第一个
-  } catch (err) {
-    if (isUniqueViolation(err)) return false   // 已经有人处理过了
-    throw err
-  }
-}
-</pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 更严谨的做法：先做事，再标记，同一个事务</div>
+  <div class="t">&#9888; 不是所有请求都能重试</div>
   <p>
-    上面这个写法有个窄窗口：标记成功后、业务执行前崩溃，任务会被跳过（变成「至多一次」）。
-    如果业务本身在数据库里，把<strong>标记和业务放进同一个事务</strong>就能彻底解决 ——
-    和第 21 章的幂等键写法完全一样。<br>
-    如果业务是外部调用（发邮件），就没法用事务，此时优先<strong>让外部服务承担去重</strong>
-    （传幂等键给它），这是最可靠的。
+    <strong>幂等</strong>的操作（GET、PUT、DELETE）重试是安全的。<br>
+    <strong>非幂等</strong>的操作（POST 创建订单、发起支付）重试可能导致重复下单。
+    这类请求要么不重试，要么让对方支持「幂等键」（每次请求带一个唯一 ID，对方据此去重）。
+    反过来，<strong>你自己的接口也该支持幂等键</strong>，否则别人重试你时同样会出问题 —— 见第 23 章。
   </p>
 </div>
 
-<h2 id="cf">实现：Cloudflare Queues</h2>
+<h2 id="weather">给天气组件接上真数据</h2>
 
-<div class="code" data-lang="toml" data-file="wrangler.toml">
+<p>
+  第 7 章我们做了一个天气组件，用的是假数据。现在换成美国国家气象局的真实 API
+  （它免费、不需要 Key，正好用来演示）。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/weather.ts">
 <pre>
-[[queues.producers]]
-binding = "TASKS"           # 代码里用 c.env.TASKS 投递
-queue = "meadowlark-tasks"
+import { fetchJson } from './http'
 
-[[queues.consumers]]
-queue = "meadowlark-tasks"
-max_batch_size = 10         # 一次最多取 10 条一起处理
-max_batch_timeout = 5       # 或者攒够 5 秒就处理
-max_retries = 5             # 最多重试 5 次
-dead_letter_queue = "meadowlark-dlq"    # 5 次还失败就丢到这里
-</pre>
-</div>
-
-<h3>定义任务类型</h3>
-
-<div class="code" data-lang="ts" data-file="src/tasks/types.ts">
-<pre>
-export type Task =
-  | { type: 'send-order-email'; id: string; orderId: string; email: string }
-  | { type: 'generate-invoice'; id: string; orderId: string }
-  | { type: 'sync-to-crm'; id: string; customerId: string }
-
-export function newTask&lt;T extends Task['type']&gt;(
-  type: T,
-  payload: Omit&lt;Extract&lt;Task, { type: T }&gt;, 'type' | 'id'&gt;
-): Task {
-  return { type, id: crypto.randomUUID(), ...payload } as Task
+export type Forecast = {
+  name: string
+  weather: string
+  temp: string
+  iconUrl: string
+  forecastUrl: string
 }
-</pre>
-</div>
 
-<div class="box tip">
-  <div class="t">&#128161; 任务里放 ID，不放数据</div>
-  <p>
-    投递 <code>{ orderId: 'o_123' }</code>，而不是把整个订单对象塞进去。原因：<br>
-    ① 消息体有大小限制；<br>
-    ② 任务可能几分钟后才执行，那时数据可能已经变了 —— <strong>你要的是最新数据，不是投递时的快照</strong>；<br>
-    ③ 消息可能被日志记录下来，里面别带敏感信息。
-  </p>
-</div>
+const LOCATIONS = [
+  { name: '波特兰', lat: 45.5155, lng: -122.6793 },
+  { name: '本德',   lat: 44.0582, lng: -121.3153 },
+  { name: '曼扎尼塔', lat: 45.7184, lng: -123.9351 },
+]
 
-<h3>生产者</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-type Bindings = { TASKS: Queue&lt;Task&gt;; DB: D1Database }
-
-app.post('/api/v1/orders', async (c) =&gt; {
-  const order = await createOrder(...)     // 同步：必须完成
-
-  // 异步：投递即返回，10 ms 左右
-  await c.env.TASKS.send(
-    newTask('send-order-email', { orderId: order.id, email: order.email })
+async function fetchOne(loc: (typeof LOCATIONS)[number]): Promise&lt;Forecast&gt; {
+  // 第一步：用经纬度换到预报接口地址
+  const points = await fetchJson&lt;{ properties: { forecast: string } }&gt;(
+    `https://api.weather.gov/points/${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
   )
 
-  // 批量投递更省事
-  await c.env.TASKS.sendBatch([
-    { body: newTask('generate-invoice', { orderId: order.id }) },
-    { body: newTask('sync-to-crm', { customerId: order.customerId }) },
-  ])
-
-  return c.json({ orderId: order.id }, 201)
-})
-</pre>
-</div>
-
-<h3>消费者</h3>
-
-<div class="code" data-lang="ts" data-file="src/index.ts">
-<pre>
-import { app } from './app'
-import { handleTask } from './tasks/handlers'
-
-export default {
-  // HTTP 请求走 Hono
-  fetch: app.fetch,
-
-  // 队列消息走这里
-  async queue(batch: MessageBatch&lt;Task&gt;, env: Bindings) {
-    for (const msg of batch.messages) {
-      try {
-        await handleTask(msg.body, env)
-        msg.ack()                      // 明确确认：处理成功
-      } catch (err) {
-        console.error('任务失败', {
-          taskId: msg.body.id,
-          type: msg.body.type,
-          attempt: msg.attempts,
-          error: String(err),
-        })
-        // 指数退避后重投；不调 retry 而是让它超时也可以，但显式更清楚
-        msg.retry({ delaySeconds: Math.min(2 ** msg.attempts * 10, 900) })
-      }
+  // 第二步：取预报
+  const data = await fetchJson&lt;{
+    properties: {
+      periods: {
+        shortForecast: string
+        temperature: number
+        temperatureUnit: string
+        icon: string
+      }[]
     }
-  },
-}
-</pre>
-</div>
+  }&gt;(points.properties.forecast)
 
-<div class="code" data-lang="ts" data-file="src/tasks/handlers.ts">
-<pre>
-export async function handleTask(task: Task, env: Bindings) {
-  switch (task.type) {
-    case 'send-order-email':
-      return sendOrderEmail(task, env)
-    case 'generate-invoice':
-      return generateInvoice(task, env)
-    case 'sync-to-crm':
-      return syncToCrm(task, env)
-    default: {
-      // 穷尽检查：将来加了新任务类型忘了处理，这里会编译报错
-      const never: never = task
-      throw new Error(`未知任务类型：${JSON.stringify(never)}`)
-    }
+  const now = data.properties.periods[0]
+
+  return {
+    name: loc.name,
+    weather: now.shortForecast,
+    temp: `${now.temperature} °${now.temperatureUnit}`,
+    iconUrl: now.icon,
+    forecastUrl: points.properties.forecast,
   }
 }
 
-async function sendOrderEmail(
-  task: Extract&lt;Task, { type: 'send-order-email' }&gt;,
-  env: Bindings
-) {
-  // ① 幂等
-  if (!(await claimOnce(task.id, env))) return
+export async function getForecasts(): Promise&lt;Forecast[]&gt; {
+  // 并发请求，而不是一个接一个
+  const results = await Promise.allSettled(LOCATIONS.map(fetchOne))
 
-  // ② 取最新数据，而不是用投递时的快照
-  const order = await getOrder(env.DB, task.orderId)
-  if (!order) return          // 订单被删了，任务作废，不是错误
-
-  // ③ 干活
-  const html = renderEmail(&lt;OrderConfirmationEmail order={order} /&gt;)
-  await createMailer(env).send({
-    to: task.email,
-    subject: `预订确认 · ${order.number}`,
-    html,
-    text: htmlToText(html),
-  })
+  // 部分失败不影响其他，只是少显示一个城市
+  return results
+    .filter((r): r is PromiseFulfilledResult&lt;Forecast&gt; =&gt; r.status === 'fulfilled')
+    .map((r) =&gt; r.value)
 }
 </pre>
 </div>
 
-<h2 id="node-queue">实现：Node.js 上用 BullMQ</h2>
-
-<p>如果你部署在传统服务器上，BullMQ（基于 Redis）是最成熟的选择：</p>
-
-<div class="code" data-lang="bash">
-<pre>
-npm install bullmq ioredis
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/tasks/queue.ts">
-<pre>
-import { Queue } from 'bullmq'
-import IORedis from 'ioredis'
-
-const connection = new IORedis(process.env.REDIS_URL!, {
-  maxRetriesPerRequest: null,        // BullMQ 要求
-})
-
-export const taskQueue = new Queue&lt;Task&gt;('meadowlark-tasks', {
-  connection,
-  defaultJobOptions: {
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 2000 },
-    removeOnComplete: { age: 3600, count: 1000 },   // 别让 Redis 无限增长
-    removeOnFail: { age: 7 * 24 * 3600 },           // 失败的多留几天用于排查
-  },
-})
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/tasks/worker.ts">
-<pre>
-import { Worker } from 'bullmq'
-import { handleTask } from './handlers'
-
-// 注意：这是一个独立的进程，和 Web 服务分开部署
-const worker = new Worker&lt;Task&gt;(
-  'meadowlark-tasks',
-  async (job) =&gt; {
-    await handleTask(job.data)
-  },
-  { connection, concurrency: 5 }     // 同时处理 5 个任务
-)
-
-worker.on('failed', (job, err) =&gt; {
-  console.error('任务失败', { id: job?.id, attempts: job?.attemptsMade, err: err.message })
-  if (job &amp;&amp; job.attemptsMade &gt;= (job.opts.attempts ?? 1)) {
-    reportToSentry(err, { taskId: job.id, data: job.data })   // 彻底失败了才告警
-  }
-})
-
-// 优雅关闭：让正在处理的任务做完
-for (const sig of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(sig, async () =&gt; {
-    await worker.close()
-    process.exit(0)
-  })
-}
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; Worker 是独立进程</div>
+<div class="box key">
+  <div class="t">&#9733; <code>Promise.allSettled</code> 还是 <code>Promise.all</code></div>
   <p>
-    别把 Worker 塞进 Web 服务的同一个进程里。分开的好处：
-    可以独立扩容（Web 开 2 个实例，Worker 开 10 个）、
-    重任务不会抢占 Web 的 CPU、Worker 崩了不影响用户访问。<br>
-    部署上就是两条命令：<code>node dist/server.js</code> 和 <code>node dist/worker.js</code>。
+    <code>Promise.all</code>：任何一个失败，整个都失败。适合「缺一不可」的场景。<br>
+    <code>Promise.allSettled</code>：等所有的都结束，分别报告成败。<br>
+    天气组件里，一个城市取不到不该让整个组件消失 —— 所以用 <code>allSettled</code>。
   </p>
 </div>
 
-<h2 id="retry">重试、退避与死信队列</h2>
+<h2 id="cache">缓存：最重要的一步</h2>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="任务重试与死信队列的流程">
-  <rect class="bx-a" x="300" y="20" width="160" height="40" rx="8"/>
-  <text class="ttl on-a" x="380" y="45" text-anchor="middle">消费任务</text>
+<p>
+  上面的代码每次页面渲染都会打 6 次外部请求。一千个用户访问首页就是 6000 次 ——
+  又慢、又可能被对方限流、还可能产生费用。天气数据 15 分钟更新一次就够了。
+</p>
 
-  <path class="ln-g" d="M300 40 H200 V72" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="240" y="34">成功</text>
-  <rect class="bx-g" x="120" y="76" width="160" height="36" rx="8"/>
-  <text class="sm on-g" x="200" y="99" text-anchor="middle">ack，任务结束</text>
-
-  <path class="ln-r" d="M460 40 H560 V72" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="516" y="34">失败</text>
-
-  <rect class="bx-r" x="470" y="76" width="180" height="36" rx="8"/>
-  <text class="sm on-r" x="560" y="99" text-anchor="middle">重试次数 &lt; 上限？</text>
-
-  <path class="ln-a" d="M470 94 H400 V128 H386" marker-end="url(#ar-a)"/>
-  <text class="sm on-a" x="432" y="88">是</text>
-
-  <rect class="bx-a" x="200" y="116" width="186" height="60" rx="8"/>
-  <text class="sm on-a" x="293" y="138" text-anchor="middle">等待后重新投递</text>
-  <text class="mono sm" x="293" y="158" text-anchor="middle">10s → 20s → 40s → 80s</text>
-  <text class="sm" x="293" y="172" text-anchor="middle">指数退避 + 抖动</text>
-
-  <path class="ln-a" d="M293 114 V70 H300" marker-end="url(#ar-a)"/>
-
-  <path class="ln-r" d="M560 116 V152" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="580" y="136">否</text>
-
-  <rect class="bx-r" x="450" y="156" width="220" height="56" rx="8"/>
-  <text class="ttl on-r" x="560" y="178" text-anchor="middle">死信队列（DLQ）</text>
-  <text class="sm" x="560" y="198" text-anchor="middle">不再自动重试，等人来看</text>
-
-  <rect class="bx-d" x="60" y="228" width="640" height="44" rx="8"/>
-  <text class="sm" x="380" y="250" text-anchor="middle">DLQ 有消息 = 需要人工介入的信号。<tspan class="on-r">给它配告警</tspan> ——</text>
-  <text class="sm" x="380" y="266" text-anchor="middle">没人看的死信队列，和没有死信队列是一样的（见第 28 章「隐形故障」）</text>
-</svg>
-<figcaption>图 22-4　重试处理临时故障，死信队列兜住永久故障</figcaption>
-</figure>
-
-<h3>区分两种失败</h3>
-
-<div class="code" data-lang="ts">
+<div class="code" data-lang="ts" data-file="src/lib/cached.ts">
 <pre>
-class PermanentTaskError extends Error {}     // 重试也没用
+type Entry&lt;T&gt; = { value: T; expiresAt: number }
 
-async function sendOrderEmail(task: Task, env: Bindings) {
-  const order = await getOrder(env.DB, task.orderId)
+/**
+ * 把一个异步函数包装成带缓存的版本。
+ * 关键特性：缓存过期后如果刷新失败，会继续返回旧数据（stale-while-error）
+ */
+export function withCache&lt;T&gt;(
+  fn: () =&gt; Promise&lt;T&gt;,
+  ttlMs: number
+): () =&gt; Promise&lt;T&gt; {
+  let entry: Entry&lt;T&gt; | null = null
+  let inflight: Promise&lt;T&gt; | null = null
 
-  // 订单不存在 —— 重试一万次也不会存在。直接放弃，不算失败
-  if (!order) {
-    console.warn('订单已不存在，跳过任务', task.orderId)
-    return
+  return async () =&gt; {
+    const now = Date.now()
+
+    // 缓存有效，直接返回
+    if (entry &amp;&amp; entry.expiresAt &gt; now) return entry.value
+
+    // 已经有一个请求在路上了，跟着它就行（避免并发时打出多个请求）
+    if (inflight) return inflight
+
+    inflight = fn()
+      .then((value) =&gt; {
+        entry = { value, expiresAt: Date.now() + ttlMs }
+        return value
+      })
+      .catch((err) =&gt; {
+        // 刷新失败：有旧数据就先用旧的，总比页面报错强
+        if (entry) {
+          console.warn('刷新失败，继续使用过期数据', err)
+          return entry.value
+        }
+        throw err
+      })
+      .finally(() =&gt; { inflight = null })
+
+    return inflight
   }
-
-  // 邮箱格式非法 —— 永久错误，重试无意义
-  if (!isValidEmail(task.email)) {
-    throw new PermanentTaskError(`邮箱格式非法：${task.email}`)
-  }
-
-  // 邮件服务 503 —— 临时故障，值得重试
-  await mailer.send({ ... })    // 抛普通 Error
 }
 </pre>
 </div>
 
 <div class="code" data-lang="ts">
 <pre>
-// 在消费者里区别对待
-try {
-  await handleTask(msg.body, env)
-  msg.ack()
-} catch (err) {
-  if (err instanceof PermanentTaskError) {
-    console.error('永久失败，不重试', { taskId: msg.body.id, err: err.message })
-    reportToSentry(err, { task: msg.body })
-    msg.ack()          // ← 确认掉，别让它一直重试浪费资源
+export const getCachedForecasts = withCache(getForecasts, 15 * 60 * 1000)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="缓存把外部请求量降下来">
+  <rect class="bx-r" x="20" y="20" width="345" height="80" rx="10"/>
+  <text class="ttl on-r" x="192" y="44" text-anchor="middle">没有缓存</text>
+  <text class="sm" x="36" y="68">1000 次页面访问 → 6000 次外部请求</text>
+  <text class="sm on-r" x="36" y="88">每次页面渲染都要等 300–800 ms</text>
+
+  <rect class="bx-g" x="395" y="20" width="345" height="80" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">15 分钟缓存</text>
+  <text class="sm" x="411" y="68">1000 次页面访问 → 最多 6 次外部请求</text>
+  <text class="sm on-g" x="411" y="88">除了第一次，之后都是 0 ms</text>
+
+  <text class="ttl" x="20" y="130">进程内缓存 vs 共享缓存</text>
+  <rect class="bx-b" x="20" y="142" width="345" height="70" rx="10"/>
+  <text class="sm on-b" x="36" y="164">进程内（上面的实现）</text>
+  <text class="sm" x="36" y="184">简单、零延迟，但每个实例一份</text>
+  <text class="sm" x="36" y="202">10 个实例 = 10 倍外部请求</text>
+
+  <rect class="bx-p" x="395" y="142" width="345" height="70" rx="10"/>
+  <text class="sm on-p" x="411" y="164">共享缓存（KV / Redis）</text>
+  <text class="sm" x="411" y="184">所有实例共用一份，请求量真正降到最低</text>
+  <text class="sm" x="411" y="202">边缘环境必须用这种（实例极多且短命）</text>
+</svg>
+<figcaption>图 22-2　实例越多，共享缓存越重要</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+// 边缘环境的版本：用 KV 做共享缓存
+export async function getForecastsFromKV(kv: KVNamespace): Promise&lt;Forecast[]&gt; {
+  const cached = await kv.get&lt;Forecast[]&gt;('weather:forecasts', 'json')
+  if (cached) return cached
+
+  const fresh = await getForecasts()
+  await kv.put('weather:forecasts', JSON.stringify(fresh), { expirationTtl: 900 })
+  return fresh
+}
+</pre>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+// 在中间件里注入，让所有页面都能用（第 7 章的 partial 现在有真数据了）
+app.use('*', async (c, next) =&gt; {
+  c.set('forecasts', await getForecastsFromKV(c.env.CACHE))
+  await next()
+})
+</pre>
+</div>
+
+<h2 id="geocode">地理编码与地图</h2>
+
+<p>
+  <strong>地理编码</strong>就是把「俄勒冈州胡德河市」这样的地址转成经纬度。
+  这类接口通常按调用次数收费，所以更要缓存 —— 而且是<strong>永久缓存</strong>：
+  一个地址的坐标基本不会变。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+export async function geocode(address: string, apiKey: string) {
+  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json')
+  url.searchParams.set('address', address)
+  url.searchParams.set('key', apiKey)
+
+  const data = await fetchJson&lt;{
+    status: string
+    results: { geometry: { location: { lat: number; lng: number } } }[]
+  }&gt;(url.toString())
+
+  if (data.status !== 'OK' || data.results.length === 0) return null
+
+  return data.results[0].geometry.location
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="scripts/geocode-vacations.ts">
+<pre>
+// 一次性脚本：把坐标写进数据库，之后再也不用调这个 API
+const rows = await db.select().from(vacations).where(isNull(vacations.lat))
+
+for (const v of rows) {
+  const loc = await geocode(v.locationSearch, process.env.GOOGLE_API_KEY!)
+  if (!loc) {
+    console.warn(`地理编码失败：${v.sku} · ${v.locationSearch}`)
     continue
   }
-  msg.retry({ delaySeconds: backoff(msg.attempts) })
-}
-</pre>
-</div>
 
-<div class="box warn">
-  <div class="t">&#9888; 「毒丸消息」</div>
-  <p>
-    如果一个任务因为数据格式问题<strong>永远</strong>会失败，而你又无限重试，
-    它会一直占用消费能力，拖慢所有其他任务 —— 这叫毒丸消息。<br>
-    防御手段就是上面两条：<strong>设置重试上限</strong>（必须有）+ <strong>识别永久错误直接 ack</strong>。
-  </p>
-</div>
+  await db.update(vacations)
+    .set({ lat: loc.lat, lng: loc.lng })
+    .where(eq(vacations.sku, v.sku))
 
-<h2 id="cron">定时任务</h2>
-
-<div class="code" data-lang="toml" data-file="wrangler.toml">
-<pre>
-[triggers]
-crons = [
-  "*/15 * * * *",     # 每 15 分钟：刷新天气缓存
-  "0 3 * * *",        # 每天凌晨 3 点：清理过期会话
-  "0 9 * * 1",        # 每周一上午 9 点：发周报
-]
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-export default {
-  fetch: app.fetch,
-  queue: handleQueue,
-
-  async scheduled(event: ScheduledController, env: Bindings, ctx: ExecutionContext) {
-    switch (event.cron) {
-      case '*/15 * * * *':
-        ctx.waitUntil(refreshWeatherCache(env))
-        break
-      case '0 3 * * *':
-        ctx.waitUntil(cleanupExpiredSessions(env))
-        break
-      case '0 9 * * 1':
-        // 周报要给几千人发 —— 定时任务里不直接发，而是投递任务
-        ctx.waitUntil(enqueueWeeklyReports(env))
-        break
-    }
-  },
+  console.log(`${v.name} → ${loc.lat}, ${loc.lng}`)
+  await new Promise((r) =&gt; setTimeout(r, 200))   // 尊重对方的速率限制
 }
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 定时任务负责「决定要做什么」，队列负责「做」</div>
+  <div class="t">&#9733; 分清「一次性」和「每次请求」</div>
   <p>
-    定时任务有执行时间上限，而且失败了要等下一个周期。所以它不该自己去做几千件事。<br>
-    正确的分工：<strong>定时任务扫一遍数据库，把要做的事拆成 N 个任务投进队列</strong>，
-    然后立刻结束。队列负责慢慢消化、单独重试失败的那几个。<br>
-    这样一个用户的邮件发失败，不会影响其余 4999 个。
+    地理编码属于<strong>数据准备</strong>，应该在录入数据时做一次，把结果存进数据库。<br>
+    绝对不要在渲染页面时实时调用 —— 那是把一个 O(1) 的操作变成了 O(访问量)。
+    <em>用户请求路径上的每一次外部调用，都是一个潜在的故障点和账单项。</em>
   </p>
 </div>
 
-<div class="code" data-lang="ts">
-<pre>
-async function enqueueWeeklyReports(env: Bindings) {
-  let cursor: string | undefined
-
-  do {
-    // 一定要分页，别一次性把几万条读进内存
-    const page = await getSubscribers(env.DB, { cursor, limit: 500 })
-
-    await env.TASKS.sendBatch(
-      page.items.map((u) =&gt; ({
-        body: newTask('send-weekly-report', { userId: u.id, week: currentWeek() }),
-      }))
-    )
-
-    cursor = page.nextCursor
-  } while (cursor)
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 定时任务可能重复执行</div>
-  <p>
-    平台通常只保证「至少执行一次」。而且多实例部署时，如果用的是自己实现的定时器
-    （比如 <code>node-cron</code>），<strong>每个实例都会各跑一遍</strong>。<br>
-    对策：任务本身幂等，或者用一把带日期的「执行锁」——
-    <code>INSERT INTO cron_runs (job, date) VALUES ('weekly-report', '2026-09-07')</code>，
-    靠唯一约束保证一天只有一个实例能插进去。
-  </p>
-</div>
-
-<h2 id="ux">用户界面怎么配合</h2>
+<h3>显示地图</h3>
 
 <p>
-  异步带来一个新问题：用户提交后，事情还没做完。界面要诚实地反映这一点。
+  地图 SDK 是少数应该在前端调用的场景（它本来就是画在浏览器里的）。
+  但仍然要保护好 Key：
 </p>
 
-<div class="tw">
-<table>
-  <tr><th>场景</th><th>做法</th></tr>
-  <tr><td>用户不关心结果（埋点、同步 CRM）</td><td>什么都不说，正常返回</td></tr>
-  <tr><td>用户知道会晚一点（确认邮件）</td><td>文案说明：「确认邮件将在几分钟内送达」</td></tr>
-  <tr><td>用户要等结果（生成报表、AI 处理）</td><td>返回任务 ID，前端轮询状态；或用 SSE 推送进度</td></tr>
-  <tr><td>结果可能失败（导入文件）</td><td>做一个「任务列表」页面，显示状态、失败原因、重试按钮</td></tr>
-</table>
-</div>
-
-<div class="code" data-lang="ts">
+<div class="code" data-lang="tsx">
 <pre>
-// 返回任务 ID，让前端能查进度
-app.post('/api/v1/reports', async (c) =&gt; {
-  const jobId = crypto.randomUUID()
-  await db.insert(jobs).values({ id: jobId, status: 'queued', createdAt: new Date() })
-  await c.env.TASKS.send(newTask('generate-report', { jobId, ...params }))
-
-  return c.json({ jobId, status: 'queued' }, 202)   // 202 Accepted：已受理，尚未完成
-})
-
-app.get('/api/v1/jobs/:id', async (c) =&gt; {
-  const job = await getJob(c.env.DB, c.req.param('id'))
-  if (!job) throw new HTTPException(404, { message: '任务不存在' })
-  return c.json({ status: job.status, progress: job.progress, resultUrl: job.resultUrl })
-})
+export const VacationsMap: FC&lt;{ vacations: Vacation[]; mapKey: string }&gt; = ({
+  vacations, mapKey,
+}) =&gt; (
+  &lt;&gt;
+    &lt;div id="map" style="height:480px"&gt;&lt;/div&gt;
+    {/* 用 JSON 传数据给前端脚本，避免拼接字符串造成注入 */}
+    &lt;script
+      type="application/json"
+      id="map-data"
+      dangerouslySetInnerHTML={{
+        __html: JSON.stringify(
+          vacations
+            .filter((v) =&gt; v.lat &amp;&amp; v.lng)
+            .map((v) =&gt; ({ name: v.name, lat: v.lat, lng: v.lng, url: `/vacations/${v.slug}` }))
+        ),
+      }}
+    /&gt;
+    &lt;script src={`https://maps.googleapis.com/maps/api/js?key=${mapKey}&amp;callback=initMap`} async&gt;&lt;/script&gt;
+    &lt;script src="/js/map.js" defer&gt;&lt;/script&gt;
+  &lt;/&gt;
+)
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 202 这个状态码就是为此而生的</div>
+  <div class="t">&#128161; 前端 Key 要加限制</div>
   <p>
-    <code>200 OK</code> 的语义是「做完了，这是结果」。<br>
-    <code>202 Accepted</code> 的语义是「收到了，会去做，但还没做完」。<br>
-    异步接口用 202，配上一个能查询状态的 URL，是 REST 里的标准做法。
+    地图这类必须暴露在前端的 Key，一定要在服务商控制台设置<strong>域名白名单</strong>
+    （只允许 <code>meadowlarktravel.com</code> 使用）和<strong>用量上限</strong>。
+    这样别人抄走了也用不了，而且万一被滥用，损失有上限。
   </p>
 </div>
 
-<h2 id="dont">什么时候不该用队列</h2>
+<h2 id="resilience">别人挂了，我不能挂</h2>
 
-<div class="box warn">
-  <div class="t">&#9888; 队列不是免费的</div>
-  <p>
-    它引入了一个新组件（要部署、要监控、要付费）、一套新的故障模式（积压、毒丸、重复消费）、
-    以及调试难度（日志分散在两个进程里）。<strong>不要默认所有东西都走队列。</strong>
-  </p>
+<p>
+  第三方服务一定会出问题 —— 超时、限流、返回格式变了、干脆下线。
+  你的应用要能撑住。三个层次：
+</p>
+
+<h3>① 降级</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+app.get('/', async (c) =&gt; {
+  let forecasts: Forecast[] = []
+  try {
+    forecasts = await getCachedForecasts()
+  } catch (err) {
+    console.error('天气数据不可用', err)
+    // 不抛出去。首页的主要内容和天气无关
+  }
+
+  return c.html(&lt;HomePage forecasts={forecasts} /&gt;)
+})
+</pre>
 </div>
 
-<div class="tw">
-<table>
-  <tr><th>不该用的情况</th><th>为什么 / 改用什么</th></tr>
-  <tr>
-    <td>操作只要 20 ms</td>
-    <td>投递本身就要 10 ms，还多了一堆复杂度。直接同步做</td>
-  </tr>
-  <tr>
-    <td>用户必须立刻看到结果</td>
-    <td>异步做完还要轮询，总时长反而更长，体验更差</td>
-  </tr>
-  <tr>
-    <td>需要严格的顺序执行</td>
-    <td>大多数队列不保证全局顺序。要顺序就用单分区/单消费者，但那就失去了扩容能力</td>
-  </tr>
-  <tr>
-    <td>任务失败必须让用户当场知道</td>
-    <td>异步失败时用户早就走了。这类操作应该同步做，让用户看到错误</td>
-  </tr>
-  <tr>
-    <td>整个项目只有一个异步需求</td>
-    <td><code>waitUntil</code> + 一张重试表可能就够了，先别上队列</td>
-  </tr>
-</table>
+<div class="code" data-lang="tsx">
+<pre>
+// 视图要能处理「没有数据」
+export const WeatherWidget: FC&lt;{ forecasts: Forecast[] }&gt; = ({ forecasts }) =&gt; {
+  if (forecasts.length === 0) return null   // 干脆不显示，好过显示一个报错框
+  return &lt;div class="weather"&gt;{/* ... */}&lt;/div&gt;
+}
+</pre>
 </div>
 
-<h2 id="observe">让队列可观测</h2>
+<h3>② 熔断</h3>
 
-<p>队列最容易出的问题是<strong>悄悄积压</strong>：一切看起来正常，只是邮件晚了六个小时。</p>
-
-<div class="box key">
-  <div class="t">&#9733; 至少监控这四个指标</div>
-  <ul>
-    <li><strong>队列深度</strong> —— 待处理任务数。持续增长 = 消费能力不够，该扩容了</li>
-    <li><strong>任务年龄</strong> —— 最老的任务等了多久。比深度更能反映用户感受</li>
-    <li><strong>失败率</strong> —— 突然上升通常意味着某个下游服务出问题了</li>
-    <li><strong>死信队列长度</strong> —— <strong>只要不是 0 就该告警</strong></li>
-  </ul>
-</div>
+<p>
+  如果对方已经连续失败了十次，第十一次大概率还是失败。
+  继续调用只会浪费时间、拖慢你自己的响应。<strong>熔断器</strong>会在失败到一定次数后
+  「跳闸」，一段时间内直接失败，不再发出请求。
+</p>
 
 <div class="code" data-lang="ts">
 <pre>
-// 在消费者里打结构化日志（第 12 章）
-async function handleTask(task: Task, env: Bindings) {
-  const start = Date.now()
-  try {
-    await dispatch(task, env)
-    log('info', 'task_done', {
-      taskId: task.id,
-      type: task.type,
-      durationMs: Date.now() - start,
-      // 从投递到完成的总延迟 —— 这才是用户实际等待的时间
-      latencyMs: Date.now() - task.createdAt,
-    })
-  } catch (err) {
-    log('error', 'task_failed', { taskId: task.id, type: task.type, error: String(err) })
-    throw err
+export function createBreaker&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;, opts = { threshold: 5, resetMs: 60_000 }) {
+  let failures = 0
+  let openUntil = 0
+
+  return async (): Promise&lt;T&gt; =&gt; {
+    if (Date.now() &lt; openUntil) {
+      throw new Error('熔断器已跳闸，暂时不调用该服务')
+    }
+
+    try {
+      const result = await fn()
+      failures = 0                       // 成功一次就重置
+      return result
+    } catch (err) {
+      failures++
+      if (failures &gt;= opts.threshold) {
+        openUntil = Date.now() + opts.resetMs
+        console.error(`熔断器跳闸，${opts.resetMs / 1000} 秒后重试`)
+      }
+      throw err
+    }
   }
 }
 </pre>
+</div>
+
+<h3>③ 超时预算</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 你的超时必须比调用方的超时短</div>
+  <p>
+    如果浏览器等你 10 秒，而你等第三方 30 秒，那么第三方一慢，
+    用户看到的就是浏览器超时 —— 而你的服务器还在傻等，占着连接和内存。<br>
+    <strong>给每个外部调用设置明确的超时，并且加起来要小于你自己的响应目标。</strong>
+    比如：目标 2 秒响应，那么两个外部调用各给 800 ms。
+  </p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="超时预算的分配">
+  <text class="ttl" x="20" y="24">用户能接受的等待时间，要在整条链路上分配完</text>
+
+  <rect class="bx-b" x="20" y="40" width="720" height="34" rx="6"/>
+  <text class="sm on-b" x="380" y="62" text-anchor="middle">浏览器愿意等：约 3 秒</text>
+
+  <rect class="bx-a" x="60" y="86" width="640" height="34" rx="6"/>
+  <text class="sm on-a" x="380" y="108" text-anchor="middle">你给自己的目标：2 秒内返回</text>
+
+  <rect class="bx-g" x="100" y="132" width="270" height="34" rx="6"/>
+  <text class="sm on-g" x="235" y="154" text-anchor="middle">天气 API：超时 800 ms</text>
+
+  <rect class="bx-g" x="380" y="132" width="230" height="34" rx="6"/>
+  <text class="sm on-g" x="495" y="154" text-anchor="middle">数据库查询：超时 500 ms</text>
+
+  <rect class="bx-d" x="620" y="132" width="80" height="34" rx="6"/>
+  <text class="sm" x="660" y="154" text-anchor="middle">渲染等</text>
+
+  <path class="ln-d" d="M100 172 V190 H700 V172"/>
+  <text class="sm" x="400" y="208" text-anchor="middle">800 + 500 + 余量 &lt; 2000 ms　&#10003;</text>
+
+  <rect class="bx-r" x="120" y="216" width="520" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="236" text-anchor="middle">如果外部调用超时设成 30 秒：用户早就走了，你的服务器还在等</text>
+</svg>
+<figcaption>图 22-3　超时是从外往里分配的预算，不是随手填的数字</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 反过来的方向</div>
+  <p>这一章讲的是「你主动调别人」。如果对方要<strong>主动通知你</strong>（支付结果、审核完成），那是 Webhook —— 思维完全反过来，见<strong>第 26 章</strong>。</p>
+</div>
+
+<h2 id="social">社交媒体嵌入</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 一个分享按钮可能拖慢整个页面</div>
+  <p>
+    第三方的嵌入脚本（分享按钮、评论组件、客服挂件、统计代码）通常会：
+    加载几百 KB 的 JS、发起十几个额外请求、插入 iframe、拖慢首屏、
+    并且它们的可用性完全不受你控制。
+  </p>
+  <p><strong>更好的做法：</strong></p>
+  <ul>
+    <li>分享按钮用纯链接实现（<code>https://twitter.com/intent/tweet?url=...</code>），零 JavaScript。</li>
+    <li>确实需要的嵌入，用<strong>惰性加载</strong>：先显示一个占位图，用户点击后才真正加载。</li>
+    <li>所有第三方脚本加 <code>defer</code> 或 <code>async</code>，绝不阻塞渲染。</li>
+    <li>用第 20 章的 CSP 限制第三方脚本能做什么。</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>问「用户看到响应时这件事必须完成吗」，不必须的就移出请求路径。</li>
-  <li>队列的最大价值不是快，是<strong>把外部依赖的可用性和核心业务解耦</strong>。</li>
-  <li>三种手段：<code>waitUntil</code>（丢了无所谓）、队列（不能丢）、定时任务（周期性）。</li>
-  <li><strong>至少一次投递 ⇒ 消费者必须幂等</strong>。这是硬性要求，不是可选项。</li>
-  <li>任务里放 ID 不放数据，执行时取最新状态。</li>
-  <li>区分临时失败（重试）和永久失败（直接 ack + 告警），设置重试上限防毒丸。</li>
-  <li>定时任务只负责「拆任务投队列」，不自己做几千件事。</li>
-  <li>异步接口返回 202 + 任务 ID；死信队列非空必须告警。</li>
-  <li>操作很快、用户要等结果、需要严格顺序 —— 这三种情况别用队列。</li>
-  <li>下一章的 Webhook 接收，以及第 14 章的搜索索引同步，都是队列最典型的应用场景。</li>
+  <li>默认在后端调第三方 API：保护 Key、能缓存、无 CORS、可统一处理错误。</li>
+  <li><code>fetch</code> 要包一层：超时、区分可重试与不可重试、指数退避加抖动。</li>
+  <li>缓存是最重要的优化，边缘环境要用共享缓存。</li>
+  <li>地理编码这类「结果不变」的调用，在数据录入时做一次并存库。</li>
+  <li>用降级、熔断、超时预算保证第三方故障不会传染给你。</li>
+  <li>第三方前端脚本要惰性加载，能用纯链接就别用脚本。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>把第 11 章的确认邮件改成异步：下单接口只写库 + 投递任务，用 <code>curl -w '%{time_total}'</code> 对比改造前后的响应时间。</li>
-    <li>故意让邮件服务返回 500，观察任务被重试的过程（看日志里的 <code>attempt</code> 递增）。确认下单接口本身<strong>没有</strong>受影响。</li>
-    <li>把同一个任务手动投递两次，确认只发出一封邮件。如果发了两封，说明幂等没做对。</li>
-    <li>制造一个「毒丸」：投递一个 email 字段为 <code>null</code> 的任务。它会被重试几次？加上 <code>PermanentTaskError</code> 后呢？</li>
-    <li>加一个定时任务，每 15 分钟刷新一次第 20 章的天气缓存。想一想：如果同时有 3 个实例在跑，会发生什么？怎么防？</li>
-    <li>做一个 <code>/api/v1/reports</code> 接口，返回 202 + 任务 ID，再做一个查询状态的接口。前端用轮询显示进度。</li>
+    <li>实现 <code>fetchJson</code>，用它调用任意一个公开 API。把超时改成 1 毫秒，确认它正确抛出超时错误而不是永久挂起。</li>
+    <li>给天气组件接上真实数据并加上 15 分钟缓存。在日志里打印实际发出的外部请求，刷新页面十次，确认只发了一轮。</li>
+    <li>把天气 API 的地址故意改错，确认首页仍然正常显示，只是没有天气组件。</li>
+    <li>实现熔断器，用一个必定失败的 URL 测试：连续失败 5 次后，第 6 次应该立刻失败而不发请求。</li>
+    <li>检查你的项目：用户请求路径上有几个外部调用？每一个的超时是多少？加起来会不会超过你的响应目标？</li>
   </ol>
 </div>
 

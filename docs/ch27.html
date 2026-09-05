@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 27 章 · 上线 — Hono 全栈开发教程</title>
+<title>第 27 章 · 实时通信 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="27">
@@ -12,482 +12,657 @@
 <main>
 
 <span class="chapter-eyebrow">第 27 章</span>
-<h1>上线</h1>
+<h1>实时通信</h1>
 <p class="lede">
-  云雀旅行终于要见人了。这一章讲域名、DNS、部署平台的选择，
-  以及怎么把「发布」变成一件不需要勇气的日常操作。
+  到现在为止，所有数据流动都由浏览器发起：它问，服务器答。
+  这一章反转这个方向 —— 让服务器<strong>主动推</strong>。通知、进度条、协作编辑、AI 流式输出，
+  都建立在这个能力上。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>看懂 DNS 记录，把域名指向你的应用</li>
-    <li>根据项目特点选择部署平台</li>
-    <li>把云雀旅行部署到 Cloudflare Workers 和传统服务器</li>
-    <li>搭一条自动化的发布流水线</li>
-    <li>准备好回滚方案</li>
+    <li>分清轮询、SSE、WebSocket 三者的适用场景，别一上来就选 WebSocket</li>
+    <li>用 <code>hono/streaming</code> 实现服务器推送，包括 AI 流式输出</li>
+    <li>处理断线重连和消息补发</li>
+    <li>理解多实例部署下「广播」为什么会失效，以及怎么解决</li>
+    <li>知道边缘环境下的特殊做法（Durable Objects）</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="dns">域名与 DNS</h2>
+<h2 id="three">三种方案</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="DNS 解析流程">
-  <rect class="bx-b" x="20" y="90" width="110" height="50" rx="8"/>
-  <text class="sm" x="75" y="112" text-anchor="middle">浏览器</text>
-  <text class="sm" x="75" y="130" text-anchor="middle">要访问站点</text>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="轮询、SSE、WebSocket 三种实时方案的对比">
+  <rect class="bx-b" x="20" y="20" width="230" height="196" rx="10"/>
+  <text class="ttl on-b" x="135" y="44" text-anchor="middle">轮询 Polling</text>
+  <text class="sm" x="36" y="68">浏览器每 N 秒问一次</text>
+  <path class="ln-b" d="M46 84 H120" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M120 96 H46" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M46 110 H120" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M120 122 H46" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="36" y="150">&#10003; 实现最简单</text>
+  <text class="sm on-g" x="36" y="168">&#10003; 任何环境都能用</text>
+  <text class="sm on-r" x="36" y="190">&#10007; 延迟 = 轮询间隔</text>
+  <text class="sm on-r" x="36" y="208">&#10007; 大量无效请求</text>
 
-  <path class="ln-b" d="M134 105 H240" marker-end="url(#ar)"/>
-  <text class="sm" x="187" y="98" text-anchor="middle">① 这个域名</text>
-  <text class="sm" x="187" y="114" text-anchor="middle">的 IP 是多少？</text>
+  <rect class="bx-a" x="266" y="20" width="230" height="196" rx="10"/>
+  <text class="ttl on-a" x="381" y="44" text-anchor="middle">SSE</text>
+  <text class="sm" x="282" y="68">一条长连接，服务器单向推</text>
+  <path class="ln-a" d="M292 88 H366" marker-end="url(#ar-a)"/>
+  <text class="sm" x="376" y="92">建立一次</text>
+  <path class="ln-g" d="M366 108 H292" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M366 122 H292" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M366 136 H292" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="282" y="162">&#10003; 浏览器自动重连</text>
+  <text class="sm on-g" x="282" y="180">&#10003; 就是普通 HTTP</text>
+  <text class="sm on-r" x="282" y="202">&#10007; 只能服务器→浏览器</text>
 
-  <rect class="bx" x="244" y="82" width="150" height="66" rx="8"/>
-  <text class="ttl" x="319" y="106" text-anchor="middle">DNS 解析器</text>
-  <text class="sm" x="319" y="124" text-anchor="middle">通常是运营商</text>
-  <text class="sm" x="319" y="140" text-anchor="middle">或 8.8.8.8</text>
+  <rect class="bx-p" x="512" y="20" width="228" height="196" rx="10"/>
+  <text class="ttl on-p" x="626" y="44" text-anchor="middle">WebSocket</text>
+  <text class="sm" x="528" y="68">全双工长连接</text>
+  <path class="ln-p" d="M538 90 H612" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M612 104 H538" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M538 118 H612" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M612 132 H538" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="528" y="162">&#10003; 双向、低延迟</text>
+  <text class="sm on-g" x="528" y="180">&#10003; 支持二进制</text>
+  <text class="sm on-r" x="528" y="202">&#10007; 重连要自己写</text>
 
-  <path class="ln" d="M398 105 H500" marker-end="url(#ar)"/>
-  <text class="sm" x="449" y="98" text-anchor="middle">② 逐级查询</text>
-
-  <rect class="bx-a" x="504" y="82" width="180" height="66" rx="8"/>
-  <text class="ttl on-a" x="594" y="104" text-anchor="middle">权威 DNS 服务器</text>
-  <text class="sm" x="594" y="122" text-anchor="middle">你在这里配置记录</text>
-  <text class="sm" x="594" y="140" text-anchor="middle">Cloudflare / 阿里云 …</text>
-
-  <path class="ln-g" d="M594 152 V180 H75 V145" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="340" y="174" text-anchor="middle">③ 返回 IP 地址，浏览器才开始真正的 HTTP 请求</text>
-
-  <rect class="bx-d" x="150" y="196" width="460" height="30" rx="6"/>
-  <text class="sm" x="380" y="216" text-anchor="middle">每一层都有缓存，所以改了 DNS 不会立刻全球生效（见 TTL）</text>
+  <rect class="bx-d" x="20" y="230" width="720" height="60" rx="10"/>
+  <text class="ttl" x="36" y="252">选择顺序</text>
+  <text class="sm" x="36" y="274">延迟能接受几秒 → 轮询　　只需要服务器推 → SSE　　浏览器也要高频发消息 → WebSocket</text>
 </svg>
-<figcaption>图 27-1　DNS 就是互联网的电话簿</figcaption>
+<figcaption>图 27-1　从左到右能力递增，复杂度也递增。<strong>从左往右选，不是反过来</strong></figcaption>
 </figure>
 
-<h3>常见记录类型</h3>
-
-<div class="tw">
-<table>
-  <tr><th>类型</th><th>作用</th><th>例子</th></tr>
-  <tr><td><code>A</code></td><td>域名 → IPv4 地址</td><td><code>meadowlarktravel.com → 203.0.113.10</code></td></tr>
-  <tr><td><code>AAAA</code></td><td>域名 → IPv6 地址</td><td><code>meadowlarktravel.com → 2001:db8::1</code></td></tr>
-  <tr><td><code>CNAME</code></td><td>域名 → 另一个域名（别名）</td><td><code>www → meadowlark.pages.dev</code></td></tr>
-  <tr><td><code>MX</code></td><td>这个域名的邮件由谁接收</td><td>配邮箱服务时用</td></tr>
-  <tr><td><code>TXT</code></td><td>任意文本。用于域名验证、SPF、DKIM</td><td>第 11 章的发信配置</td></tr>
-  <tr><td><code>NS</code></td><td>这个域名由哪些 DNS 服务器负责</td><td>换 DNS 服务商时改这个</td></tr>
-</table>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; TTL 与「DNS 生效要多久」</div>
-  <p>
-    每条记录有个 TTL（生存时间），告诉各级缓存「这个结果可以存多久」。
-    默认常见是 3600 秒（1 小时）。<br>
-    <strong>迁移前的技巧</strong>：提前一两天把 TTL 调到 300 秒，
-    这样切换时最多 5 分钟就全网生效；切换完成稳定后再调回去。
-  </p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 根域名不能用 CNAME</div>
-  <p>
-    DNS 规范不允许根域名（<code>meadowlarktravel.com</code>，也叫 apex）配 CNAME。
-    但很多平台只给你一个域名而不是 IP。<br>
-    解决办法：用支持 <strong>CNAME 展平</strong>（也叫 ALIAS / ANAME）的 DNS 服务商 ——
-    Cloudflare、Route53 等都支持。它们在解析时自动把 CNAME 转成 A 记录返回。
-  </p>
-</div>
-
-<h2 id="platforms">选择部署平台</h2>
-
-<div class="tw">
-<table>
-  <tr><th>平台</th><th>适合</th><th>注意</th></tr>
-  <tr>
-    <td><strong>Cloudflare Workers</strong></td>
-    <td>全球分发、按量计费、想要极低冷启动。配套有 D1、KV、R2、队列</td>
-    <td>受限运行时，没有文件系统，单请求有 CPU 时间上限</td>
-  </tr>
-  <tr>
-    <td><strong>Deno Deploy</strong></td>
-    <td>Deno 项目，配置极少</td>
-    <td>生态比 Node 小</td>
-  </tr>
-  <tr>
-    <td><strong>Vercel / Netlify</strong></td>
-    <td>前端和 API 一起部署，预览环境体验好</td>
-    <td>长任务和 WebSocket 支持有限</td>
-  </tr>
-  <tr>
-    <td><strong>Fly.io / Railway / Render</strong></td>
-    <td>要完整的 Node 环境、要跑后台任务、要连传统数据库</td>
-    <td>要自己管实例数量和扩缩容</td>
-  </tr>
-  <tr>
-    <td><strong>自己的 VPS + Docker</strong></td>
-    <td>有合规要求、要完全控制、成本敏感</td>
-    <td>系统更新、证书、监控、备份全都归你</td>
-  </tr>
-</table>
-</div>
-
 <div class="box key">
-  <div class="t">&#9733; 怎么选</div>
+  <div class="t">&#9733; 大多数「实时」需求用 SSE 就够了</div>
   <p>
-    先问一个问题：<strong>「我需要文件系统、长连接、或者跑几分钟的后台任务吗？」</strong><br>
-    不需要 → 边缘平台（Workers / Deno Deploy / Vercel），最省心。<br>
-    需要 → 容器平台（Fly.io / Railway）或自己的服务器。<br>
-    <br>
-    因为 Hono 基于 Web 标准，<strong>选错了也不是灾难</strong> —— 换平台主要是改入口文件和部署配置，
-    业务代码基本不动。
+    人们习惯性地一想到实时就用 WebSocket，但盘一下真实需求：
+    通知推送、订单状态更新、任务进度条、日志流、AI 流式回复 ——
+    <strong>这些全都是单向的</strong>（服务器 → 浏览器）。<br>
+    浏览器要发消息？用普通的 <code>fetch</code> POST 就行，不需要走同一条长连接。<br>
+    真正需要 WebSocket 的是：多人协作光标、实时对战游戏、语音视频信令 ——
+    <em>浏览器需要每秒发几十条消息</em>的场景。
   </p>
 </div>
 
-<h2 id="workers">部署到 Cloudflare Workers</h2>
-
-<div class="code" data-lang="ts" data-file="src/index.ts">
-<pre>
-import { app } from './app'
-
-export default app     // 就这一行
-</pre>
-</div>
-
-<div class="code" data-lang="toml" data-file="wrangler.toml">
-<pre>
-name = "meadowlark"
-main = "src/index.ts"
-compatibility_date = "2025-01-01"
-
-[assets]
-directory = "./public"
-binding = "ASSETS"
-
-[vars]
-APP_NAME = "云雀旅行"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "meadowlark"
-database_id = "your-database-id"
-
-[[kv_namespaces]]
-binding = "SESSIONS"
-id = "your-kv-id"
-
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "meadowlark-uploads"
-
-# 预发布环境
-[env.staging]
-name = "meadowlark-staging"
-vars = { APP_NAME = "云雀旅行（预发布）" }
-</pre>
-</div>
-
-<div class="code" data-lang="bash">
-<pre>
-# 本地开发（会模拟 D1、KV、R2）
-npx wrangler dev
-
-# 设置密钥（不会写进配置文件）
-npx wrangler secret put COOKIE_SECRET
-npx wrangler secret put RESEND_API_KEY
-
-# 应用数据库迁移
-npx wrangler d1 migrations apply meadowlark --remote
-
-# 部署
-npx wrangler deploy                    # 生产
-npx wrangler deploy --env staging      # 预发布
-
-# 看线上日志
-npx wrangler tail
-</pre>
-</div>
-
-<p>绑定自定义域名：在 Cloudflare 控制台把域名加进来，然后在 Workers 的 Triggers 里添加路由，
-或者直接在配置里声明：</p>
-
-<div class="code" data-lang="toml">
-<pre>
-routes = [
-  { pattern = "meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" },
-  { pattern = "www.meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" }
-]
-</pre>
-</div>
-
-<h2 id="node">部署到 Node 服务器</h2>
-
-<div class="code" data-lang="ts" data-file="src/server.ts">
-<pre>
-import { serve } from '@hono/node-server'
-import { app } from './app'
-
-const port = Number(process.env.PORT) || 3000
-
-const server = serve({ fetch: app.fetch, port }, (info) =&gt; {
-  console.log(`服务器已启动：http://localhost:${info.port}`)
-})
-
-// 优雅关闭：让手头的请求处理完再退出
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(signal, () =&gt; {
-    console.log(`收到 ${signal}，正在关闭`)
-    server.close(() =&gt; process.exit(0))
-    setTimeout(() =&gt; process.exit(1), 10_000).unref()
-  })
-}
-</pre>
-</div>
-
-<div class="code" data-lang="text" data-file="Dockerfile">
-<pre>
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM node:20-alpine
-WORKDIR /app
-ENV NODE_ENV=production
-COPY package*.json ./
-RUN npm ci --omit=dev &amp;&amp; npm cache clean --force
-COPY --from=build /app/dist ./dist
-COPY public ./public
-USER node
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD node -e "fetch('http://localhost:3000/health').then(r=&gt;process.exit(r.ok?0:1)).catch(()=&gt;process.exit(1))"
-CMD ["node", "dist/server.js"]
-</pre>
-</div>
-
-<p>前面放一个反向代理来终止 TLS。Caddy 的配置短得离谱，而且自动申请续期证书：</p>
-
-<div class="code" data-lang="text" data-file="Caddyfile">
-<pre>
-meadowlarktravel.com, www.meadowlarktravel.com {
-    reverse_proxy localhost:3000
-    encode gzip zstd
-}
-</pre>
-</div>
-
-<h2 id="others">其他运行时</h2>
+<h3>被低估的方案：轮询</h3>
 
 <div class="code" data-lang="ts">
 <pre>
-// Bun
-export default { port: 3000, fetch: app.fetch }
+// 别嘲笑它 —— 对于「查任务做完没」这类需求，这是最合理的方案
+async function pollJobStatus(jobId: string, onUpdate: (s: JobStatus) =&gt; void) {
+  let delay = 1000
+  while (true) {
+    const res = await fetch(`/api/v1/jobs/${jobId}`)
+    const job = await res.json()
+    onUpdate(job)
 
-// Deno
-Deno.serve({ port: 3000 }, app.fetch)
+    if (job.status === 'done' || job.status === 'failed') return job
 
-// Vercel（api/[[...route]].ts）
-import { handle } from 'hono/vercel'
-export default handle(app)
-
-// AWS Lambda
-import { handle } from 'hono/aws-lambda'
-export const handler = handle(app)
+    await new Promise((r) =&gt; setTimeout(r, delay))
+    delay = Math.min(delay * 1.5, 10_000)   // 退避：越等越久，减少无效请求
+  }
+}
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 这就是第 1 章说的「通用」</div>
+<div class="box tip">
+  <div class="t">&#128161; 轮询的优点是「没有连接状态」</div>
   <p>
-    上面每一段都只有一两行，而 <code>app</code> 本身完全没变。
-    你在第 3 到 20 章写的所有业务代码，在这五个平台上都能跑。
+    长连接会带来一整类新问题：连接数上限、心跳、超时、代理断连、多实例广播、
+    优雅重启时如何迁移连接。轮询完全没有这些 —— 每次都是一个独立的普通请求，
+    <strong>可以缓存、可以负载均衡、可以随便重启</strong>。<br>
+    第 25 章那个「202 + 查状态」的接口设计，配上退避轮询，能覆盖非常多的场景。
   </p>
 </div>
 
-<h2 id="cicd">自动化发布</h2>
+<h2 id="sse">SSE</h2>
+
+<p>
+  Server-Sent Events 本质上是一个<strong>永远不结束的 HTTP 响应</strong>：
+  Content-Type 是 <code>text/event-stream</code>，服务器不断往里写数据，浏览器边收边处理。
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+GET /api/v1/notifications HTTP/1.1
+Accept: text/event-stream
+
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+
+id: 1
+event: notification
+data: {"title":"订单已确认","orderId":"o_123"}
+
+id: 2
+event: notification
+data: {"title":"已发货","orderId":"o_123"}
+
+: 这是注释，用来做心跳保活
+
+</pre>
+</div>
+
+<h3>服务端</h3>
+
+<div class="code" data-lang="ts" data-file="src/routes/stream.ts">
+<pre>
+import { streamSSE } from 'hono/streaming'
+
+app.get('/api/v1/notifications', async (c) =&gt; {
+  const userId = c.get('user').id
+  // 浏览器重连时会带上这个头，告诉你它收到哪儿了
+  const lastEventId = c.req.header('Last-Event-ID')
+
+  return streamSSE(c, async (stream) =&gt; {
+    // ① 先补发断线期间错过的消息
+    if (lastEventId) {
+      const missed = await getNotificationsAfter(userId, lastEventId)
+      for (const n of missed) {
+        await stream.writeSSE({ id: n.id, event: 'notification', data: JSON.stringify(n) })
+      }
+    }
+
+    // ② 然后持续推送新消息
+    let alive = true
+    stream.onAbort(() =&gt; { alive = true &amp;&amp; (alive = false) })
+
+    while (alive) {
+      const batch = await waitForNotifications(userId, { timeoutMs: 25_000 })
+
+      if (batch.length === 0) {
+        // 没消息也要定期发点东西，否则代理会认为连接死了直接掐断
+        await stream.writeSSE({ data: '', event: 'ping' })
+        continue
+      }
+
+      for (const n of batch) {
+        await stream.writeSSE({ id: n.id, event: 'notification', data: JSON.stringify(n) })
+      }
+    }
+  })
+})
+</pre>
+</div>
+
+<h3>浏览器端</h3>
+
+<div class="code" data-lang="js">
+<pre>
+const source = new EventSource('/api/v1/notifications')
+
+source.addEventListener('notification', (e) =&gt; {
+  const n = JSON.parse(e.data)
+  showToast(n.title)
+})
+
+source.addEventListener('error', () =&gt; {
+  // 不用自己写重连 —— 浏览器会自动重连，并带上 Last-Event-ID
+  console.warn('连接中断，浏览器会自动重连')
+})
+
+// 页面关闭时记得断开
+window.addEventListener('beforeunload', () =&gt; source.close())
+</pre>
+</div>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="CI/CD 流水线">
-  <rect class="bx-b" x="20" y="30" width="110" height="46" rx="8"/>
-  <text class="sm" x="75" y="50" text-anchor="middle">推送到</text>
-  <text class="sm" x="75" y="66" text-anchor="middle">功能分支</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="SSE 断线重连与消息补发">
+  <path class="ln-d" d="M120 40 V220"/>
+  <text class="ttl on-b" x="60" y="36">浏览器</text>
+  <text class="ttl on-a" x="620" y="36">服务器</text>
+  <path class="ln-d" d="M640 40 V220"/>
 
-  <path class="ln" d="M134 53 H190" marker-end="url(#ar)"/>
-  <rect class="bx" x="194" y="30" width="130" height="46" rx="8"/>
-  <text class="sm" x="259" y="50" text-anchor="middle">CI 检查</text>
-  <text class="sm" x="259" y="66" text-anchor="middle">lint · 类型 · 测试</text>
+  <path class="ln-b" d="M124 60 H636" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="54" text-anchor="middle">GET /notifications　（建立连接）</text>
 
-  <path class="ln" d="M328 53 H384" marker-end="url(#ar)"/>
-  <rect class="bx-p" x="388" y="30" width="140" height="46" rx="8"/>
-  <text class="sm on-p" x="458" y="50" text-anchor="middle">预览环境</text>
-  <text class="sm" x="458" y="66" text-anchor="middle">每个 PR 一个地址</text>
+  <path class="ln-g" d="M636 84 H128" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="380" y="78" text-anchor="middle">id: 1　data: 订单已确认</text>
 
-  <path class="ln" d="M532 53 H588" marker-end="url(#ar)"/>
-  <rect class="bx" x="592" y="30" width="140" height="46" rx="8"/>
-  <text class="sm" x="662" y="50" text-anchor="middle">代码评审</text>
-  <text class="sm" x="662" y="66" text-anchor="middle">人来看</text>
+  <path class="ln-g" d="M636 108 H128" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="380" y="102" text-anchor="middle">id: 2　data: 已发货</text>
 
-  <path class="ln-a" d="M662 80 V106 H75 V130" marker-end="url(#ar-a)"/>
-  <text class="sm on-a" x="380" y="100" text-anchor="middle">合并到 main</text>
+  <rect class="bx-r" x="240" y="120" width="280" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="140" text-anchor="middle">网络中断（地铁进隧道 / 切换 WiFi）</text>
 
-  <rect class="bx-a" x="20" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="85" y="154" text-anchor="middle">跑迁移</text>
-  <text class="sm" x="85" y="170" text-anchor="middle">数据库先行</text>
+  <path class="ln-b" d="M124 174 H636" marker-end="url(#ar)"/>
+  <text class="sm on-b" x="380" y="168" text-anchor="middle">浏览器自动重连，带上 Last-Event-ID: 2</text>
 
-  <path class="ln-a" d="M154 157 H210" marker-end="url(#ar-a)"/>
-  <rect class="bx-a" x="214" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="279" y="154" text-anchor="middle">部署预发布</text>
+  <path class="ln-g" d="M636 200 H128" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="380" y="194" text-anchor="middle">id: 3　data: 已签收　（服务器补发 2 之后的消息）</text>
 
-  <path class="ln-a" d="M348 157 H404" marker-end="url(#ar-a)"/>
-  <rect class="bx-a" x="408" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="473" y="154" text-anchor="middle">冒烟测试</text>
-
-  <path class="ln-g" d="M542 157 H598" marker-end="url(#ar)"/>
-  <rect class="bx-g" x="602" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-g" x="667" y="154" text-anchor="middle">部署生产</text>
-  <text class="sm" x="667" y="170" text-anchor="middle">&#127881;</text>
-
-  <text class="sm on-r" x="380" y="206" text-anchor="middle">任何一步失败 → 停止，不部署，通知作者</text>
+  <rect class="bx-a" x="150" y="216" width="460" height="28" rx="6"/>
+  <text class="sm on-a" x="380" y="235" text-anchor="middle">重连和补发是 SSE 协议自带的能力，WebSocket 要自己实现这一套</text>
 </svg>
-<figcaption>图 27-2　把「发布」变成一条自动流水线</figcaption>
+<figcaption>图 27-2　<code>Last-Event-ID</code> 是 SSE 最被低估的特性</figcaption>
 </figure>
 
-<div class="code" data-lang="yaml" data-file=".github/workflows/deploy.yml">
-<pre>
-name: Deploy
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run build
-
-      - name: 应用数据库迁移
-        run: npx wrangler d1 migrations apply meadowlark --remote
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: 部署
-        run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: 冒烟测试
-        run: |
-          sleep 10
-          curl -sf https://meadowlarktravel.com/health || exit 1
-</pre>
-</div>
-
 <div class="box warn">
-  <div class="t">&#9888; 数据库迁移必须向后兼容</div>
-  <p>
-    部署过程中，会有一小段时间是<strong>新旧两个版本同时在跑</strong>。
-    如果迁移直接删掉了一个列，旧版本代码立刻报错。<br>
-    <strong>安全的做法是分两次发布：</strong><br>
-    ① 先加新列，新旧代码都能跑 → 部署新代码 → 确认稳定<br>
-    ② 下次发布再删旧列<br>
-    麻烦，但这是零停机发布的必要代价。
-  </p>
-</div>
-
-<h2 id="checklist">上线检查清单</h2>
-
-<div class="box key">
-  <div class="t">&#9733; 第一次上线前逐项确认</div>
+  <div class="t">&#9888; SSE 的两个坑</div>
   <ul>
-    <li>☐ 域名解析正确，<code>www</code> 和根域名都能访问（且互相跳转统一）</li>
-    <li>☐ HTTPS 生效，HTTP 自动跳转（第 19 章）</li>
-    <li>☐ 所有环境变量和密钥都在生产环境配好了</li>
-    <li>☐ 数据库迁移已应用，种子数据已就位</li>
-    <li>☐ <code>NODE_ENV=production</code></li>
-    <li>☐ 404 和 500 页面是自定义的，不泄露内部信息</li>
-    <li>☐ <code>/health</code> 端点正常，已接入外部可用性监控（第 12 章）</li>
-    <li>☐ 错误上报已接通，故意触发一次确认能收到</li>
-    <li>☐ 有 <code>robots.txt</code> 和 <code>sitemap.xml</code></li>
-    <li>☐ favicon、Open Graph 标签（分享到社交平台时的预览图）</li>
-    <li>☐ 数据库有自动备份，<strong>并且你恢复演练过一次</strong></li>
-    <li>☐ 知道怎么回滚，而且演练过</li>
+    <li><strong>HTTP/1.1 下同域最多 6 个连接。</strong>用户开了 7 个标签页，第 7 个就连不上，
+        而且会莫名其妙地卡住其他请求。HTTP/2 没这个问题（多路复用），
+        所以<strong>用 SSE 前先确认你的服务走的是 HTTP/2</strong>。</li>
+    <li><strong>中间的代理会掐连接。</strong>Nginx 默认 60 秒无数据就断开。
+        所以必须发心跳（哪怕是一行注释 <code>:ping</code>），周期要小于代理的超时。</li>
   </ul>
 </div>
 
-<div class="box warn">
-  <div class="t">&#9888; 没验证过的备份等于没有备份</div>
-  <p>
-    「我们有每日备份」这句话在真正需要恢复时经常变成
-    「备份文件是空的 / 格式不对 / 三个月前就停了没人发现」。<br>
-    <strong>现在就做一次恢复演练</strong>：把备份还原到一个临时数据库，确认数据完整。
-  </p>
-</div>
+<h2 id="ai">用 SSE 做 AI 流式输出</h2>
 
-<h2 id="rollback">回滚</h2>
+<p>
+  这是今天 SSE 最常见的用途。LLM 生成一段话要几秒，如果等全部生成完再返回，
+  用户面对的是几秒空白；流式输出则是一个字一个字往外蹦，感知延迟接近于零。
+</p>
 
-<div class="code" data-lang="bash">
+<div class="code" data-lang="ts">
 <pre>
-# Cloudflare Workers：回到上一个版本
-npx wrangler rollback
+import { streamSSE } from 'hono/streaming'
+import Anthropic from '@anthropic-ai/sdk'
 
-# Docker：换回上一个镜像标签
-docker compose up -d --no-deps app:v1.4.2
+app.post('/api/v1/assistant', zValidator('json', z.object({ prompt: z.string().max(2000) })), async (c) =&gt; {
+  const { prompt } = c.req.valid('json')
+  const client = new Anthropic({ apiKey: c.env.ANTHROPIC_API_KEY })
 
-# Git：撤销那次合并（保留历史，比 reset 安全）
-git revert -m 1 &lt;merge-commit&gt;
-git push
+  return streamSSE(c, async (stream) =&gt; {
+    let aborted = false
+    // 用户关掉页面时，要停止计费！
+    stream.onAbort(() =&gt; { aborted = true })
+
+    try {
+      const result = client.messages.stream({
+        model: 'claude-sonnet-5',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+      })
+
+      for await (const event of result) {
+        if (aborted) break
+        if (event.type === 'content_block_delta' &amp;&amp; event.delta.type === 'text_delta') {
+          await stream.writeSSE({ event: 'delta', data: event.delta.text })
+        }
+      }
+
+      if (!aborted) await stream.writeSSE({ event: 'done', data: '' })
+    } catch (err) {
+      console.error('AI 调用失败', err)
+      await stream.writeSSE({ event: 'error', data: '生成失败，请重试' })
+    }
+  })
+})
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 出问题时先回滚，再排查</div>
+  <div class="t">&#9733; <code>onAbort</code> 在这里直接等于钱</div>
   <p>
-    线上出故障时，本能反应是「让我看看哪里错了」。<br>
-    正确的顺序是：<strong>先回滚，恢复服务，然后再慢慢查</strong>。
-    用户不关心原因，只关心网站能不能用。而且回滚之后你可以在没有压力的情况下分析。<br>
-    <em>前提是回滚必须很快很可靠 —— 所以要提前演练。</em>
+    用户看了两句就关掉页面，但如果你不监听中断，服务端会<strong>继续把整段生成完</strong>
+    —— token 照常计费，连接照常占着。<br>
+    任何按量计费的流式接口都要处理中断。这是第 22 章「超时预算」思路的延伸：
+    <em>不要为已经没人要的结果付钱。</em>
   </p>
+</div>
+
+<div class="code" data-lang="js">
+<pre>
+// 浏览器端：注意 EventSource 只支持 GET，POST 要用 fetch + 手动解析
+const res = await fetch('/api/v1/assistant', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ prompt }),
+  signal: controller.signal,          // 用户点「停止」时 controller.abort()
+})
+
+const reader = res.body.getReader()
+const decoder = new TextDecoder()
+let buffer = ''
+
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+
+  buffer += decoder.decode(value, { stream: true })
+  const chunks = buffer.split('\n\n')
+  buffer = chunks.pop() ?? ''          // 最后一段可能不完整，留到下一轮
+
+  for (const chunk of chunks) {
+    const data = chunk.split('\n').find((l) =&gt; l.startsWith('data: '))?.slice(6)
+    if (data) appendToOutput(data)
+  }
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么要留 buffer</div>
+  <p>
+    网络传输不保证按消息边界切分 —— 一次 <code>read()</code> 可能拿到一条半消息。
+    直接按 <code>\n\n</code> 切会把最后那半条丢掉或解析错。<br>
+    <strong>把不完整的尾巴留到下一轮</strong>，是所有流式协议解析的通用模式。
+  </p>
+</div>
+
+<h2 id="websocket">WebSocket</h2>
+
+<p>当浏览器也需要高频发消息时，才轮到 WebSocket。各运行时的支持方式不同：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// Bun / Deno / Cloudflare Workers 通用写法
+import { upgradeWebSocket } from 'hono/bun'      // 或 hono/deno、hono/cloudflare-workers
+
+app.get('/ws', upgradeWebSocket((c) =&gt; {
+  const userId = c.get('user').id
+
+  return {
+    onOpen(_evt, ws) {
+      console.log('连接建立', userId)
+      hub.join(userId, ws)
+    },
+    onMessage(evt, ws) {
+      const msg = JSON.parse(String(evt.data))
+      if (msg.type === 'cursor') {
+        hub.broadcast(msg.docId, { type: 'cursor', userId, pos: msg.pos }, { except: userId })
+      }
+    },
+    onClose() {
+      hub.leave(userId)
+    },
+    onError(err) {
+      console.error('WebSocket 错误', err)
+    },
+  }
+}))
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Node.js 上不能直接用</div>
+  <p>
+    <code>@hono/node-server</code> 需要额外的 <code>@hono/node-ws</code> 包来支持 WebSocket 升级，
+    因为 Node 的 <code>http</code> 模块处理 upgrade 的方式和 Web 标准不一样。<br>
+    这也是本章推荐优先用 SSE 的一个现实原因：<strong>SSE 就是普通 HTTP，哪儿都能跑。</strong>
+  </p>
+</div>
+
+<h3>浏览器端要自己写重连</h3>
+
+<div class="code" data-lang="js">
+<pre>
+function connect(url, onMessage) {
+  let ws
+  let retry = 0
+  let heartbeat
+
+  const open = () =&gt; {
+    ws = new WebSocket(url)
+
+    ws.onopen = () =&gt; {
+      retry = 0                                    // 成功了就重置退避
+      heartbeat = setInterval(() =&gt; {
+        if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"ping"}')
+      }, 25_000)
+    }
+
+    ws.onmessage = (e) =&gt; onMessage(JSON.parse(e.data))
+
+    ws.onclose = () =&gt; {
+      clearInterval(heartbeat)
+      // 指数退避 + 抖动（和第 22 章重试同一个道理）
+      const delay = Math.min(1000 * 2 ** retry++, 30_000) + Math.random() * 1000
+      setTimeout(open, delay)
+    }
+  }
+
+  open()
+  return { close: () =&gt; { clearInterval(heartbeat); ws?.close() } }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 重连必须带退避</div>
+  <p>
+    没有退避的重连是<strong>自杀式的</strong>：服务器重启的那 30 秒，
+    一万个客户端每秒重连一次 = 每秒 10000 个连接请求，服务器刚起来就被打死，
+    然后又重启……形成死循环。<br>
+    加上随机抖动同样重要，否则所有客户端会在同一时刻整齐划一地重连。
+  </p>
+</div>
+
+<h2 id="broadcast">多实例的广播问题</h2>
+
+<p>
+  这是长连接最大的架构陷阱，也是第 12 章「无状态」原则的直接后果。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="多实例下广播失效以及用 pub/sub 解决">
+  <text class="ttl on-r" x="20" y="22">问题：连接分散在不同实例上</text>
+
+  <rect class="bx-b" x="20" y="34" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="56" text-anchor="middle">用户 A</text>
+  <rect class="bx-b" x="20" y="76" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="98" text-anchor="middle">用户 B</text>
+  <rect class="bx-b" x="20" y="118" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="140" text-anchor="middle">用户 C</text>
+
+  <path class="ln-b" d="M114 51 H186" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M114 95 H186" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M114 137 L186 110" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="190" y="34" width="130" height="76" rx="8"/>
+  <text class="sm on-a" x="255" y="58" text-anchor="middle">实例 1</text>
+  <text class="sm" x="255" y="78" text-anchor="middle">连着 A、B、C</text>
+
+  <rect class="bx-a" x="190" y="120" width="130" height="60" rx="8"/>
+  <text class="sm on-a" x="255" y="146" text-anchor="middle">实例 2</text>
+  <text class="sm" x="255" y="166" text-anchor="middle">连着 D、E</text>
+
+  <rect class="bx-r" x="360" y="60" width="380" height="90" rx="10"/>
+  <text class="ttl on-r" x="376" y="84">用户 D 发了一条消息，请求落在实例 2</text>
+  <text class="sm" x="376" y="108">实例 2 广播给「自己的连接」→ 只有 E 收到了</text>
+  <text class="sm on-r" x="376" y="132">A、B、C 什么都没收到，因为实例 2 根本不认识它们</text>
+
+  <path class="ln-d" d="M20 196 H740"/>
+
+  <text class="ttl on-g" x="20" y="222">解法：加一层 pub/sub</text>
+  <rect class="bx-a" x="120" y="234" width="110" height="34" rx="6"/>
+  <text class="sm on-a" x="175" y="256" text-anchor="middle">实例 1</text>
+  <rect class="bx-a" x="120" y="272" width="110" height="26" rx="6"/>
+  <text class="sm on-a" x="175" y="290" text-anchor="middle">实例 2</text>
+
+  <path class="ln-g" d="M234 251 H326" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M234 285 H326 V262" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="330" y="234" width="160" height="46" rx="8"/>
+  <text class="sm on-g" x="410" y="254" text-anchor="middle">Redis Pub/Sub</text>
+  <text class="sm" x="410" y="272" text-anchor="middle">或消息队列</text>
+
+  <path class="ln-g" d="M494 257 H560" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="564" y="234" width="176" height="46" rx="8"/>
+  <text class="sm" x="652" y="252" text-anchor="middle">每个实例订阅频道，</text>
+  <text class="sm" x="652" y="270" text-anchor="middle">收到后推给自己的连接</text>
+</svg>
+<figcaption>图 27-3　长连接是有状态的，而实例是无状态的 —— 这个矛盾要靠外部组件调和</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+import { Redis } from 'ioredis'
+
+const pub = new Redis(process.env.REDIS_URL!)
+const sub = new Redis(process.env.REDIS_URL!)   // 订阅要用独立连接
+
+// 本实例持有的连接
+const local = new Map&lt;string, Set&lt;WSContext&gt;&gt;()
+
+// 启动时订阅
+sub.subscribe('broadcast')
+sub.on('message', (_channel, payload) =&gt; {
+  const { room, data } = JSON.parse(payload)
+  for (const ws of local.get(room) ?? []) {
+    ws.send(JSON.stringify(data))
+  }
+})
+
+// 广播 = 发到 Redis，让所有实例（包括自己）都收到
+export async function broadcast(room: string, data: unknown) {
+  await pub.publish('broadcast', JSON.stringify({ room, data }))
+}
+</pre>
+</div>
+
+<h3>Cloudflare 上的另一种思路</h3>
+
+<div class="box note">
+  <div class="t">&#9432; Durable Objects：把「有状态」正当化</div>
+  <p>
+    Workers 是无状态的，跑不了长连接的房间管理。Cloudflare 给的答案是
+    <strong>Durable Object</strong>：一个全球<em>唯一</em>的对象实例，有自己的内存和存储，
+    所有针对它的请求都路由到同一个地方。
+  </p>
+  <p>
+    于是「一个聊天室 = 一个 Durable Object」，所有成员的 WebSocket 都连到同一个实例上，
+    广播就是简单的内存遍历，<strong>不需要 Redis</strong>。第 23 章讲的并发问题在这里也自动消失了
+    —— 因为它天然串行。
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+export class ChatRoom implements DurableObject {
+  private sessions = new Set&lt;WebSocket&gt;()
+
+  constructor(private state: DurableObjectState, private env: Env) {}
+
+  async fetch(request: Request) {
+    const pair = new WebSocketPair()
+    const [client, server] = Object.values(pair)
+
+    server.accept()
+    this.sessions.add(server)
+
+    server.addEventListener('message', (evt) =&gt; {
+      // 房间里所有人都连在这一个对象上，广播就是遍历
+      for (const ws of this.sessions) {
+        if (ws !== server) ws.send(evt.data)
+      }
+    })
+
+    server.addEventListener('close', () =&gt; this.sessions.delete(server))
+
+    return new Response(null, { status: 101, webSocket: client })
+  }
+}
+</pre>
+</div>
+
+<h2 id="ops">运维上要注意的</h2>
+
+<div class="tw">
+<table>
+  <tr><th>问题</th><th>说明与对策</th></tr>
+  <tr>
+    <td>连接数就是内存</td>
+    <td>每条连接几十 KB。一万条连接就是几百 MB，还占一个文件描述符。要监控连接数并设上限</td>
+  </tr>
+  <tr>
+    <td>部署会断开所有连接</td>
+    <td>滚动更新时全体客户端重连 —— 这正是退避抖动存在的意义。发版尽量选低峰</td>
+  </tr>
+  <tr>
+    <td>慢客户端造成反压</td>
+    <td>对方网络差，你写得比他收得快，缓冲区无限增长直到 OOM。要监控发送缓冲，超阈值就丢消息或断开</td>
+  </tr>
+  <tr>
+    <td>鉴权时机不同</td>
+    <td>WebSocket 握手后就没有请求头了。要在<strong>升级前</strong>验证身份，并定期检查会话是否已失效</td>
+  </tr>
+  <tr>
+    <td>浏览器 <code>EventSource</code> 不能带自定义头</td>
+    <td>没法传 <code>Authorization</code>。用 Cookie 认证，或者把短期令牌放在查询串里</td>
+  </tr>
+  <tr>
+    <td>无法水平缓存</td>
+    <td>长连接不能走 CDN 缓存，每条都实打实占着一个后端资源</td>
+  </tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别把长连接当数据库用</div>
+  <p>
+    常见错误：把「当前在线用户」「房间成员列表」只存在实例内存里。
+    实例一重启，这些状态全没了，而且别的实例根本看不到。<br>
+    <strong>连接是易失的，状态要落库。</strong>内存里只保留「连接对象本身」，
+    其余一切（谁在哪个房间、消息历史）都存数据库或 Redis。
+  </p>
+</div>
+
+<h2 id="degrade">优雅降级</h2>
+
+<p>
+  企业内网代理、老旧浏览器、某些移动网络都可能让长连接建立不起来。
+  好的实现要能退回到轮询：
+</p>
+
+<div class="code" data-lang="js">
+<pre>
+function subscribe(onMessage) {
+  if (typeof EventSource === 'undefined') return startPolling(onMessage)
+
+  const source = new EventSource('/api/v1/notifications')
+  let gotAnything = false
+
+  source.addEventListener('notification', (e) =&gt; {
+    gotAnything = true
+    onMessage(JSON.parse(e.data))
+  })
+
+  // 8 秒内一条都没收到（连心跳都没有）→ 认为环境不支持，退回轮询
+  setTimeout(() =&gt; {
+    if (!gotAnything) {
+      console.warn('SSE 似乎不可用，退回轮询')
+      source.close()
+      startPolling(onMessage)
+    }
+  }, 8000)
+
+  return source
+}
+</pre>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>DNS 把域名映射到服务器；迁移前先把 TTL 调小。</li>
-  <li>需不需要文件系统和长任务，决定了你该用边缘平台还是容器平台。</li>
-  <li>Hono 换平台只改入口文件，业务代码不动。</li>
-  <li>发布要自动化：检查 → 迁移 → 部署 → 冒烟测试。</li>
-  <li>数据库迁移必须向后兼容，删列要等下一次发布。</li>
-  <li>回滚和备份恢复都要<strong>演练过</strong>才算数。出故障时先回滚再排查。</li>
+  <li>选型顺序：<strong>轮询 → SSE → WebSocket</strong>，从简单往复杂选，不要反过来。</li>
+  <li>绝大多数「实时」需求是单向的，SSE 就够，而且它就是普通 HTTP，哪儿都能跑。</li>
+  <li>SSE 自带重连和 <code>Last-Event-ID</code> 补发，这是它相对 WebSocket 的最大优势。</li>
+  <li>心跳必须有，周期要小于中间代理的超时。</li>
+  <li>流式接口一定要处理 <code>onAbort</code>，尤其是按量计费的 AI 调用。</li>
+  <li>解析流式数据时要保留不完整的尾巴到下一轮。</li>
+  <li>多实例下广播必须走 pub/sub；Cloudflare 上可以用 Durable Objects 绕开这个问题。</li>
+  <li>重连必须指数退避加抖动，否则会在服务恢复时把它再打死一次。</li>
+  <li>连接是易失的，状态要落库。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>用 <code>dig meadowlarktravel.com</code>（或 <code>nslookup</code>）查一个你熟悉的网站，看看它的 A 记录、CNAME 和 TTL。</li>
-    <li>把云雀旅行部署到 Cloudflare Workers 的免费额度上，绑定一个你自己的域名（或者用平台提供的 <code>*.workers.dev</code>）。</li>
-    <li>配一条 GitHub Actions 流水线：推送到 main 就自动跑测试并部署。故意让一个测试失败，确认它<strong>没有</strong>部署。</li>
-    <li>做一次回滚演练：部署一个明显有问题的版本，然后用 <code>wrangler rollback</code> 恢复，计时看要多久。</li>
-    <li>对照上线清单，把你项目里还没做的项列出来。</li>
+    <li>做一个 <code>/api/v1/clock</code> 的 SSE 端点，每秒推一次当前时间。用 <code>curl -N</code> 直接观察原始的事件流格式。</li>
+    <li>在浏览器里用 <code>EventSource</code> 连上它。然后<strong>把服务器停掉</strong>，在 Network 面板观察浏览器自动重连的行为和间隔。</li>
+    <li>给第 25 章的报表任务加一个 SSE 进度推送，替换掉轮询。对比两种实现的代码量和体验。</li>
+    <li>实现 AI 流式输出（可以先用一个假的、逐字吐出的生成器代替真实 API）。加上「停止生成」按钮，确认服务端的 <code>onAbort</code> 真的被触发了。</li>
+    <li>把心跳去掉，让连接空闲 5 分钟，看看它会不会被断开。然后加回心跳再试。</li>
+    <li>想一想：如果你的服务跑了 3 个实例，用户 A 连在实例 1 上，怎么让实例 3 处理的一个请求把消息推给 A？</li>
   </ol>
 </div>
 

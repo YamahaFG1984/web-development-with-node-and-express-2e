@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 19 章 · 安全 — Hono 全栈开发教程</title>
+<title>第 19 章 · 静态资源 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="19">
@@ -12,635 +12,456 @@
 <main>
 
 <span class="chapter-eyebrow">第 19 章</span>
-<h1>安全</h1>
+<h1>静态资源</h1>
 <p class="lede">
-  安全不是上线前加的一个功能，而是贯穿每一章的一条线。
-  这一章把散落在前面的安全知识收拢起来，再补上认证、授权和几种最常见的攻击。
+  一个典型页面里，HTML 只占几十 KB，剩下的几 MB 全是图片、CSS 和 JavaScript。
+  用户感受到的「快不快」，主要由这部分决定。这一章讲怎么把它们又快又省地送出去。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>配好 HTTPS，理解反向代理背后的协议判断</li>
-    <li>一行接上安全响应头，理解 CSP 在防什么</li>
-    <li>搞懂 CSRF 的原理和两道防线</li>
-    <li>正确存储密码，实现会话认证和 JWT 认证</li>
-    <li>接入第三方登录，实现基于角色的授权</li>
+    <li>分清静态资源和动态内容，知道各自的优化手段</li>
+    <li>在不同运行时上正确配置 <code>serveStatic</code></li>
+    <li>理解 CDN 的工作方式和它为什么能大幅提速</li>
+    <li>掌握缓存三件套：<code>Cache-Control</code>、<code>ETag</code>、内容指纹</li>
+    <li>解决「改了文件但用户看到的还是旧版」这个经典问题</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="https">HTTPS</h2>
-
-<p>
-  没有 HTTPS，所有内容都是明文传输：同一个 WiFi 下的人能看到你的密码，
-  运营商能往页面里插广告，中间人能篡改你下载的 JavaScript。
-</p>
-
-<p>
-  今天没有理由不用 HTTPS：证书免费（Let's Encrypt），主流平台自动配置，
-  而且浏览器把很多能力（地理位置、摄像头、Service Worker）设成了 HTTPS 独占。
-</p>
+<h2 id="what">什么算静态资源</h2>
 
 <div class="tw">
 <table>
-  <tr><th>部署方式</th><th>证书怎么来</th></tr>
-  <tr><td>Cloudflare Workers / Vercel / Netlify</td><td><strong>自动，什么都不用做</strong></td></tr>
-  <tr><td>自己的服务器 + Nginx/Caddy</td><td>Caddy 全自动；Nginx 配 certbot 自动续期</td></tr>
-  <tr><td>云厂商负载均衡</td><td>在控制台申请托管证书</td></tr>
-  <tr><td>本地开发</td><td><code>mkcert</code> 生成本地信任的证书，或者直接用 http</td></tr>
+  <tr><th>类型</th><th>例子</th><th>特点</th></tr>
+  <tr><td>样式与脚本</td><td><code>main.css</code>、<code>app.js</code></td><td>构建产物，内容变了文件名就该变</td></tr>
+  <tr><td>图片</td><td>logo、照片、图标</td><td>体积最大的一块，优化收益最高</td></tr>
+  <tr><td>字体</td><td><code>.woff2</code></td><td>阻塞文字渲染，要小心处理</td></tr>
+  <tr><td>其他</td><td><code>favicon.ico</code>、<code>robots.txt</code>、下载文件</td><td>基本不变</td></tr>
 </table>
 </div>
 
-<h3>代理背后的坑</h3>
+<div class="box key">
+  <div class="t">&#9733; 一条分界线</div>
+  <p>
+    <strong>静态资源</strong>：给定 URL，返回的字节永远一样，和是谁在请求无关。可以放 CDN，可以缓存一年。<br>
+    <strong>动态内容</strong>：需要执行代码才能算出来，可能因用户而异。不能盲目缓存。<br>
+    <em>用这条线判断：「如果我把这个响应存下来发给另一个用户，会出问题吗？」</em>
+  </p>
+</div>
+
+<h2 id="perf">性能的三个维度</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="反向代理后面的应用看到的是 HTTP">
-  <rect class="bx-b" x="20" y="60" width="120" height="56" rx="8"/>
-  <text class="sm" x="80" y="92" text-anchor="middle">浏览器</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="影响加载速度的三个因素">
+  <rect class="bx-b" x="20" y="20" width="230" height="130" rx="10"/>
+  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① 请求数量</text>
+  <text class="sm" x="36" y="70">每个请求都有固定开销</text>
+  <text class="sm" x="36" y="90">HTTP/2 之后不再需要</text>
+  <text class="sm" x="36" y="110">把文件合并成一个大包</text>
+  <text class="sm on-g" x="36" y="136">但小图标仍建议内联</text>
 
-  <path class="ln-g" d="M144 88 H286" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="215" y="80" text-anchor="middle">HTTPS · 加密</text>
+  <rect class="bx-p" x="266" y="20" width="230" height="130" rx="10"/>
+  <text class="ttl on-p" x="381" y="44" text-anchor="middle">② 传输体积</text>
+  <text class="sm" x="282" y="70">压缩（gzip / brotli）</text>
+  <text class="sm" x="282" y="90">图片用 WebP / AVIF</text>
+  <text class="sm" x="282" y="110">删掉没用到的 CSS/JS</text>
+  <text class="sm on-g" x="282" y="136">收益通常最大</text>
 
-  <rect class="bx-a" x="290" y="52" width="150" height="72" rx="10"/>
-  <text class="ttl on-a" x="365" y="76" text-anchor="middle">反向代理</text>
-  <text class="sm" x="365" y="94" text-anchor="middle">Nginx / 负载均衡</text>
-  <text class="sm" x="365" y="112" text-anchor="middle">在这里解密</text>
+  <rect class="bx-g" x="512" y="20" width="228" height="130" rx="10"/>
+  <text class="ttl on-g" x="626" y="44" text-anchor="middle">③ 物理距离</text>
+  <text class="sm" x="528" y="70">北京到弗吉尼亚往返</text>
+  <text class="sm" x="528" y="90">约 200–300 ms</text>
+  <text class="sm" x="528" y="110">再快的服务器也没用</text>
+  <text class="sm on-g" x="528" y="136">这是 CDN 解决的</text>
 
-  <path class="ln-r" d="M444 88 H586" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="515" y="80" text-anchor="middle">HTTP · 内网明文</text>
-
-  <rect class="bx" x="590" y="60" width="150" height="56" rx="8"/>
-  <text class="sm" x="665" y="86" text-anchor="middle">你的 Hono 应用</text>
-  <text class="sm" x="665" y="104" text-anchor="middle">以为自己在跑 HTTP</text>
-
-  <rect class="bx-d" x="140" y="146" width="480" height="44" rx="8"/>
-  <text class="sm" x="380" y="166" text-anchor="middle">代理会加一个头告诉你真相：X-Forwarded-Proto: https</text>
-  <text class="sm" x="380" y="184" text-anchor="middle">判断「用户是不是走的 HTTPS」要看它，不能看连接本身</text>
+  <rect class="bx-a" x="20" y="170" width="720" height="66" rx="10"/>
+  <text class="ttl on-a" x="380" y="194" text-anchor="middle">最快的请求是不发生的请求</text>
+  <text class="sm" x="380" y="216" text-anchor="middle">缓存命中的资源，三个维度全部归零。所以本章后半部分几乎都在讲缓存。</text>
 </svg>
-<figcaption>图 19-1　在代理后面，应用看到的协议不是用户看到的协议</figcaption>
+<figcaption>图 19-1　优化顺序：先减体积，再上 CDN，最后调缓存</figcaption>
 </figure>
+
+<h2 id="serve">用 Hono 提供静态资源</h2>
 
 <div class="code" data-lang="ts">
 <pre>
-function isSecure(c: Context) {
-  const proto = c.req.header('x-forwarded-proto')
-  if (proto) return proto.split(',')[0].trim() === 'https'
-  return new URL(c.req.url).protocol === 'https:'
-}
+// Node.js
+import { serveStatic } from '@hono/node-server/serve-static'
+app.use('/*', serveStatic({ root: './public' }))
 
-// 强制跳转 HTTPS
-app.use('*', async (c, next) =&gt; {
-  if (isProduction &amp;&amp; !isSecure(c)) {
-    const url = new URL(c.req.url)
-    url.protocol = 'https:'
-    return c.redirect(url.toString(), 301)
-  }
-  await next()
-})
+// Bun
+import { serveStatic } from 'hono/bun'
+app.use('/*', serveStatic({ root: './public' }))
+
+// Deno
+import { serveStatic } from 'hono/deno'
+app.use('/*', serveStatic({ root: './public' }))
+</pre>
+</div>
+
+<h3>常用选项</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(
+  '/static/*',
+  serveStatic({
+    root: './public',
+    // 去掉 URL 前缀再去找文件：/static/img/a.png → ./public/img/a.png
+    rewriteRequestPath: (path) =&gt; path.replace(/^\/static/, ''),
+
+    // 在响应上补充头
+    onFound: (path, c) =&gt; {
+      c.header('Cache-Control', 'public, max-age=31536000, immutable')
+    },
+
+    // 文件不存在时
+    onNotFound: (path, c) =&gt; {
+      console.warn(`静态文件缺失：${path}`)
+    },
+  })
+)
+</pre>
+</div>
+
+<h3>Cloudflare Workers 上不一样</h3>
+
+<p>
+  Workers 上不用 <code>serveStatic</code> —— 静态文件由平台直接托管，
+  <strong>根本不会进入你的代码</strong>，因此更快也更便宜：
+</p>
+
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+name = "meadowlark"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# 找不到对应文件时，才交给你的 Worker 代码处理
+not_found_handling = "single-page-application"
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这是边缘架构的一个优势</div>
+  <p>
+    传统服务器上，每个图片请求都要唤醒你的应用进程去读文件。
+    在 Workers 上，静态资源在边缘节点直接命中，你的代码只在真正需要动态逻辑时才执行。
+    <strong>省下的不只是延迟，还有账单</strong>（按请求计费的平台通常不对静态资源计费）。
+  </p>
+</div>
+
+<h2 id="cdn">CDN</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="有无 CDN 的请求路径对比">
+  <text class="ttl on-r" x="20" y="24">没有 CDN</text>
+  <rect class="bx" x="20" y="34" width="90" height="42" rx="8"/>
+  <text class="sm" x="65" y="60" text-anchor="middle">北京用户</text>
+  <path class="ln-r" d="M114 55 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="357" y="46" text-anchor="middle">每张图片都要跨越太平洋往返一次</text>
+  <text class="sm on-r" x="357" y="72" text-anchor="middle">约 250 ms · 有 30 个资源就是 30 次</text>
+  <rect class="bx" x="604" y="34" width="130" height="42" rx="8"/>
+  <text class="sm" x="669" y="60" text-anchor="middle">源站（美国）</text>
+
+  <path class="ln-d" d="M20 100 H740"/>
+
+  <text class="ttl on-g" x="20" y="130">有 CDN</text>
+  <rect class="bx" x="20" y="140" width="90" height="42" rx="8"/>
+  <text class="sm" x="65" y="166" text-anchor="middle">北京用户</text>
+
+  <path class="ln-g" d="M114 161 H236" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="175" y="152" text-anchor="middle">10 ms</text>
+
+  <rect class="bx-g" x="240" y="132" width="150" height="58" rx="8"/>
+  <text class="ttl on-g" x="315" y="154" text-anchor="middle">CDN 北京节点</text>
+  <text class="sm" x="315" y="172" text-anchor="middle">缓存命中，直接返回</text>
+
+  <path class="ln-d" d="M394 161 H600" marker-end="url(#ar)"/>
+  <text class="sm" x="497" y="152" text-anchor="middle">仅首次未命中时回源</text>
+
+  <rect class="bx" x="604" y="140" width="130" height="42" rx="8"/>
+  <text class="sm" x="669" y="166" text-anchor="middle">源站（美国）</text>
+
+  <rect class="bx-a" x="20" y="212" width="720" height="56" rx="10"/>
+  <text class="ttl on-a" x="380" y="234" text-anchor="middle">CDN 的两个作用</text>
+  <text class="sm" x="380" y="256" text-anchor="middle">① 缩短物理距离，降低延迟　② 挡掉绝大部分流量，源站压力骤减</text>
+</svg>
+<figcaption>图 19-2　CDN 就是「把文件的副本放到离用户近的地方」</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 部署在 Workers 上的话，你已经在用 CDN 了</div>
+  <p>
+    Cloudflare Workers、Vercel、Netlify 这些平台本身就跑在 CDN 网络上。
+    你不需要额外配置 —— <strong>静态资源和你的代码都已经分发到全球边缘节点了。</strong>
+    只有部署在单台服务器上时，才需要单独接一个 CDN。
+  </p>
+</div>
+
+<h2 id="cache">缓存</h2>
+
+<p>浏览器缓存有两种模式，理解这两者的区别是本章的核心：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="强缓存与协商缓存的流程对比">
+  <rect class="bx-g" x="20" y="20" width="700" height="118" rx="10"/>
+  <text class="ttl on-g" x="36" y="44">强缓存：连请求都不发</text>
+  <text class="sm" x="36" y="68">响应头：Cache-Control: public, max-age=31536000, immutable</text>
+  <text class="sm" x="36" y="92">浏览器：这个资源我本地有，而且没过期 → <tspan class="on-g">直接用，0 次网络请求</tspan></text>
+  <text class="sm" x="36" y="116">适合：带内容指纹的构建产物（app-a1b2c3.js）</text>
+
+  <rect class="bx-b" x="20" y="152" width="700" height="130" rx="10"/>
+  <text class="ttl on-b" x="36" y="176">协商缓存：发请求但可能不传内容</text>
+  <text class="sm" x="36" y="200">响应头：ETag: "abc123"　或　Last-Modified: ...</text>
+  <text class="sm" x="36" y="224">下次请求带上：If-None-Match: "abc123"</text>
+  <text class="sm" x="36" y="248">服务器比对后：内容没变 → <tspan class="on-b">返回 304，不带响应体</tspan>（省流量，但省不了往返时间）</text>
+  <text class="sm" x="36" y="272">适合：文件名固定但内容可能变的资源，比如 /logo.png</text>
+</svg>
+<figcaption>图 19-3　强缓存省掉整个请求，协商缓存只省掉传输</figcaption>
+</figure>
+
+<h3>Cache-Control 速查</h3>
+
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>含义</th><th>用在哪</th></tr>
+  <tr><td><code>public, max-age=31536000, immutable</code></td><td>缓存一年，且永不重新验证</td><td>带内容指纹的 JS/CSS</td></tr>
+  <tr><td><code>public, max-age=3600</code></td><td>缓存一小时</td><td>图片等不常变的资源</td></tr>
+  <tr><td><code>no-cache</code></td><td>可以缓存，但每次都要问服务器「变了吗」</td><td>HTML 页面</td></tr>
+  <tr><td><code>no-store</code></td><td>完全不缓存，一个字节都不留</td><td>含个人信息的页面、API 响应</td></tr>
+  <tr><td><code>private, max-age=0</code></td><td>只允许浏览器缓存，CDN 不许缓存</td><td>登录后的个性化页面</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>no-cache</code> 不是「不缓存」</div>
+  <p>
+    这是命名最坑的一对：<br>
+    <code>no-cache</code> = 「可以存，但用之前必须问我一下」（协商缓存）<br>
+    <code>no-store</code> = 「一个字节都别存」（真正的不缓存）<br>
+    想让敏感页面不被缓存，用 <code>no-store</code>。
+  </p>
+</div>
+
+<h3>ETag</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+import { etag } from 'hono/etag'
+
+app.use('/*', etag())
+</pre>
+</div>
+
+<p>
+  这个中间件会根据响应内容算一个哈希放进 <code>ETag</code> 头。
+  浏览器下次请求时带上 <code>If-None-Match</code>，内容没变就返回 304。
+</p>
+
+<div class="code" data-lang="http">
+<pre>
+# 第一次
+GET /logo.png
+← 200 OK
+  ETag: "a1b2c3d4"
+  Content-Length: 48213
+
+# 第二次
+GET /logo.png
+  If-None-Match: "a1b2c3d4"
+← 304 Not Modified          ← 没有响应体，只有几十字节的头
+</pre>
+</div>
+
+<h3>Cache API 中间件</h3>
+
+<p>在支持 Cache API 的运行时（Workers、Deno）上，可以把动态生成的响应也缓存起来：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { cache } from 'hono/cache'
+
+app.get(
+  '/api/v1/vacations',
+  cache({
+    cacheName: 'meadowlark-v1',
+    cacheControl: 'public, max-age=300',    // 缓存 5 分钟
+    // 按语言分别缓存，避免中文用户拿到英文版
+    vary: ['Accept-Language'],
+  }),
+  listVacations
+)
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 只信任你自己的代理发来的头</div>
+  <div class="t">&#9888; 千万别缓存带个人信息的响应</div>
   <p>
-    <code>X-Forwarded-Proto</code> 是个普通请求头，<strong>任何人都能伪造</strong>。
-    只有当你确定请求一定经过自己的代理（且代理会覆盖这个头）时才能信任它。
-    如果应用可以被直接访问，攻击者就能伪造这个头绕过你的 HTTPS 检查。
+    如果 <code>/api/me</code> 被 CDN 缓存了，第二个用户就会拿到第一个用户的资料。
+    <strong>这是真实发生过的重大事故。</strong><br>
+    规则：任何依赖 Cookie、<code>Authorization</code> 头或会话的响应，
+    必须设 <code>Cache-Control: private, no-store</code>。
   </p>
 </div>
 
-<h2 id="headers">安全响应头</h2>
+<h2 id="fingerprint">改了文件用户却看到旧版</h2>
 
-<div class="code" data-lang="ts">
+<p>这是缓存带来的经典问题，也是有标准解法的问题。</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 固定文件名 + 长缓存</div>
+    <div class="code" data-lang="html"><pre>
+&lt;script src="/js/app.js"&gt;&lt;/script&gt;
+
+Cache-Control: max-age=31536000
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      你改了 app.js 并发布，但用户浏览器里缓存的旧版还有 364 天才过期。
+      新 HTML 配旧 JS，页面直接坏掉。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 内容指纹 + 长缓存</div>
+    <div class="code" data-lang="html"><pre>
+&lt;script src="/js/app-a1b2c3.js"&gt;&lt;/script&gt;
+
+Cache-Control: max-age=31536000, immutable
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      内容一变，哈希就变，文件名就变，URL 就变 —— 浏览器认为这是个<strong>全新的资源</strong>，
+      必然重新下载。
+    </div>
+  </div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="内容指纹配合 HTML 不缓存的策略">
+  <rect class="bx-a" x="150" y="20" width="460" height="56" rx="10"/>
+  <text class="ttl on-a" x="380" y="42" text-anchor="middle">index.html</text>
+  <text class="mono sm" x="380" y="62" text-anchor="middle">Cache-Control: no-cache　← 每次都问服务器</text>
+
+  <path class="ln-a" d="M300 80 L180 118" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M460 80 L580 118" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="40" y="122" width="280" height="56" rx="10"/>
+  <text class="mono sm" x="180" y="144" text-anchor="middle">/assets/app-a1b2c3.js</text>
+  <text class="mono sm" x="180" y="164" text-anchor="middle">max-age=31536000, immutable</text>
+
+  <rect class="bx-g" x="440" y="122" width="280" height="56" rx="10"/>
+  <text class="mono sm" x="580" y="144" text-anchor="middle">/assets/main-d4e5f6.css</text>
+  <text class="mono sm" x="580" y="164" text-anchor="middle">max-age=31536000, immutable</text>
+</svg>
+<figcaption>图 19-4　HTML 短缓存做「索引」，指纹资源长缓存做「内容」</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 记住这个组合</div>
+  <p>
+    <strong>HTML 用 <code>no-cache</code>（很小，每次验证一下），
+    带指纹的资源用 <code>max-age=31536000, immutable</code>（很大，永久缓存）。</strong><br>
+    这样发布新版本时，用户只需重新下载几 KB 的 HTML，
+    HTML 里的新文件名会自动触发新资源的下载，旧资源静静躺在缓存里等着过期。
+  </p>
+</div>
+
+<p>Vite 默认就是这么做的，你不用手动改文件名：</p>
+
+<div class="code" data-lang="text">
 <pre>
-import { secureHeaders } from 'hono/secure-headers'
+$ npm run build
 
-app.use('*', secureHeaders())
+dist/index.html                    0.46 kB
+dist/assets/index-DiwrgTda.css     1.23 kB
+dist/assets/index-C2vZs9Xy.js    143.61 kB
 </pre>
 </div>
 
-<p>这一行会加上一整组头。逐个看看它们在防什么：</p>
-
-<div class="tw">
-<table>
-  <tr><th>响应头</th><th>防的是</th></tr>
-  <tr><td><code>Strict-Transport-Security</code></td><td>告诉浏览器「以后只用 HTTPS 访问我」，防降级攻击</td></tr>
-  <tr><td><code>X-Content-Type-Options: nosniff</code></td><td>禁止浏览器猜测内容类型。防止上传的「图片」被当成脚本执行</td></tr>
-  <tr><td><code>X-Frame-Options: SAMEORIGIN</code></td><td>禁止别人把你的页面嵌进 iframe，防点击劫持</td></tr>
-  <tr><td><code>Referrer-Policy</code></td><td>控制跳转时泄露多少来源 URL 信息</td></tr>
-  <tr><td><code>Content-Security-Policy</code></td><td><strong>最强的一道</strong>：限定只能从哪些来源加载脚本、样式、图片</td></tr>
-</table>
-</div>
-
-<h3>CSP：XSS 的最后一道防线</h3>
-
 <div class="code" data-lang="ts">
 <pre>
-app.use('*', secureHeaders({
-  contentSecurityPolicy: {
-    defaultSrc: ["'self'"],
-    scriptSrc: ["'self'"],                          // 只允许自己域名下的脚本
-    styleSrc: ["'self'", "'unsafe-inline'"],
-    imgSrc: ["'self'", 'data:', 'https://cdn.meadowlarktravel.com'],
-    connectSrc: ["'self'", 'https://api.meadowlarktravel.com'],
-    frameAncestors: ["'none'"],                     // 谁都不能嵌我
-    objectSrc: ["'none'"],
-    upgradeInsecureRequests: [],
+// 配合上面的构建产物设置缓存头
+app.use('/assets/*', serveStatic({
+  root: './public',
+  onFound: (_path, c) =&gt; {
+    c.header('Cache-Control', 'public, max-age=31536000, immutable')
+  },
+}))
+
+app.use('/*', serveStatic({
+  root: './public',
+  onFound: (_path, c) =&gt; {
+    c.header('Cache-Control', 'no-cache')
   },
 }))
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; CSP 为什么重要</div>
-  <p>
-    假设你的模板某处漏掉了转义，攻击者成功注入了
-    <code>&lt;script src="https://evil.com/steal.js"&gt;</code>。<br>
-    有 CSP 的话，浏览器会<strong>拒绝加载</strong>这个脚本，因为 <code>evil.com</code> 不在
-    <code>scriptSrc</code> 白名单里。<br>
-    <strong>CSP 是「假设我的其他防护已经失败了」之后的兜底。</strong>纵深防御的典范。
-  </p>
-</div>
+<h2 id="images">图片</h2>
 
-<div class="box tip">
-  <div class="t">&#128161; 先用报告模式</div>
-  <p>
-    CSP 配紧了很容易把自己的功能搞坏（第三方统计脚本、内联样式）。
-    先用 <code>Content-Security-Policy-Report-Only</code> 上线，
-    观察浏览器控制台报告了哪些违规，调整好再切成强制模式。
-  </p>
-</div>
+<p>图片通常占页面体积的六到八成，优化收益最高：</p>
 
-<h2 id="csrf">CSRF</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="CSRF 攻击的原理">
-  <text class="ttl on-r" x="20" y="24">攻击是这样发生的</text>
-
-  <rect class="bx" x="20" y="36" width="200" height="60" rx="8"/>
-  <text class="sm" x="120" y="58" text-anchor="middle">① 你登录了 bank.com</text>
-  <text class="sm" x="120" y="78" text-anchor="middle">浏览器存了会话 Cookie</text>
-
-  <path class="ln" d="M224 66 H286" marker-end="url(#ar)"/>
-
-  <rect class="bx-r" x="290" y="36" width="200" height="60" rx="8"/>
-  <text class="sm on-r" x="390" y="58" text-anchor="middle">② 你又打开了 evil.com</text>
-  <text class="sm" x="390" y="78" text-anchor="middle">（一封邮件里的链接）</text>
-
-  <path class="ln" d="M494 66 H556" marker-end="url(#ar)"/>
-
-  <rect class="bx-r" x="560" y="26" width="180" height="80" rx="8"/>
-  <text class="sm on-r" x="650" y="48" text-anchor="middle">③ 页面里藏着</text>
-  <text class="mono sm" x="650" y="68" text-anchor="middle">&lt;form action=</text>
-  <text class="mono sm" x="650" y="84" text-anchor="middle">"bank.com/transfer"&gt;</text>
-  <text class="sm on-r" x="650" y="100" text-anchor="middle">自动提交</text>
-
-  <path class="ln-r" d="M650 110 V150 H200 V186" style="stroke:var(--red)" marker-end="url(#ar)"/>
-
-  <rect class="bx-r" x="60" y="190" width="280" height="60" rx="8"/>
-  <text class="sm on-r" x="200" y="212" text-anchor="middle">④ 浏览器<tspan>自动带上</tspan> bank.com 的 Cookie</text>
-  <text class="sm on-r" x="200" y="234" text-anchor="middle">服务器认为是你本人操作 → 转账成功</text>
-
-  <rect class="bx-g" x="400" y="176" width="340" height="88" rx="10"/>
-  <text class="ttl on-g" x="570" y="198" text-anchor="middle">关键点</text>
-  <text class="sm" x="416" y="220">攻击者<tspan>读不到</tspan>响应（同源策略挡着）</text>
-  <text class="sm" x="416" y="240">但他不需要读 —— 请求已经生效了</text>
-  <text class="sm" x="416" y="258">所以危险的是「有副作用」的请求</text>
-</svg>
-<figcaption>图 19-2　CSRF 利用的是「浏览器会自动带上 Cookie」这个特性</figcaption>
-</figure>
-
-<h3>两道防线</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// 第一道：SameSite Cookie（第 9 章讲过）
-setCookie(c, 'sid', id, {
-  httpOnly: true,
-  secure: true,
-  sameSite: 'Lax',    // 跨站 POST 不会带上这个 Cookie
-})
-
-// 第二道：Hono 的 CSRF 中间件
-import { csrf } from 'hono/csrf'
-
-app.use('*', csrf({ origin: 'https://meadowlarktravel.com' }))
-</pre>
-</div>
-
-<p>
-  <code>csrf()</code> 中间件检查请求的 <code>Origin</code> 头是否属于你的站点，
-  不匹配就拒绝。对于表单提交场景，这已经足够。
-</p>
-
-<div class="box note">
-  <div class="t">&#9432; 用令牌的做法</div>
-  <p>
-    更传统的方案是「双重提交令牌」：服务器给每个表单生成一个随机 token，
-    同时放在隐藏字段和 Cookie 里，提交时比对两者是否一致。
-    攻击者的页面读不到你的 Cookie，所以造不出正确的隐藏字段。
-    <br>
-    今天 <code>SameSite=Lax</code> + Origin 校验对绝大多数应用已经够用。
-    需要更严格时（比如支付），再叠加令牌。
-  </p>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 纯 API 通常不需要 CSRF 防护</div>
-  <p>
-    CSRF 依赖「浏览器自动带 Cookie」。如果你的 API 用
-    <code>Authorization: Bearer</code> 头做认证，浏览器<strong>不会</strong>自动带上这个头，
-    攻击者也造不出来 —— 天然免疫 CSRF。<br>
-    <strong>用 Cookie 认证就要防 CSRF，用 Bearer 令牌就不用。</strong>
-  </p>
-</div>
-
-<h2 id="passwords">密码</h2>
-
-<div class="box warn">
-  <div class="t">&#9888; 关于密码存储的三条铁律</div>
-  <ol>
-    <li><strong>永远不要存明文。</strong>数据库一旦泄露，所有用户在其他网站的账号也跟着完蛋
-        （因为很多人复用密码）。</li>
-    <li><strong>不要用 MD5 或 SHA-256。</strong>它们设计目标是「快」，
-        现代显卡每秒能试几十亿次，一个 8 位密码几分钟就能爆破出来。</li>
-    <li><strong>用专门的密码哈希算法</strong>：Argon2id（首选）、bcrypt、scrypt。
-        它们故意设计得慢且消耗内存，让爆破成本高到不可行。</li>
-  </ol>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// Node.js / Bun：用 Argon2
-import { hash, verify } from '@node-rs/argon2'
-
-const passwordHash = await hash(plainPassword)      // 注册时
-const ok = await verify(passwordHash, plainPassword) // 登录时
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// 边缘运行时（Workers）：原生模块用不了，用 Web Crypto 的 PBKDF2
-async function hashPassword(password: string): Promise&lt;string&gt; {
-  const salt = crypto.getRandomValues(new Uint8Array(16))
-  const key = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
-  )
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations: 210_000, hash: 'SHA-256' },
-    key, 256
-  )
-  return `pbkdf2$210000$${b64(salt)}$${b64(new Uint8Array(bits))}`
-}
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; 最好的密码方案是没有密码</div>
-  <p>
-    自己实现密码认证意味着你要负责：安全存储、重置流程、防撞库、防暴力破解、
-    可能还有双因素认证。<br>
-    <strong>能用第三方登录（Google / GitHub / 微信）就用</strong> —— 见下文。
-    或者用「魔法链接」：用户输入邮箱，你发一封带一次性链接的邮件，点击即登录。
-    没有密码，就没有密码泄露。
-  </p>
-</div>
-
-<h2 id="authn">认证与授权</h2>
-
-<div class="vs">
-  <div class="old">
-    <div class="h">认证 Authentication</div>
-    <div style="padding:12px 16px;font-size:14.5px">
-      <strong>你是谁？</strong><br>
-      验证身份。用户名密码、第三方登录、令牌。<br>
-      失败返回 <strong>401</strong>。
-    </div>
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128444;</span><h4>选对格式</h4>
+    <p>照片用 AVIF / WebP，比 JPEG 小 30–50%。图标和插图用 SVG（矢量、可缩放、体积小）。</p>
   </div>
-  <div class="new">
-    <div class="h">授权 Authorization</div>
-    <div style="padding:12px 16px;font-size:14.5px">
-      <strong>你能做什么？</strong><br>
-      验证权限。角色、所有权、订阅等级。<br>
-      失败返回 <strong>403</strong>。
-    </div>
+  <div class="card">
+    <span class="ic">&#128207;</span><h4>不要超尺寸</h4>
+    <p>显示宽度 400px 的位置，不要放 4000px 的原图。用 <code>srcset</code> 按屏幕提供不同尺寸。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#9203;</span><h4>懒加载</h4>
+    <p>首屏之外的图片加 <code>loading="lazy"</code>，一个属性的事。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128207;</span><h4>写上宽高</h4>
+    <p>给 <code>&lt;img&gt;</code> 写 <code>width</code> 和 <code>height</code>，避免图片加载后页面跳动。</p>
   </div>
 </div>
 
-<h3>方案一：会话认证（适合网页）</h3>
-
-<div class="code" data-lang="ts">
+<div class="code" data-lang="html">
 <pre>
-app.post('/login', zValidator('form', loginSchema), async (c) =&gt; {
-  const { email, password } = c.req.valid('form')
-
-  const user = await db.getUserByEmail(email)
-
-  // 注意：用户不存在和密码错误要返回同样的信息和同样的耗时
-  // 否则攻击者可以用它来枚举哪些邮箱注册过
-  if (!user || !(await verify(user.passwordHash, password))) {
-    return c.html(&lt;LoginPage error="邮箱或密码不正确" /&gt;, 401)
-  }
-
-  const session = c.get('session')
-  session.userId = user.id
-  session.createdAt = Date.now()
-
-  return c.redirect('/account', 303)
-})
+&lt;picture&gt;
+  &lt;source srcset="/img/hood-river.avif" type="image/avif"&gt;
+  &lt;source srcset="/img/hood-river.webp" type="image/webp"&gt;
+  &lt;img
+    src="/img/hood-river.jpg"
+    alt="胡德河上的帆船"
+    width="800" height="600"
+    loading="lazy"
+    decoding="async"
+  &gt;
+&lt;/picture&gt;
 </pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/middleware/auth.ts">
-<pre>
-export const loadUser = createMiddleware&lt;{ Variables: { user?: User } }&gt;(
-  async (c, next) =&gt; {
-    const userId = c.get('session')?.userId
-    if (userId) {
-      const user = await db.getUserById(String(userId))
-      if (user) c.set('user', user)
-    }
-    await next()
-  }
-)
-
-export const requireLogin = createMiddleware(async (c, next) =&gt; {
-  if (!c.get('user')) {
-    // 记住原本想去的地方，登录后跳回来
-    c.get('session').returnTo = c.req.path
-    return c.redirect('/login', 303)
-  }
-  await next()
-})
-
-export function requireRole(...roles: string[]) {
-  return createMiddleware(async (c, next) =&gt; {
-    const user = c.get('user')
-    if (!user) return c.redirect('/login', 303)
-    if (!roles.includes(user.role)) {
-      return c.html(&lt;ForbiddenPage /&gt;, 403)
-    }
-    await next()
-  })
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-app.use('*', loadUser)
-app.use('/account/*', requireLogin)
-app.use('/admin/*', requireRole('admin', 'staff'))
-</pre>
-</div>
-
-<h3>方案二：JWT（适合 API）</h3>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="JWT 的三段结构与验证流程">
-  <rect class="bx-b" x="40" y="26" width="200" height="48" rx="8"/>
-  <text class="sm on-b" x="140" y="48" text-anchor="middle">Header</text>
-  <text class="mono sm" x="140" y="66" text-anchor="middle">{"alg":"HS256"}</text>
-
-  <rect class="bx-p" x="270" y="26" width="220" height="48" rx="8"/>
-  <text class="sm on-p" x="380" y="48" text-anchor="middle">Payload（载荷）</text>
-  <text class="mono sm" x="380" y="66" text-anchor="middle">{"sub":"u_1","role":"admin","exp":…}</text>
-
-  <rect class="bx-g" x="520" y="26" width="200" height="48" rx="8"/>
-  <text class="sm on-g" x="620" y="48" text-anchor="middle">Signature（签名）</text>
-  <text class="mono sm" x="620" y="66" text-anchor="middle">用密钥算出来的校验码</text>
-
-  <text class="mono sm" x="380" y="98" text-anchor="middle">eyJhbGciOi… . eyJzdWIiOi… . 4f3d2a1b…</text>
-
-  <rect class="bx-a" x="60" y="122" width="300" height="100" rx="10"/>
-  <text class="ttl on-a" x="210" y="146" text-anchor="middle">优点</text>
-  <text class="sm" x="76" y="170">服务器<tspan>不用存</tspan>任何东西</text>
-  <text class="sm" x="76" y="190">任何一台机器都能独立验证</text>
-  <text class="sm" x="76" y="210">天然适合无状态、多实例、边缘</text>
-
-  <rect class="bx-r" x="400" y="122" width="300" height="100" rx="10"/>
-  <text class="ttl on-r" x="550" y="146" text-anchor="middle">代价</text>
-  <text class="sm" x="416" y="170">签发之后<tspan class="on-r">无法主动作废</tspan></text>
-  <text class="sm" x="416" y="190">用户改密码/被封号，旧令牌仍有效</text>
-  <text class="sm" x="416" y="210">所以有效期要短（15 分钟）+ 刷新令牌</text>
-</svg>
-<figcaption>图 19-3　JWT 是「可验证的自包含凭证」，不是「加密的秘密」</figcaption>
-</figure>
-
-<div class="code" data-lang="ts">
-<pre>
-import { jwt, sign } from 'hono/jwt'
-
-// 签发
-app.post('/api/v1/auth/login', zValidator('json', loginSchema), async (c) =&gt; {
-  const { email, password } = c.req.valid('json')
-  const user = await db.getUserByEmail(email)
-
-  if (!user || !(await verify(user.passwordHash, password))) {
-    throw new HTTPException(401, { message: '邮箱或密码不正确' })
-  }
-
-  const token = await sign(
-    {
-      sub: user.id,
-      role: user.role,
-      exp: Math.floor(Date.now() / 1000) + 60 * 15,   // 15 分钟
-    },
-    c.env.JWT_SECRET
-  )
-
-  return c.json({ token })
-})
-
-// 验证：中间件会自动检查 Authorization: Bearer xxx
-app.use('/api/v1/protected/*', (c, next) =&gt;
-  jwt({ secret: c.env.JWT_SECRET })(c, next)
-)
-
-app.get('/api/v1/protected/me', (c) =&gt; {
-  const payload = c.get('jwtPayload')
-  return c.json({ userId: payload.sub, role: payload.role })
-})
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; JWT 的载荷是<strong>公开的</strong></div>
-  <p>
-    那三段只是 Base64 编码，不是加密。任何人复制粘贴到
-    <a href="https://jwt.io">jwt.io</a> 就能看到全部内容。<br>
-    <strong>不要往载荷里放密码、身份证号、任何敏感信息。</strong>
-    签名保证的是「这些内容没被改过」，不是「别人看不到」。
-  </p>
-</div>
-
-<h2 id="oauth">第三方登录</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="OAuth 授权码流程">
-  <rect class="bx-b" x="20" y="30" width="110" height="44" rx="8"/>
-  <text class="sm" x="75" y="57" text-anchor="middle">用户</text>
-
-  <rect class="bx-a" x="325" y="30" width="110" height="44" rx="8"/>
-  <text class="sm on-a" x="380" y="57" text-anchor="middle">你的应用</text>
-
-  <rect class="bx-g" x="630" y="30" width="110" height="44" rx="8"/>
-  <text class="sm on-g" x="685" y="57" text-anchor="middle">GitHub</text>
-
-  <path class="ln-b" d="M75 80 V104 H375" marker-end="url(#ar)"/>
-  <text class="sm" x="230" y="98" text-anchor="middle">① 点击「用 GitHub 登录」</text>
-
-  <path class="ln-a" d="M380 112 V128 H680 V80" marker-end="url(#ar-a)"/>
-  <text class="sm" x="540" y="126" text-anchor="middle">② 重定向到 GitHub 授权页</text>
-
-  <path class="ln-g" d="M685 80 V152 H80 V80" marker-end="url(#ar)"/>
-  <text class="sm" x="380" y="150" text-anchor="middle">③ 用户在 GitHub 上登录并同意授权</text>
-
-  <path class="ln-b" d="M75 160 V176 H375" marker-end="url(#ar)"/>
-  <text class="sm" x="230" y="172" text-anchor="middle">④ 带着授权码回到你的回调地址</text>
-
-  <path class="ln-a" d="M435 176 H630" marker-end="url(#ar-a)"/>
-  <text class="sm" x="530" y="170" text-anchor="middle">⑤ 用授权码换令牌</text>
-
-  <rect class="bx-d" x="120" y="196" width="520" height="38" rx="8"/>
-  <text class="sm" x="380" y="220" text-anchor="middle">⑥ 拿令牌读到用户信息 → 在自己库里建号或找到已有账号 → 建立你自己的会话</text>
-</svg>
-<figcaption>图 19-4　你从头到尾都接触不到用户的 GitHub 密码</figcaption>
-</figure>
-
-<div class="code" data-lang="bash">
-<pre>
-npm install @hono/oauth-providers
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-import { githubAuth } from '@hono/oauth-providers/github'
-
-app.use('/auth/github', (c, next) =&gt;
-  githubAuth({
-    client_id: c.env.GITHUB_CLIENT_ID,
-    client_secret: c.env.GITHUB_CLIENT_SECRET,
-    scope: ['read:user', 'user:email'],
-  })(c, next)
-)
-
-app.get('/auth/github', async (c) =&gt; {
-  const profile = c.get('user-github')
-  if (!profile) throw new HTTPException(401, { message: '授权失败' })
-
-  const authId = `github:${profile.id}`
-
-  // 已有账号就用，没有就建一个
-  let user = await db.getUserByAuthId(authId)
-  if (!user) {
-    user = await db.createUser({
-      authId,
-      name: profile.name ?? profile.login,
-      email: profile.email ?? null,
-      role: 'customer',
-    })
-  }
-
-  // 从这里开始，走的是我们自己的会话逻辑
-  c.get('session').userId = user.id
-  return c.redirect(c.get('session').returnTo ?? '/account', 303)
-})
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 数据库设计要点</div>
-  <p>
-    用 <code>authId</code> 这种带前缀的字段（<code>github:12345</code>、<code>google:67890</code>）
-    而不是把 GitHub ID 直接当主键。这样：<br>
-    ① 一个用户可以绑定多个登录方式；② 将来加新的登录渠道不用改表结构；<br>
-    ③ 不同平台的 ID 撞号了也不会出问题。
-  </p>
-</div>
-
-<h2 id="ratelimit">限流</h2>
-
-<p>没有限流的登录接口，等于邀请别人来撞库：</p>
-
-<div class="code" data-lang="ts">
-<pre>
-import { createMiddleware } from 'hono/factory'
-
-export function rateLimit(opts: { limit: number; windowSec: number; kv: KVNamespace }) {
-  return createMiddleware(async (c, next) =&gt; {
-    const ip =
-      c.req.header('cf-connecting-ip') ??
-      c.req.header('x-forwarded-for')?.split(',')[0].trim() ??
-      'unknown'
-
-    const key = `rl:${c.req.path}:${ip}`
-    const count = Number((await opts.kv.get(key)) ?? 0)
-
-    if (count &gt;= opts.limit) {
-      c.header('Retry-After', String(opts.windowSec))
-      throw new HTTPException(429, { message: '请求太频繁，请稍后再试' })
-    }
-
-    await opts.kv.put(key, String(count + 1), { expirationTtl: opts.windowSec })
-    await next()
-  })
-}
-
-// 登录接口：一分钟最多 5 次
-app.use('/login', (c, next) =&gt;
-  rateLimit({ limit: 5, windowSec: 60, kv: c.env.RATE_LIMIT })(c, next)
-)
-</pre>
-</div>
-
-<h2 id="checklist">上线前安全清单</h2>
-
-<div class="box key">
-  <div class="t">&#9733; 逐项确认</div>
-  <ul>
-    <li>☐ 全站 HTTPS，HTTP 自动跳转</li>
-    <li>☐ <code>secureHeaders()</code> 已启用，CSP 已调好</li>
-    <li>☐ 会话 Cookie 有 <code>httpOnly</code> + <code>secure</code> + <code>sameSite</code></li>
-    <li>☐ 表单类请求有 CSRF 防护</li>
-    <li>☐ 所有输入都用 Zod 校验过（第 8 章）</li>
-    <li>☐ 模板输出自动转义，<code>raw()</code> 只用于可信内容（第 7 章）</li>
-    <li>☐ 数据库查询用参数绑定，没有拼接 SQL 字符串</li>
-    <li>☐ 密码用 Argon2 / bcrypt / PBKDF2 哈希</li>
-    <li>☐ 登录、注册、重置密码接口有限流</li>
-    <li>☐ 错误响应不泄露堆栈和内部信息（第 16 章）</li>
-    <li>☐ 密钥都在环境变量里，没有提交到 Git（第 9 章）</li>
-    <li>☐ 上传文件限大小、限类型、改名（第 8 章）</li>
-    <li>☐ 依赖跑过 <code>npm audit</code>，高危漏洞已处理</li>
-    <li>☐ 日志里没有密码、令牌、个人隐私（第 12 章）</li>
-  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>HTTPS 是底线；在代理后面要用 <code>X-Forwarded-Proto</code> 判断，且只信任自己的代理。</li>
-  <li><code>secureHeaders()</code> 一行加上一组防护，CSP 是 XSS 的最后一道防线。</li>
-  <li>CSRF 靠 <code>SameSite</code> + Origin 校验；Bearer 令牌认证天然免疫。</li>
-  <li>密码用专门的慢哈希算法；能不自己管密码就不管。</li>
-  <li>认证问「你是谁」（401），授权问「你能做什么」（403）。</li>
-  <li>会话认证适合网页，JWT 适合 API；JWT 载荷是公开的，有效期要短。</li>
-  <li>登录类接口必须限流。</li>
+  <li>静态资源 = 「同一个 URL 永远返回同样字节」，这决定了它能被缓存和分发。</li>
+  <li>优化顺序：减体积 → 上 CDN → 调缓存。最快的请求是不发生的请求。</li>
+  <li>Workers 上静态资源由平台托管，不经过你的代码。</li>
+  <li><code>no-cache</code> 是「用前验证」，<code>no-store</code> 才是「不缓存」。</li>
+  <li>黄金组合：HTML 用 <code>no-cache</code>，带指纹的资源用 <code>immutable</code> 长缓存。</li>
+  <li>永远不要缓存含个人信息的响应。</li>
+  <li>本章讲的是浏览器和 CDN 层；应用内部的缓存（查询结果、外部调用）见第 24 章。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>接上 <code>secureHeaders()</code>，用 <code>curl -I</code> 看看多了哪些响应头。然后配一个 CSP，故意加载一个外部脚本，观察浏览器控制台的拦截报告。</li>
-    <li>实现完整的注册和登录流程，用 Argon2 或 PBKDF2 存密码。确认数据库里存的是哈希而不是明文。</li>
-    <li>实现 <code>requireLogin</code> 和 <code>requireRole</code>，保护 <code>/account</code> 和 <code>/admin</code>。用未登录状态访问，确认跳转到登录页并且登录后能跳回原页面。</li>
-    <li>做一个 JWT 版本的登录接口，用 <code>curl</code> 拿到令牌后访问受保护接口。把令牌粘到 jwt.io 上看看里面有什么。</li>
-    <li>给登录接口加限流，用循环发 10 次请求，确认第 6 次开始返回 429。</li>
-    <li>对照上面的清单，逐项检查你现在的项目。</li>
+    <li>用 <code>curl -I http://localhost:3000/img/logo.png</code> 看看当前的响应头。有 <code>Cache-Control</code> 吗？有 <code>ETag</code> 吗？</li>
+    <li>接上 <code>etag()</code> 中间件，用 <code>curl -H 'If-None-Match: "..."'</code> 验证第二次请求返回 304。</li>
+    <li>给 <code>/assets/*</code> 配上一年缓存，给其他静态文件配 <code>no-cache</code>。在浏览器 Network 面板里刷新页面，观察哪些资源显示「from disk cache」。</li>
+    <li>找一张页面上最大的图片，转成 WebP，对比体积。然后用 <code>&lt;picture&gt;</code> 做格式回退。</li>
+    <li>想一想你的应用里有哪些响应<strong>绝对不能</strong>被 CDN 缓存。给它们加上 <code>private, no-store</code>。</li>
   </ol>
 </div>
 

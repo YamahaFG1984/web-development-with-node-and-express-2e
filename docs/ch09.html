@@ -127,7 +127,7 @@ app.get('/cookie-demo', (c) =&gt; {
   <tr>
     <td><code>sameSite</code></td>
     <td>控制跨站请求要不要带上这个 Cookie</td>
-    <td><code>'Lax'</code> 是好默认值，能挡掉大部分 CSRF 攻击（第 19 章详述）</td>
+    <td><code>'Lax'</code> 是好默认值，能挡掉大部分 CSRF 攻击（第 20 章详述）</td>
   </tr>
   <tr>
     <td><code>maxAge</code></td>
@@ -603,7 +603,7 @@ export const Layout: FC&lt;{ flash?: Flash }&gt; = ({ flash, children }) =&gt; (
   <div class="t">&#128161; API 通常不用会话</div>
   <p>
     会话依赖 Cookie，Cookie 依赖浏览器。手机 App、第三方服务调你的 API 时没有 Cookie。
-    那种场景用 <strong>JWT 或 API Key</strong>（第 19 章）。
+    那种场景用 <strong>JWT 或 API Key</strong>（第 20 章）。
     简单判断：给浏览器用的用会话，给程序用的用令牌。
   </p>
 </div>

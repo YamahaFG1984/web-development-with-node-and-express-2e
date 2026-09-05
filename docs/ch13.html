@@ -317,7 +317,7 @@ export function createVacationRepo(d1: D1Database): VacationRepo {
     async addInSeasonListener(email, sku) {
       await db.insert(inSeasonListeners)
         .values({ email, sku, createdAt: new Date() })
-        .onConflictDoNothing()          // 重复订阅不报错（这也是一种防并发的手段，见第 21 章）
+        .onConflictDoNothing()          // 重复订阅不报错（这也是一种防并发的手段，见第 23 章）
     },
   }
 }
@@ -622,7 +622,7 @@ console.log(`已写入 ${SEED.length} 条度假套餐`)
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>文件不要存本地磁盘，存对象存储；元信息存数据库。</li>
+  <li>文件不要存本地磁盘，存对象存储；元信息存数据库。完整链路见第 15 章。</li>
   <li>先定义数据访问接口，业务代码只认接口。测试写内存实现，生产写真实实现。</li>
   <li>Drizzle 在一处定义表结构，同时得到 SQL 和 TypeScript 类型。</li>
   <li>表结构变更一律走迁移文件，不要手改生产库。</li>

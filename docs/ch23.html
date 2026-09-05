@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 23 章 · 接收 Webhook — Hono 全栈开发教程</title>
+<title>第 23 章 · 并发与数据一致性 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="23">
@@ -12,641 +12,779 @@
 <main>
 
 <span class="chapter-eyebrow">第 23 章</span>
-<h1>接收 Webhook</h1>
+<h1>并发与数据一致性</h1>
 <p class="lede">
-  第 20 章讲的是「你调别人」。这一章反过来：<strong>别人调你</strong>。
-  这个方向的思维完全不同 —— 你无法控制对方什么时候调、调几次、按什么顺序调。
-  做支付集成时，几乎每个人第一次都在这里翻车。
+  第 13 章教了怎么读写数据库。这一章要问一个它没问的问题：
+  <strong>如果两个请求在同一毫秒到达，会发生什么？</strong>
+  超卖、重复扣款、丢失更新 —— 线上事故的大头都藏在这里，而它们在本地几乎不可能复现。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>理解 webhook 相比轮询的优势，以及它带来的新问题</li>
-    <li>正确验证签名，包括那个「用原始字节」的关键细节</li>
-    <li>把「接收」和「处理」拆开，做到快速返回 200</li>
-    <li>处理重复投递、乱序到达和消息丢失</li>
-    <li>在本地把 webhook 调通，以及怎么重放事件</li>
-    <li>反过来，写出让别人好接的 webhook</li>
+    <li>看懂竞态条件是怎么产生的，以及为什么本地测不出来</li>
+    <li>掌握事务和隔离级别，知道「读到了脏数据」到底是怎么回事</li>
+    <li>会用乐观锁和悲观锁，知道各自的适用场景</li>
+    <li>用原子更新和数据库约束兜底</li>
+    <li>实现幂等，让重复请求不造成重复后果</li>
+    <li>写出能<strong>真的复现</strong>竞态的测试</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="why">为什么需要 webhook</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="轮询与 webhook 的对比">
-  <text class="ttl on-r" x="20" y="22">轮询：你不停地问</text>
-
-  <rect class="bx" x="20" y="34" width="120" height="40" rx="8"/>
-  <text class="sm" x="80" y="59" text-anchor="middle">你的服务器</text>
-  <rect class="bx" x="600" y="34" width="140" height="40" rx="8"/>
-  <text class="sm" x="670" y="59" text-anchor="middle">支付平台</text>
-
-  <path class="ln-r" d="M144 44 H596" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="370" y="40" text-anchor="middle">付款了吗？→ 还没有</text>
-  <path class="ln-r" d="M144 58 H596" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="370" y="54" text-anchor="middle">付款了吗？→ 还没有</text>
-  <path class="ln-g" d="M144 72 H596" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="370" y="86" text-anchor="middle">付款了吗？→ 付了！（第 300 次才等到）</text>
-
-  <text class="sm on-r" x="20" y="110">99.7% 的请求是白问的，而且用户还是要等最多一个轮询周期</text>
-
-  <path class="ln-d" d="M20 126 H740"/>
-
-  <text class="ttl on-g" x="20" y="154">Webhook：有事他叫你</text>
-
-  <rect class="bx" x="20" y="166" width="120" height="40" rx="8"/>
-  <text class="sm" x="80" y="191" text-anchor="middle">你的服务器</text>
-  <rect class="bx" x="600" y="166" width="140" height="40" rx="8"/>
-  <text class="sm" x="670" y="191" text-anchor="middle">支付平台</text>
-
-  <path class="ln-b" d="M144 178 H596" marker-end="url(#ar)"/>
-  <text class="sm" x="370" y="174" text-anchor="middle">① 注册一次：有事请 POST 到这个地址</text>
-
-  <path class="ln-g" d="M596 198 H148" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="370" y="214" text-anchor="middle">② 付款完成时，他主动 POST 给你</text>
-
-  <rect class="bx-a" x="20" y="230" width="720" height="44" rx="8"/>
-  <text class="sm on-a" x="380" y="250" text-anchor="middle">零无效请求，实时性从「一个轮询周期」变成「几百毫秒」</text>
-  <text class="sm" x="380" y="268" text-anchor="middle">代价：你的接口暴露在公网上，而且调用节奏完全由对方决定</text>
-</svg>
-<figcaption>图 23-1　控制权反转 —— 这既是 webhook 的优点，也是它全部麻烦的来源</figcaption>
-</figure>
-
-<div class="box key">
-  <div class="t">&#9733; 你失去了三样东西</div>
-  <p>
-    调用别人的 API 时，是你决定<strong>何时</strong>调、<strong>调几次</strong>、以及<strong>并发多少</strong>。
-    接收 webhook 时这三样全归对方：
-  </p>
-  <ul>
-    <li>他可能在你部署重启的那一秒调过来</li>
-    <li>他可能因为没收到你的 200 而把同一个事件<strong>重发十次</strong></li>
-    <li>他可能<strong>并发</strong>推送同一笔订单的多个状态变更，而且不保证顺序</li>
-  </ul>
-  <p>本章剩下的内容，基本都是在应对这三件事。</p>
-</div>
-
-<h2 id="signature">第一件事：验签</h2>
+<h2 id="why">为什么本地测不出来</h2>
 
 <p>
-  你的 webhook 接口在公网上，谁都能 POST。如果不验签，任何人都可以伪造一条
-  「订单已支付」发给你。
+  你一个人点页面，请求是一个接一个的。线上有一千个人同时点，请求是<strong>交错</strong>的。
+  这是两种完全不同的世界。
 </p>
 
-<p>
-  主流做法是 <strong>HMAC 签名</strong>：你和对方共享一个密钥，对方用它对请求体算一个哈希，
-  放在请求头里。你用同一个密钥重算一遍，比对是否一致。
-</p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="HMAC 签名的验证流程">
-  <rect class="bx-b" x="20" y="30" width="220" height="100" rx="10"/>
-  <text class="ttl on-b" x="130" y="54" text-anchor="middle">发送方</text>
-  <text class="sm" x="36" y="78">拿到请求体的原始字节</text>
-  <text class="mono sm" x="36" y="100">sig = HMAC(secret, ts + body)</text>
-  <text class="sm" x="36" y="122">签名和时间戳放进请求头</text>
-
-  <path class="ln-b" d="M244 80 H300" marker-end="url(#ar)"/>
-
-  <rect class="bx-d" x="304" y="30" width="152" height="100" rx="10"/>
-  <text class="sm" x="380" y="54" text-anchor="middle">公网</text>
-  <text class="mono sm" x="316" y="80">POST /webhooks/pay</text>
-  <text class="mono sm" x="316" y="100">X-Signature: ...</text>
-  <text class="mono sm" x="316" y="118">X-Timestamp: ...</text>
-
-  <path class="ln-a" d="M460 80 H516" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-a" x="520" y="30" width="220" height="100" rx="10"/>
-  <text class="ttl on-a" x="630" y="54" text-anchor="middle">你</text>
-  <text class="sm" x="536" y="78">用同样的原始字节重算</text>
-  <text class="mono sm" x="536" y="100">expected == received ?</text>
-  <text class="sm" x="536" y="122">还要检查时间戳是否新鲜</text>
-
-  <rect class="bx-r" x="20" y="150" width="350" height="80" rx="10"/>
-  <text class="ttl on-r" x="36" y="172">攻击者能做什么</text>
-  <text class="sm" x="36" y="194">伪造一条消息 → 算不出正确签名 ✗</text>
-  <text class="sm" x="36" y="214">改一个字节 → 签名对不上 ✗</text>
-
-  <rect class="bx-r" x="390" y="150" width="350" height="80" rx="10"/>
-  <text class="ttl on-r" x="406" y="172">但如果不检查时间戳</text>
-  <text class="sm" x="406" y="194">他可以录下一条真实的「已支付」消息，</text>
-  <text class="sm" x="406" y="214">明天再原样发一遍 —— 签名完全有效（重放攻击）</text>
-</svg>
-<figcaption>图 23-2　签名保证「没被改过」，时间戳保证「不是旧的」，两者缺一不可</figcaption>
-</figure>
-
-<h3>那个最容易踩的坑</h3>
-
-<div class="box warn">
-  <div class="t">&#9888; 必须用<strong>原始字节</strong>验签，不能用解析后的对象</div>
-  <p>
-    对方是对 HTTP 请求体的<em>原始字节</em>算的签名。如果你先
-    <code>await c.req.json()</code> 解析成对象，再 <code>JSON.stringify()</code> 回去 ——
-    键的顺序、空格、Unicode 转义、数字精度都可能变，<strong>签名必然对不上</strong>。
-  </p>
-  <p>
-    这个 bug 的典型症状是：「我照文档写的，但签名就是验不过」。
-    九成情况就是这个原因。
-  </p>
-</div>
-
-<div class="vs">
-  <div class="old">
-    <div class="h">&#10060; 签名永远对不上</div>
-    <div class="code" data-lang="ts"><pre>
-const data = await c.req.json()
-const body = JSON.stringify(data)   // ← 已经变了
-const sig = await hmac(secret, body)
-</pre></div>
-  </div>
-  <div class="new">
-    <div class="h">&#9989; 用原始文本</div>
-    <div class="code" data-lang="ts"><pre>
-const raw = await c.req.text()      // ← 一个字节都没动
-const sig = await hmac(secret, raw)
-// 验签通过之后再解析
-const data = JSON.parse(raw)
-</pre></div>
-  </div>
-</div>
-
-<h3>实现</h3>
-
-<div class="code" data-lang="ts" data-file="src/lib/webhook-verify.ts">
+<div class="code" data-lang="ts">
 <pre>
-/** 用 Web Crypto 计算 HMAC-SHA256，所有运行时通用 */
-async function hmacSha256(secret: string, message: string): Promise&lt;string&gt; {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  )
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message))
-  return [...new Uint8Array(sig)].map((b) =&gt; b.toString(16).padStart(2, '0')).join('')
-}
+// 看起来完全正常的「秒杀」代码
+app.post('/vacations/:sku/book', async (c) =&gt; {
+  const sku = c.req.param('sku')
 
-/** 恒定时间比较：不能用 === */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let diff = 0
-  for (let i = 0; i &lt; a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  }
-  return diff === 0
-}
-
-export async function verifyWebhook(opts: {
-  raw: string
-  signature: string | undefined
-  timestamp: string | undefined
-  secret: string
-  toleranceSec?: number
-}): Promise&lt;{ ok: true } | { ok: false; reason: string }&gt; {
-  const { raw, signature, timestamp, secret, toleranceSec = 300 } = opts
-
-  if (!signature || !timestamp) return { ok: false, reason: '缺少签名或时间戳' }
-
-  // ① 时间戳必须新鲜，防重放
-  const age = Math.abs(Date.now() / 1000 - Number(timestamp))
-  if (!Number.isFinite(age) || age &gt; toleranceSec) {
-    return { ok: false, reason: '时间戳超出容忍窗口' }
+  const v = await repo.findBySku(sku)            // ① 读
+  if (v.remaining &lt;= 0) {                        // ② 判断
+    return c.json({ error: '已售罄' }, 409)
   }
 
-  // ② 签名的输入要和对方文档完全一致（这里是 时间戳 + "." + 原始体）
-  const expected = await hmacSha256(secret, `${timestamp}.${raw}`)
-
-  if (!timingSafeEqual(expected, signature)) {
-    return { ok: false, reason: '签名不匹配' }
-  }
-
-  return { ok: true }
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 为什么不能用 <code>===</code> 比较签名</div>
-  <p>
-    字符串的 <code>===</code> 是<strong>短路</strong>的：第一个字符就不同时立刻返回，全都相同时才走完。
-    这个时间差虽然极小，但可以被测量 —— 攻击者逐字符猜测，观察响应时间，
-    就能一位一位地把正确签名试出来。这叫<strong>时序攻击</strong>。<br>
-    <code>timingSafeEqual</code> 无论如何都走完全程，耗时与内容无关。
-    <em>Node 上也可以直接用 <code>crypto.timingSafeEqual</code>。</em>
-  </p>
-</div>
-
-<h2 id="fast">第二件事：快速返回 200</h2>
-
-<p>
-  几乎所有 webhook 提供方都有超时（通常 3–10 秒）。超时或非 2xx 响应，他们就认为失败并重发。
-</p>
-
-<div class="box warn">
-  <div class="t">&#9888; 一个真实的连锁反应</div>
-  <p>
-    你在 webhook 处理函数里同步做了：更新订单 → 发确认邮件 → 同步 CRM → 生成发票。
-    耗时 4 秒，超过了对方 3 秒的超时。<br>
-    → 对方认为失败，重发。<br>
-    → 你又跑了一遍这四步（<strong>用户收到第二封邮件</strong>）。<br>
-    → 还是 4 秒，还是超时。<br>
-    → 对方按指数退避重发 5 次……<strong>用户收到 6 封确认邮件</strong>，CRM 里 6 条重复记录。
-  </p>
-</div>
-
-<p>正确的架构是把「接收」和「处理」彻底拆开 —— 这正好用上第 22 章的队列：</p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="webhook 的接收与处理分离">
-  <rect class="bx-b" x="20" y="60" width="110" height="50" rx="8"/>
-  <text class="sm" x="75" y="82" text-anchor="middle">支付平台</text>
-  <text class="sm" x="75" y="98" text-anchor="middle">POST</text>
-
-  <path class="ln-b" d="M134 85 H190" marker-end="url(#ar)"/>
-
-  <rect class="bx-a" x="194" y="30" width="230" height="110" rx="10"/>
-  <text class="ttl on-a" x="309" y="52" text-anchor="middle">接收端点（要快）</text>
-  <text class="sm" x="210" y="74">① 验签</text>
-  <text class="sm" x="210" y="94">② 原样存进事件表（去重）</text>
-  <text class="sm" x="210" y="114">③ 投递任务到队列</text>
-  <text class="sm on-g" x="210" y="132">目标：50 ms 内返回 200</text>
-
-  <path class="ln-g" d="M309 144 V180" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="380" y="166">立即 200 OK</text>
-
-  <rect class="bx-g" x="194" y="184" width="230" height="40" rx="8"/>
-  <text class="sm on-g" x="309" y="209" text-anchor="middle">对方收到确认，不会重发</text>
-
-  <path class="ln-a" d="M428 85 H488" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-p" x="492" y="30" width="248" height="110" rx="10"/>
-  <text class="ttl on-p" x="616" y="52" text-anchor="middle">消费者（可以慢）</text>
-  <text class="sm" x="508" y="74">更新订单 · 发邮件 · 同步 CRM</text>
-  <text class="sm" x="508" y="94">失败了自动重试</text>
-  <text class="sm" x="508" y="114">超时也不影响对方</text>
-  <text class="sm on-p" x="508" y="132">见第 22 章</text>
-
-  <rect class="bx-d" x="120" y="234" width="520" height="26" rx="6"/>
-  <text class="sm" x="380" y="252" text-anchor="middle">分界线：能在 50 ms 内做完的才放接收端，其余一律丢到队列</text>
-</svg>
-<figcaption>图 23-3　接收端只做三件事：验签、存档、投递</figcaption>
-</figure>
-
-<div class="box note">
-  <div class="t">&#9432; 什么时候该返回非 2xx</div>
-  <div class="tw"><table>
-    <tr><th>情况</th><th>返回</th><th>为什么</th></tr>
-    <tr><td>签名验证失败</td><td><code>401</code></td><td>不是对方的问题就是攻击，别让他重试</td></tr>
-    <tr><td>请求体不是合法 JSON</td><td><code>400</code></td><td>重试也没用</td></tr>
-    <tr><td>事件类型你不关心</td><td><code>200</code></td><td>已收到，不需要处理，别让他重试</td></tr>
-    <tr><td>你的数据库暂时挂了</td><td><code>500</code></td><td><strong>要让他重试</strong>，这是唯一该返回 5xx 的情况</td></tr>
-    <tr><td>业务处理失败（如订单不存在）</td><td><code>200</code></td><td>已经收下了，业务问题由你的队列自己重试，不该拖累对方</td></tr>
-  </table></div>
-</div>
-
-<h2 id="impl">完整实现</h2>
-
-<div class="code" data-lang="ts" data-file="src/db/schema.ts">
-<pre>
-export const webhookEvents = sqliteTable('webhook_events', {
-  // 对方给的事件 ID，作为主键 —— 这就是去重的全部机制
-  id: text('id').primaryKey(),
-  provider: text('provider').notNull(),
-  type: text('type').notNull(),
-  // 原样存下来，出问题时能重放
-  payload: text('payload').notNull(),
-  // 事件在对方那边发生的时间（不是你收到的时间）
-  occurredAt: integer('occurred_at', { mode: 'timestamp' }).notNull(),
-  receivedAt: integer('received_at', { mode: 'timestamp' }).notNull(),
-  processedAt: integer('processed_at', { mode: 'timestamp' }),
-  status: text('status', { enum: ['received', 'done', 'failed'] }).notNull(),
-  error: text('error'),
-})
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/routes/webhooks.ts">
-<pre>
-import { Hono } from 'hono'
-import { verifyWebhook } from '../lib/webhook-verify'
-
-export const webhooks = new Hono&lt;Env&gt;()
-
-webhooks.post('/payments', async (c) =&gt; {
-  // ① 拿原始文本，不要先 json()
-  const raw = await c.req.text()
-
-  const result = await verifyWebhook({
-    raw,
-    signature: c.req.header('x-signature'),
-    timestamp: c.req.header('x-timestamp'),
-    secret: c.env.PAYMENT_WEBHOOK_SECRET,
-  })
-
-  if (!result.ok) {
-    console.warn('webhook 验签失败', { reason: result.reason, ip: c.req.header('cf-connecting-ip') })
-    return c.json({ error: result.reason }, 401)
-  }
-
-  // ② 验签通过后才解析
-  let event: PaymentEvent
-  try {
-    event = JSON.parse(raw)
-  } catch {
-    return c.json({ error: '请求体不是合法 JSON' }, 400)
-  }
-
-  // ③ 去重 + 存档：靠主键冲突判断是不是重复投递
-  try {
-    await c.env.DB_CLIENT.insert(webhookEvents).values({
-      id: event.id,
-      provider: 'payments',
-      type: event.type,
-      payload: raw,
-      occurredAt: new Date(event.created_at * 1000),
-      receivedAt: new Date(),
-      status: 'received',
-    })
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      // 重复投递 —— 这是正常现象，不是错误
-      console.info('重复的 webhook 事件，已忽略', { id: event.id })
-      return c.json({ ok: true, duplicate: true })
-    }
-    throw err     // 数据库真挂了 → 500 → 对方会重试，正确
-  }
-
-  // ④ 丢给队列，立刻返回
-  await c.env.TASKS.send({ type: 'process-payment-event', id: event.id })
+  await repo.update(sku, { remaining: v.remaining - 1 })   // ③ 写
+  await repo.createOrder({ sku, userId })
 
   return c.json({ ok: true })
 })
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 事件表同时解决了三个问题</div>
-  <ul>
-    <li><strong>去重</strong> —— 主键冲突 = 已经收过了（第 21 章的思路）</li>
-    <li><strong>可重放</strong> —— 代码有 bug 导致处理错了？改完代码，把这些事件重新投一遍队列即可</li>
-    <li><strong>可审计</strong> —— 「我们到底有没有收到这条通知」，有据可查。和对方扯皮时这是唯一的证据</li>
-  </ul>
-</div>
-
-<h2 id="ordering">第三件事：乱序</h2>
-
-<p>
-  这是最隐蔽的一个。对方并发推送，网络延迟不同，<strong>后发生的事件可能先到达</strong>：
-</p>
+<p>这段代码有个致命问题。把两个请求的执行时刻画在一条时间轴上就看清楚了：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="事件乱序到达导致状态被覆盖">
-  <text class="ttl" x="20" y="22">对方那边真实发生的顺序</text>
-  <rect class="bx-g" x="20" y="34" width="200" height="36" rx="6"/>
-  <text class="sm" x="120" y="57" text-anchor="middle">10:00:01　订单已支付</text>
-  <path class="ln" d="M224 52 H276" marker-end="url(#ar)"/>
-  <rect class="bx-g" x="280" y="34" width="200" height="36" rx="6"/>
-  <text class="sm" x="380" y="57" text-anchor="middle">10:00:03　订单已发货</text>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="两个请求交错执行导致超卖">
+  <text class="ttl" x="20" y="22">库存 remaining = 1，两个用户同时下单</text>
 
-  <text class="ttl on-r" x="20" y="106">你实际收到的顺序</text>
-  <rect class="bx-r" x="20" y="118" width="200" height="36" rx="6"/>
-  <text class="sm" x="120" y="141" text-anchor="middle">已发货（网络快，先到）</text>
-  <path class="ln-r" d="M224 136 H276" marker-end="url(#ar)"/>
-  <rect class="bx-r" x="280" y="118" width="200" height="36" rx="6"/>
-  <text class="sm" x="380" y="141" text-anchor="middle">已支付（网络慢，后到）</text>
+  <path class="ln-d" d="M120 40 V270"/>
+  <path class="ln-d" d="M420 40 V270"/>
+  <text class="sm" x="60" y="56">时间 ↓</text>
 
-  <path class="ln-r" d="M380 158 V184" marker-end="url(#ar)"/>
-  <rect class="bx-r" x="180" y="188" width="400" height="40" rx="8"/>
-  <text class="sm on-r" x="380" y="212" text-anchor="middle">订单状态被改回「已支付」—— 发货状态丢了</text>
+  <text class="ttl on-b" x="150" y="56">请求 A</text>
+  <text class="ttl on-p" x="450" y="56">请求 B</text>
+  <text class="ttl on-g" x="640" y="56">数据库</text>
 
-  <rect class="bx-a" x="520" y="106" width="220" height="122" rx="10"/>
-  <text class="ttl on-a" x="630" y="128" text-anchor="middle">解法</text>
-  <text class="sm" x="536" y="152">永远不要假设到达顺序。</text>
-  <text class="sm" x="536" y="174">用事件自带的时间戳或版本号，</text>
-  <text class="sm" x="536" y="196">只接受比当前更新的事件：</text>
-  <text class="mono sm" x="536" y="218">WHERE updated_at &lt; 事件时间</text>
+  <rect class="bx-b" x="140" y="70" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="90" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="640" y="90" text-anchor="middle">remaining = 1</text>
+
+  <rect class="bx-p" x="440" y="108" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="128" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="700" y="128" text-anchor="middle">1</text>
+
+  <rect class="bx-b" x="140" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
+
+  <rect class="bx-p" x="440" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
+
+  <rect class="bx-r" x="140" y="184" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="204" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="204" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="440" y="222" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="242" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="242" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="120" y="264" width="520" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="284" text-anchor="middle">结果：库存只有 1 份，却卖出了 2 单。而且库存数字看起来是「对」的</text>
 </svg>
-<figcaption>图 23-4　「先到的一定是先发生的」是个错误假设</figcaption>
+<figcaption>图 23-1　「读 → 判断 → 写」这个模式只要不是原子的，就一定会出问题</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 记住这个模式的名字</div>
+  <p>
+    <strong>check-then-act</strong>（先检查再行动）—— 先读一个值，根据它做判断，然后基于判断去写。
+    只要「读」和「写」之间有任何间隙，另一个请求就可能挤进来，让你的判断在写入时已经过期了。
+  </p>
+  <p>
+    这个模式在代码里到处都是：检查库存再扣减、检查邮箱是否已注册再插入、
+    检查余额是否够再扣款、检查文件是否存在再创建。<strong>它们全都有同一个 bug。</strong>
+  </p>
+</div>
+
+<h3>为什么开发时发现不了</h3>
+
+<div class="tw">
+<table>
+  <tr><th>本地开发</th><th>生产环境</th></tr>
+  <tr><td>你一个人手动点击</td><td>成百上千用户同时操作</td></tr>
+  <tr><td>请求间隔以秒计</td><td>请求间隔以毫秒计，甚至完全重叠</td></tr>
+  <tr><td>一个进程</td><td>多个实例 / 多个边缘节点</td></tr>
+  <tr><td>数据库在本机，延迟 0.1 ms</td><td>网络延迟 5–50 ms，「间隙」被放大几百倍</td></tr>
+  <tr><td>测试是串行跑的</td><td>—</td></tr>
+</table>
+</div>
+
+<p>
+  最后一行尤其关键：<strong>你写的单元测试和集成测试默认都是串行的</strong>，
+  它们永远不会触发竞态。除非你专门去写并发测试（本章最后会讲）。
+</p>
+
+<h2 id="scenarios">四种经典事故</h2>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128230;</span><h4>超卖</h4>
+    <p>库存 1 份卖出 2 单。上面刚演示过。同类：限量优惠券被多领、活动名额超出。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128184;</span><h4>重复扣款</h4>
+    <p>用户网络卡顿点了两次提交，或者客户端自动重试了一次。两笔订单，两次扣钱。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128260;</span><h4>丢失更新</h4>
+    <p>两个管理员同时编辑同一篇文章，后保存的人把前一个人的修改整个覆盖掉了，而且<strong>双方都没收到任何提示</strong>。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128100;</span><h4>重复注册</h4>
+    <p>同一邮箱同时提交两次，两条 <code>SELECT</code> 都说「没注册过」，于是插入了两个账号。</p>
+  </div>
+</div>
+
+<h2 id="transaction">事务</h2>
+
+<p>
+  事务把多个操作打包成一个「全成功或全失败」的单元。这是数据库给你的第一件武器。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { drizzle } from 'drizzle-orm/d1'
+import { eq, sql } from 'drizzle-orm'
+
+await db.transaction(async (tx) =&gt; {
+  // 从 A 账户扣钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} - ${amount}` })
+    .where(eq(accounts.id, fromId))
+
+  // 给 B 账户加钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} + ${amount}` })
+    .where(eq(accounts.id, toId))
+
+  // 记一笔流水
+  await tx.insert(transfers).values({ fromId, toId, amount })
+
+  // 任何一步抛异常 → 整个事务回滚，前面的操作全部撤销
+})
+</pre>
+</div>
+
+<h3>ACID 是什么</h3>
+
+<div class="tw">
+<table>
+  <tr><th>字母</th><th>含义</th><th>白话</th></tr>
+  <tr><td><strong>A</strong>tomicity 原子性</td><td>要么全做，要么全不做</td><td>不会出现「钱扣了但没到账」</td></tr>
+  <tr><td><strong>C</strong>onsistency 一致性</td><td>事务前后数据都满足约束</td><td>余额不会变成负数（如果你定义了 CHECK 约束）</td></tr>
+  <tr><td><strong>I</strong>solation 隔离性</td><td>并发事务互不干扰</td><td><strong>本章的重点，也是最容易误解的一个</strong></td></tr>
+  <tr><td><strong>D</strong>urability 持久性</td><td>提交后即使断电也不丢</td><td>数据库替你保证</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 事务 ≠ 解决了并发问题</div>
+  <p>
+    这是最常见的误解。把上面那段超卖代码包进事务里，<strong>它照样超卖</strong>。<br>
+    因为默认的隔离级别下，两个事务可以同时读到 <code>remaining = 1</code>，
+    各自判断「够」，然后各自写入 0。事务保证的是「你这几步要么全成要么全败」，
+    <em>不保证「别人不会在中间插队」</em>。
+  </p>
+</div>
+
+<h3>隔离级别</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="四种隔离级别与它们各自允许的异常现象">
+  <text class="ttl" x="20" y="22">隔离级别越高越安全，但并发性能越差</text>
+
+  <rect class="bx-r" x="20" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-r" x="107" y="58" text-anchor="middle">读未提交</text>
+  <text class="sm" x="107" y="76" text-anchor="middle">Read Uncommitted</text>
+  <text class="sm on-r" x="34" y="102">✗ 脏读</text>
+  <text class="sm on-r" x="34" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="34" y="142">✗ 幻读</text>
+
+  <rect class="bx-a" x="205" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-a" x="292" y="58" text-anchor="middle">读已提交</text>
+  <text class="sm" x="292" y="76" text-anchor="middle">Read Committed</text>
+  <text class="sm on-g" x="219" y="102">✓ 无脏读</text>
+  <text class="sm on-r" x="219" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="219" y="142">✗ 幻读</text>
+
+  <rect class="bx-b" x="390" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-b" x="477" y="58" text-anchor="middle">可重复读</text>
+  <text class="sm" x="477" y="76" text-anchor="middle">Repeatable Read</text>
+  <text class="sm on-g" x="404" y="102">✓ 无脏读</text>
+  <text class="sm on-g" x="404" y="122">✓ 可重复读</text>
+  <text class="sm on-r" x="404" y="142">✗ 幻读（部分实现有）</text>
+
+  <rect class="bx-g" x="575" y="36" width="165" height="120" rx="10"/>
+  <text class="ttl on-g" x="657" y="58" text-anchor="middle">串行化</text>
+  <text class="sm" x="657" y="76" text-anchor="middle">Serializable</text>
+  <text class="sm on-g" x="589" y="102">✓ 全都没有</text>
+  <text class="sm on-r" x="589" y="128">代价：并发低，</text>
+  <text class="sm on-r" x="589" y="146">冲突时事务被中止</text>
+
+  <rect class="bx-d" x="20" y="172" width="720" height="98" rx="10"/>
+  <text class="ttl" x="36" y="194">三种异常现象</text>
+  <text class="sm" x="36" y="216">脏读：读到了别人还没提交的数据，而对方随后回滚了 —— 你读到的是从未存在过的值</text>
+  <text class="sm" x="36" y="238">不可重复读：同一个事务里读两次同一行，值不一样（中间被别人改了并提交）</text>
+  <text class="sm" x="36" y="260">幻读：同一个查询执行两次，第二次多出了几行（中间被别人插入了）</text>
+</svg>
+<figcaption>图 23-2　PostgreSQL 和 MySQL 的默认级别都挡不住丢失更新</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 各数据库的默认级别</div>
+  <ul>
+    <li><strong>PostgreSQL</strong>：Read Committed</li>
+    <li><strong>MySQL (InnoDB)</strong>：Repeatable Read</li>
+    <li><strong>SQLite / Cloudflare D1</strong>：Serializable（因为它本质上串行执行写操作）</li>
+  </ul>
+  <p>
+    注意 D1 那一行 —— 如果你的应用只跑在 D1 上，很多并发问题会自动消失。
+    但这不是可以不理解它们的理由：一旦换成 Postgres，或者你的逻辑跨了数据库和 KV，问题立刻回来。
+  </p>
+</div>
+
+<h2 id="atomic">最好的办法：让数据库来判断</h2>
+
+<p>
+  在讲锁之前，先说一个更简单也更该优先考虑的思路：
+  <strong>把「读—判断—写」压缩成一条 SQL，让判断发生在数据库内部。</strong>
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 在应用里判断</div>
+    <div class="code" data-lang="ts"><pre>
+const v = await repo.findBySku(sku)
+if (v.remaining &lt;= 0) {
+  return c.json({ error: '已售罄' }, 409)
+}
+await repo.update(sku, {
+  remaining: v.remaining - 1
+})
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 让数据库判断</div>
+    <div class="code" data-lang="ts"><pre>
+const rows = await db
+  .update(vacations)
+  .set({
+    remaining: sql`${vacations.remaining} - 1`
+  })
+  .where(and(
+    eq(vacations.sku, sku),
+    gt(vacations.remaining, 0)   // ← 关键
+  ))
+  .returning({ left: vacations.remaining })
+
+if (rows.length === 0) {
+  return c.json({ error: '已售罄' }, 409)
+}
+</pre></div>
+  </div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么这样就安全了</div>
+  <p>
+    单条 <code>UPDATE</code> 在数据库内部是<strong>原子</strong>的 ——
+    数据库会对这一行加锁，判断和写入之间没有任何间隙可以插队。<br>
+    <code>WHERE remaining &gt; 0</code> 不成立时，这条语句<strong>影响 0 行</strong>，
+    <code>returning</code> 返回空数组，你据此判断「抢完了」。<br>
+    两个请求同时执行，数据库会让它们排队：第一个把 1 改成 0，第二个的 <code>WHERE</code> 不成立，
+    影响 0 行。<strong>不会超卖。</strong>
+  </p>
+</div>
+
+<h3>约束是最后一道防线</h3>
+
+<div class="code" data-lang="sql">
+<pre>
+-- 库存不能为负，写进表定义里
+ALTER TABLE vacations ADD CONSTRAINT remaining_non_negative
+  CHECK (remaining &gt;= 0);
+
+-- 一个邮箱只能注册一次
+CREATE UNIQUE INDEX idx_users_email ON users (lower(email));
+
+-- 同一个用户对同一个套餐只能有一条「到季通知」
+CREATE UNIQUE INDEX idx_listener ON in_season_listeners (email, sku);
+</pre>
+</div>
+
+<p>有了唯一约束，「先查再插」的竞态就变成了一个可以捕获的错误：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// ❌ 有竞态：两个请求可能同时通过检查
+const existing = await db.select().from(users).where(eq(users.email, email))
+if (existing.length) return c.json({ error: '邮箱已注册' }, 409)
+await db.insert(users).values({ email, ... })
+
+// ✅ 直接插，让数据库拒绝重复
+try {
+  await db.insert(users).values({ email, ... })
+} catch (err) {
+  if (isUniqueViolation(err)) {
+    return c.json({ error: '邮箱已注册' }, 409)
+  }
+  throw err
+}
+
+// ✅ 或者用 upsert 语义，完全不需要判断
+await db.insert(inSeasonListeners)
+  .values({ email, sku })
+  .onConflictDoNothing()
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 这个思路叫「乐观执行」</div>
+  <p>
+    与其小心翼翼地先检查再动手（检查结果随时可能过期），不如<strong>直接动手，让数据库告诉你行不行</strong>。
+    代码更短，而且没有竞态窗口。<br>
+    应用层的检查仍然有价值 —— 用来给出友好的错误提示 —— 但它<strong>不能作为正确性的依据</strong>。
+    真正的保证必须在数据库层。
+  </p>
+</div>
+
+<h2 id="locks">两种锁</h2>
+
+<p>
+  原子更新解决不了所有问题。当一次操作要读出数据、在应用里做复杂计算、再写回去时，
+  就需要锁了。
+</p>
+
+<h3>乐观锁：假设不会冲突，冲突了就重试</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="乐观锁的版本号机制">
+  <text class="ttl on-g" x="20" y="22">乐观锁：每行带一个版本号，写入时检查版本没变过</text>
+
+  <rect class="bx-b" x="20" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-b" x="130" y="62" text-anchor="middle">编辑者 A</text>
+  <text class="sm" x="36" y="86">读出文章，version = 7</text>
+  <text class="sm" x="36" y="106">修改标题</text>
+  <text class="sm on-g" x="36" y="124">保存：WHERE version = 7 ✓</text>
+
+  <rect class="bx-p" x="280" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-p" x="390" y="62" text-anchor="middle">编辑者 B</text>
+  <text class="sm" x="296" y="86">读出文章，version = 7</text>
+  <text class="sm" x="296" y="106">修改正文</text>
+  <text class="sm on-r" x="296" y="124">保存：WHERE version = 7 ✗</text>
+
+  <rect class="bx-g" x="540" y="40" width="200" height="90" rx="8"/>
+  <text class="ttl on-g" x="640" y="62" text-anchor="middle">数据库</text>
+  <text class="mono sm" x="556" y="88">version: 7</text>
+  <path class="ln-g" d="M600 96 V108" marker-end="url(#ar)"/>
+  <text class="mono sm on-g" x="556" y="124">version: 8（A 写入后）</text>
+
+  <path class="ln-b" d="M130 132 V152 H600 V152" marker-end="url(#ar)"/>
+  <path class="ln-r" d="M390 132 V172 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="20" y="188" width="720" height="62" rx="10"/>
+  <text class="ttl on-r" x="380" y="210" text-anchor="middle">B 的更新影响 0 行 —— 数据库告诉他「你手上的版本已经旧了」</text>
+  <text class="sm" x="380" y="232" text-anchor="middle">此时可以：提示用户「内容已被他人修改，请刷新」，或者自动重新读取并重试</text>
+</svg>
+<figcaption>图 23-3　乐观锁把「静默覆盖」变成了「明确的冲突」</figcaption>
 </figure>
 
 <div class="code" data-lang="ts">
 <pre>
-// ❌ 无条件覆盖 —— 旧事件会把新状态盖掉
-await db.update(orders)
-  .set({ status: event.status })
-  .where(eq(orders.id, event.orderId))
+export const articles = sqliteTable('articles', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  version: integer('version').notNull().default(1),   // ← 版本号
+})
 
-// ✅ 只有当事件比数据库里的记录更新时才写
-const updated = await db.update(orders)
-  .set({ status: event.status, statusUpdatedAt: event.occurredAt })
-  .where(and(
-    eq(orders.id, event.orderId),
-    lt(orders.statusUpdatedAt, event.occurredAt)   // ← 关键
-  ))
-  .returning()
-
-if (updated.length === 0) {
-  // 不是错误：说明我们已经处理过更新的事件了
-  console.info('收到过期事件，忽略', { orderId: event.orderId, at: event.occurredAt })
-}
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 更稳的做法：只把 webhook 当「通知」</div>
-  <p>
-    有些平台（Stripe 是典型）的建议是：<strong>不要相信 webhook 里带的数据，
-    把它当成一个「有东西变了，你去查一下」的信号</strong>。收到通知后主动调对方 API
-    拉一次当前状态。<br>
-    这样乱序问题自动消失 —— 因为你拿到的永远是<em>最新</em>状态，而不是某个时刻的快照。
-    代价是多一次 API 调用。<strong>涉及钱的场景，这个代价值得付。</strong>
-  </p>
-</div>
-
-<h2 id="missing">第四件事：消息会丢</h2>
-
-<p>
-  对方重试 5 次全失败（比如你的服务挂了半小时），事件就永久丢了。
-  <strong>只靠 webhook 的系统一定会漏单。</strong>
-</p>
-
-<div class="box key">
-  <div class="t">&#9733; webhook 要有对账兜底</div>
-  <p>
-    这是行业标准做法：webhook 负责<strong>实时性</strong>，定时对账负责<strong>正确性</strong>。
-    两者缺一不可。
-  </p>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-/** 每小时跑一次：找出本地状态可能过期的订单，主动去对方那边核对 */
-export async function reconcilePayments(env: Bindings) {
-  // 创建超过 10 分钟仍处于「待支付」的订单 —— 这些很可能漏了通知
-  const suspects = await db.select().from(orders)
+export async function updateArticle(
+  id: string,
+  patch: { title?: string; body?: string },
+  expectedVersion: number
+) {
+  const rows = await db
+    .update(articles)
+    .set({ ...patch, version: expectedVersion + 1 })
     .where(and(
-      eq(orders.status, 'pending'),
-      lt(orders.createdAt, new Date(Date.now() - 10 * 60_000))
+      eq(articles.id, id),
+      eq(articles.version, expectedVersion)   // ← 版本必须没变
     ))
-    .limit(500)
+    .returning()
 
-  for (const order of suspects) {
-    const remote = await paymentApi.getCharge(order.chargeId)   // 主动拉取
-
-    if (remote.status !== order.status) {
-      console.warn('对账发现差异', {
-        orderId: order.id, local: order.status, remote: remote.status,
-      })
-      // 走和 webhook 完全相同的处理逻辑，保证幂等
-      await env.TASKS.send({ type: 'apply-payment-status', orderId: order.id, status: remote.status })
-    }
+  if (rows.length === 0) {
+    throw new HTTPException(409, {
+      message: '这篇文章已被他人修改，请刷新后重试',
+    })
   }
+  return rows[0]
 }
 </pre>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 让对账逻辑和 webhook 处理逻辑<strong>共用同一个函数</strong></div>
-  <p>
-    两条路径最终都调 <code>applyPaymentStatus(orderId, status, occurredAt)</code>。
-    这个函数本身是幂等的、带时间戳判断的。<br>
-    如果两条路径各写一套逻辑，它们迟早会不一致 —— 而且这种不一致极难发现。
-  </p>
-</div>
+<p>表单里把版本号带上，提交时一起发回来：</p>
 
-<h2 id="local">本地怎么调试</h2>
-
-<p>
-  webhook 需要一个公网可访问的地址，而你的开发机没有。用隧道工具：
-</p>
-
-<div class="code" data-lang="bash">
+<div class="code" data-lang="tsx">
 <pre>
-# 方式一：cloudflared（免费，不用注册）
-npx cloudflared tunnel --url http://localhost:3000
-# → 会给你一个 https://xxx.trycloudflare.com 地址
-
-# 方式二：ngrok
-ngrok http 3000
-
-# 方式三：如果对方是 Stripe，它的 CLI 可以直接转发到本地
-stripe listen --forward-to localhost:3000/webhooks/payments
-stripe trigger payment_intent.succeeded     # 手动触发一个测试事件
+&lt;form method="POST" action={`/articles/${article.id}`}&gt;
+  &lt;input type="hidden" name="version" value={article.version} /&gt;
+  &lt;input name="title" value={article.title} /&gt;
+  &lt;textarea name="body"&gt;{article.body}&lt;/textarea&gt;
+  &lt;button type="submit"&gt;保存&lt;/button&gt;
+&lt;/form&gt;
 </pre>
 </div>
 
-<h3>做一个重放端点</h3>
+<h3>悲观锁：先占住，别人等着</h3>
 
 <div class="code" data-lang="ts">
 <pre>
-// 只在开发环境挂载：把存档的事件重新走一遍处理流程
-if (!isProduction) {
-  app.post('/dev/webhooks/replay/:id', async (c) =&gt; {
-    const [event] = await db.select().from(webhookEvents)
-      .where(eq(webhookEvents.id, c.req.param('id')))
+await db.transaction(async (tx) =&gt; {
+  // FOR UPDATE：锁住这一行，直到事务结束
+  const [account] = await tx
+    .select()
+    .from(accounts)
+    .where(eq(accounts.id, id))
+    .for('update')
 
-    if (!event) throw new HTTPException(404, { message: '事件不存在' })
+  // 在应用里做复杂计算（这段时间别人读这一行会被阻塞）
+  const fee = calculateComplexFee(account, request)
 
-    await processPaymentEvent(JSON.parse(event.payload), c.env)
-    return c.json({ ok: true, replayed: event.id })
-  })
-}
+  if (account.balance &lt; fee) {
+    throw new HTTPException(400, { message: '余额不足' })
+  }
+
+  await tx.update(accounts)
+    .set({ balance: account.balance - fee })
+    .where(eq(accounts.id, id))
+})
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 这个端点在生产事故时非常值钱</div>
-  <p>
-    「上周三有 200 个订单因为一个 bug 没有正确入账」——
-    如果你原样存了 payload，修完 bug 之后把这 200 个事件重放一遍就行，
-    <strong>几分钟解决</strong>。<br>
-    如果没存，你要去求对方重发（很多平台不支持），或者手工从对账单里补数据。
-  </p>
+<div class="tw">
+<table>
+  <tr><th></th><th>乐观锁</th><th>悲观锁</th></tr>
+  <tr><td>假设</td><td>冲突很少见</td><td>冲突很常见</td></tr>
+  <tr><td>做法</td><td>写入时检查版本，冲突了报错/重试</td><td>读取时就加锁，别人排队等</td></tr>
+  <tr><td>适合</td><td>后台文章编辑、用户资料修改</td><td>秒杀、账户余额、票务座位</td></tr>
+  <tr><td>优点</td><td>不阻塞，吞吐高</td><td>不会失败，逻辑简单</td></tr>
+  <tr><td>缺点</td><td>冲突时用户要重做</td><td>并发低；<strong>有死锁风险</strong>；持锁期间不能干慢活</td></tr>
+  <tr><td>边缘环境</td><td>可用</td><td>需要真正的事务型数据库，KV 上做不了</td></tr>
+</table>
 </div>
 
-<h2 id="outgoing">反过来：你给别人发 webhook</h2>
+<div class="box warn">
+  <div class="t">&#9888; 持锁的时候绝不能做这三件事</div>
+  <ol>
+    <li><strong>调用外部 API。</strong>对方慢 5 秒，你就锁了 5 秒，所有等这一行的请求全部堆积。</li>
+    <li><strong>等待用户输入。</strong>「锁住座位等他填完表单」—— 用户去泡了杯咖啡，锁就一直在。</li>
+    <li><strong>按不同顺序锁多行。</strong>A 先锁 1 再锁 2，B 先锁 2 再锁 1 → <strong>死锁</strong>。
+        规则：<em>永远按同一个固定顺序加锁</em>（比如按主键升序）。</li>
+  </ol>
+</div>
+
+<h2 id="idempotency">幂等：重复请求不造成重复后果</h2>
 
 <p>
-  如果你的产品要给客户推送事件，把上面的痛点反过来想，就知道该怎么做了：
+  上面讲的都是「多个不同用户同时操作」。还有另一类问题：<strong>同一个请求被发了两次</strong>。
 </p>
 
 <div class="tw">
 <table>
-  <tr><th>做法</th><th>为什么</th></tr>
-  <tr><td>每个事件带<strong>唯一 ID</strong></td><td>让接收方能去重</td></tr>
-  <tr><td>带<strong>事件发生时间</strong>，而不只是发送时间</td><td>让接收方能处理乱序</td></tr>
-  <tr><td>用 HMAC 签名 + 时间戳</td><td>让接收方能验证真伪</td></tr>
-  <tr><td>失败时<strong>指数退避重试</strong>，并设上限</td><td>对方短暂故障不该丢消息，也不该被你打垮</td></tr>
-  <tr><td>提供<strong>事件日志和手动重发</strong>界面</td><td>对方出问题时能自助恢复，你少一堆工单</td></tr>
-  <tr><td>提供<strong>轮询 API 兜底</strong></td><td>让对方能对账</td></tr>
-  <tr><td>超时设短（3–5 秒）并明确写进文档</td><td>逼对方异步处理，而不是在你的调用里干重活</td></tr>
-  <tr><td>连续失败多次后<strong>自动停用</strong>并通知</td><td>不要对一个已经废弃的地址永远重试</td></tr>
+  <tr><th>为什么会重复</th><th>说明</th></tr>
+  <tr><td>用户双击提交按钮</td><td>最常见，前端禁用按钮能挡住大部分但不是全部</td></tr>
+  <tr><td>用户网络卡了刷新页面</td><td>如果没用第 8 章的 303 重定向，浏览器会重新提交</td></tr>
+  <tr><td>客户端自动重试</td><td>第 22 章讲过：响应超时了，但服务器其实处理成功了</td></tr>
+  <tr><td>第三方 webhook 重投</td><td>支付平台没收到你的 200，就会一直重发</td></tr>
+  <tr><td>队列的重试</td><td>下一章会讲：至少一次投递意味着可能投递多次</td></tr>
 </table>
 </div>
 
+<div class="box key">
+  <div class="t">&#9733; 幂等的定义</div>
+  <p>
+    一个操作执行一次和执行 N 次，<strong>对系统状态的影响相同</strong>。<br>
+    <code>SET balance = 100</code> 是幂等的。<code>balance = balance - 10</code> <strong>不是</strong>。<br>
+    注意「幂等」说的是<em>结果</em>，不是<em>不执行</em>。重复请求可以照常返回成功，
+    只是不能产生第二笔订单。
+  </p>
+</div>
+
+<h3>幂等键</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="幂等键的处理流程">
+  <rect class="bx-b" x="20" y="24" width="180" height="46" rx="8"/>
+  <text class="sm" x="110" y="44" text-anchor="middle">客户端生成唯一键</text>
+  <text class="mono sm" x="110" y="60" text-anchor="middle">Idempotency-Key: abc-123</text>
+
+  <path class="ln-b" d="M204 47 H280" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="284" y="24" width="200" height="46" rx="8"/>
+  <text class="sm on-a" x="384" y="52" text-anchor="middle">查这个键处理过吗？</text>
+
+  <path class="ln-g" d="M384 74 V104" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="330" y="94">没有</text>
+
+  <path class="ln-a" d="M488 47 H600" marker-end="url(#ar)"/>
+  <text class="sm on-a" x="544" y="40" text-anchor="middle">有</text>
+  <rect class="bx-p" x="604" y="24" width="136" height="46" rx="8"/>
+  <text class="sm on-p" x="672" y="44" text-anchor="middle">直接返回</text>
+  <text class="sm on-p" x="672" y="60" text-anchor="middle">上次的结果</text>
+
+  <rect class="bx-g" x="264" y="108" width="240" height="46" rx="8"/>
+  <text class="sm on-g" x="384" y="128" text-anchor="middle">在同一个事务里：</text>
+  <text class="sm on-g" x="384" y="146" text-anchor="middle">插入幂等键 + 执行业务</text>
+
+  <path class="ln-g" d="M384 158 V186" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="264" y="190" width="240" height="40" rx="8"/>
+  <text class="sm" x="384" y="214" text-anchor="middle">保存结果，返回</text>
+
+  <rect class="bx-d" x="60" y="244" width="640" height="30" rx="6"/>
+  <text class="sm" x="380" y="264" text-anchor="middle">关键：幂等键的插入和业务操作必须在同一个事务里，否则中间崩溃会留下不一致的状态</text>
+</svg>
+<figcaption>图 23-4　幂等键让「重试」变成一件安全的事</figcaption>
+</figure>
+
 <div class="code" data-lang="ts">
 <pre>
-// 发送方的签名要和你的文档完全一致，并且给出验证示例代码
-async function deliverWebhook(endpoint: Endpoint, event: OutgoingEvent) {
-  const body = JSON.stringify(event)
-  const ts = Math.floor(Date.now() / 1000).toString()
-  const sig = await hmacSha256(endpoint.secret, `${ts}.${body}`)
+export const idempotencyKeys = sqliteTable('idempotency_keys', {
+  key: text('key').primaryKey(),
+  userId: text('user_id').notNull(),
+  responseBody: text('response_body', { mode: 'json' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
 
-  const res = await fetch(endpoint.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Timestamp': ts,
-      'X-Signature': sig,
-      'X-Event-Id': event.id,
-      'User-Agent': 'Meadowlark-Webhooks/1.0',
-    },
-    body,
-    signal: AbortSignal.timeout(5000),      // 第 20 章：超时预算
-  })
+app.post('/api/v1/orders', async (c) =&gt; {
+  const key = c.req.header('Idempotency-Key')
+  if (!key) {
+    throw new HTTPException(400, { message: '缺少 Idempotency-Key 请求头' })
+  }
 
-  if (!res.ok) throw new Error(`接收方返回 ${res.status}`)
-}
+  const userId = c.get('user').id
+
+  // 1. 这个键处理过吗？
+  const [seen] = await db.select().from(idempotencyKeys)
+    .where(and(eq(idempotencyKeys.key, key), eq(idempotencyKeys.userId, userId)))
+
+  if (seen) {
+    // 处理过了，原样返回上次的结果
+    return c.json(seen.responseBody as object, 200, { 'Idempotent-Replay': 'true' })
+  }
+
+  // 2. 没处理过：业务 + 记键，同一个事务
+  const body = await c.req.json()
+
+  try {
+    const result = await db.transaction(async (tx) =&gt; {
+      const order = await createOrderIn(tx, userId, body)
+      await tx.insert(idempotencyKeys).values({
+        key, userId,
+        responseBody: { orderId: order.id },
+        createdAt: new Date(),
+      })
+      return { orderId: order.id }
+    })
+    return c.json(result, 201)
+  } catch (err) {
+    // 两个请求同时到达时，慢的那个会在这里撞上主键冲突
+    if (isUniqueViolation(err)) {
+      const [now] = await db.select().from(idempotencyKeys)
+        .where(eq(idempotencyKeys.key, key))
+      return c.json(now.responseBody as object, 200)
+    }
+    throw err
+  }
+})
 </pre>
 </div>
 
-<div class="box warn">
-  <div class="t">&#9888; 发 webhook 时的 SSRF 风险</div>
+<div class="box tip">
+  <div class="t">&#128161; 键从哪来</div>
   <p>
-    客户可以填任意 URL 作为接收地址。如果不校验，他可以填
-    <code>http://169.254.169.254/</code>（云厂商的元数据服务，能拿到你的凭证）
-    或者 <code>http://localhost:6379</code>（你的内网 Redis）。<br>
-    <strong>必须校验：</strong>只允许 https、解析出的 IP 不能是私有网段或回环地址、
-    禁止重定向到内网。这类攻击叫 <strong>SSRF</strong>，是云环境下最危险的漏洞之一。
+    <strong>客户端生成</strong>，用 <code>crypto.randomUUID()</code>，并且在<strong>重试时使用同一个键</strong>
+    —— 这是关键。如果每次重试都换个新键，幂等就失效了。<br>
+    表单场景可以在渲染页面时生成一个键放进隐藏字段，这样用户刷新重复提交也能被识别。<br>
+    别忘了给这张表加过期清理（比如保留 24 小时），否则它会无限增长。
   </p>
+</div>
+
+<h2 id="distributed">多实例带来的额外麻烦</h2>
+
+<p>
+  上面的方案都依赖数据库来做仲裁。一旦状态跑到数据库之外，事情就变复杂了。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 这些「优化」会悄悄破坏正确性</div>
+  <ul>
+    <li><strong>进程内缓存。</strong>「我把库存缓存在内存里减少查询」—— 三个实例三份缓存，
+        全都是过期的（第 12 章讲过）。</li>
+    <li><strong>进程内的锁。</strong>JavaScript 里用一个 <code>Map</code> 记「这个 sku 正在处理中」——
+        只对当前进程有效，另外两个实例根本不知道。</li>
+    <li><strong>KV 上做计数器。</strong>Cloudflare KV 是最终一致的，
+        <code>get</code> 到的值可能是几秒前的。用它做「限量 100 个」必然超发。</li>
+  </ul>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>需求</th><th>用什么</th></tr>
+  <tr><td>强一致的计数、余额、库存</td><td>关系型数据库的原子更新 / 事务</td></tr>
+  <tr><td>Cloudflare 上的强一致状态</td><td>Durable Objects（每个对象全球单实例，天然串行）</td></tr>
+  <tr><td>限流计数（可以差一点点）</td><td>Redis <code>INCR</code>，或 Cloudflare Rate Limiting</td></tr>
+  <tr><td>分布式锁</td><td>Redis 的 <code>SET key val NX EX 30</code>；<strong>但先想想能不能不用</strong></td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 分布式锁比你想的难</div>
+  <p>
+    自己实现的分布式锁几乎总是有 bug：持锁的进程崩了怎么办（要有超时）？
+    超时了但它其实还活着，两个进程同时以为自己持锁怎么办？释放锁时，
+    怎么保证你释放的是自己那把而不是别人的？<br>
+    <strong>结论：能用数据库的原子操作解决，就别上分布式锁。</strong>
+    单条 <code>UPDATE ... WHERE</code> 能解决的问题，不要用一百行锁代码去解决。
+  </p>
+</div>
+
+<h2 id="test">怎么把竞态测出来</h2>
+
+<p>
+  这是本章最实用的一节。竞态之所以难缠，是因为普通测试碰不到它。
+  但你可以<strong>主动制造并发</strong>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/booking.test.ts">
+<pre>
+import { describe, it, expect, beforeEach } from 'vitest'
+
+describe('库存扣减', () =&gt; {
+  beforeEach(async () =&gt; {
+    await resetDb()
+    await seedVacation({ sku: 'HR199', remaining: 1 })   // 只有 1 份
+  })
+
+  it('20 个并发请求只能成功 1 个', async () =&gt; {
+    // 关键：同时发出，而不是 for 循环里 await
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =&gt;
+        app.request('/vacations/HR199/book', { method: 'POST' })
+      )
+    )
+
+    const ok = results.filter((r) =&gt; r.status === 200).length
+    const soldOut = results.filter((r) =&gt; r.status === 409).length
+
+    expect(ok).toBe(1)          // ← 有竞态的实现会得到 2、3 甚至 20
+    expect(soldOut).toBe(19)
+
+    // 更重要：验证数据库最终状态
+    const v = await repo.findBySku('HR199')
+    expect(v.remaining).toBe(0)
+    expect(await countOrders('HR199')).toBe(1)
+  })
+
+  it('重复的幂等键只创建一个订单', async () =&gt; {
+    const key = crypto.randomUUID()
+    const send = () =&gt;
+      app.request('/api/v1/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: JSON.stringify({ sku: 'HR199' }),
+      })
+
+    const [a, b] = await Promise.all([send(), send()])
+
+    const bodyA = await a.json()
+    const bodyB = await b.json()
+    expect(bodyA.orderId).toBe(bodyB.orderId)     // 同一个订单
+    expect(await countOrders('HR199')).toBe(1)
+  })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 让竞态窗口变大，更容易复现</div>
+  <p>
+    如果并发测试偶尔通过偶尔失败，说明窗口太窄。在「读」和「写」之间人为插一个延迟，
+    可以让 bug 稳定复现：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+const v = await repo.findBySku(sku)
+
+// 只在测试环境生效的「竞态放大器」
+if (process.env.RACE_DELAY) {
+  await new Promise((r) =&gt; setTimeout(r, Number(process.env.RACE_DELAY)))
+}
+
+await repo.update(sku, { remaining: v.remaining - 1 })
+</pre></div>
+  <p>
+    修好之后再跑一遍：<strong>正确的实现加了延迟也应该通过</strong>。
+    这是验证「你是真修好了」还是「只是把窗口变窄了」的好办法。
+  </p>
+</div>
+
+<h2 id="checklist">自查清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 在代码里找这些模式</div>
+  <ul>
+    <li>☐ 有没有「先 <code>SELECT</code> 判断，再 <code>INSERT</code>/<code>UPDATE</code>」的地方？
+        → 改成原子更新或依赖唯一约束</li>
+    <li>☐ 有没有 <code>x = x + 1</code> 形式的读改写？
+        → 改成 <code>SET x = x + 1</code> 让数据库算</li>
+    <li>☐ 表单编辑有没有可能静默覆盖别人的修改？→ 加版本号</li>
+    <li>☐ 创建订单、扣款、发消息的接口，重复调用会怎样？→ 加幂等键</li>
+    <li>☐ 有没有状态存在进程内存里？→ 挪到数据库或共享存储</li>
+    <li>☐ 关键的业务约束（余额非负、唯一性）有没有写进数据库约束？</li>
+    <li>☐ 持有锁的代码块里有没有网络调用？</li>
+    <li>☐ 有没有至少一个并发测试？</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>Webhook 把控制权交给了对方：<strong>时机、次数、顺序都不由你</strong>。</li>
-  <li>验签必须用<strong>原始字节</strong>，必须检查时间戳防重放，必须用恒定时间比较。</li>
-  <li>接收端只做三件事：验签、存档去重、投队列，目标 50 ms 返回 200。</li>
-  <li>只有「你自己临时故障」才该返回 5xx；业务失败返回 200，由你的队列重试。</li>
-  <li>不要假设到达顺序，用事件时间戳做条件更新；涉及钱时改为主动拉取最新状态。</li>
-  <li>消息一定会丢，<strong>必须有定时对账兜底</strong>，且和 webhook 共用同一套处理函数。</li>
-  <li>原样存档 payload —— 出事故时重放能救命。</li>
-  <li>自己发 webhook 时，把接收方的痛点反过来做；并防住 SSRF。</li>
+  <li><strong>check-then-act</strong> 是所有竞态的根源：读和写之间的间隙会被别人插队。</li>
+  <li>事务保证「全成或全败」，<strong>不保证「别人不插队」</strong>—— 两者是不同的问题。</li>
+  <li>优先用<strong>原子更新</strong>（<code>UPDATE ... WHERE 条件</code>）把判断交给数据库。</li>
+  <li>数据库约束（UNIQUE、CHECK）是最后一道防线，应用层检查只负责友好提示。</li>
+  <li>乐观锁适合冲突少的编辑场景，悲观锁适合冲突多的抢占场景；持锁期间不做慢操作。</li>
+  <li>幂等键让重复请求安全；键必须由客户端生成并在重试时复用。</li>
+  <li>能用数据库原子操作就别上分布式锁。</li>
+  <li>用 <code>Promise.all</code> 写并发测试，用人为延迟放大竞态窗口。</li>
+  <li>缓存是一致性问题的另一个战场，下一章专门讲。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>实现 <code>/webhooks/payments</code> 端点，包含验签和事件表去重。用 <code>curl</code> 发一个签名错误的请求，确认返回 401。</li>
-    <li>写一个小脚本模拟发送方（算 HMAC 并 POST）。把同一个事件连发三次，确认数据库里只有一条记录、业务只执行了一次。</li>
-    <li>把时间戳改成一天前，确认被拒绝。然后把 <code>toleranceSec</code> 调大，确认又能通过 —— 体会这个参数在防什么。</li>
-    <li>故意把「已发货」事件先于「已支付」事件发送，确认订单状态没有被回退。</li>
-    <li>用 cloudflared 开一条隧道，让本地服务接收一次真实的第三方 webhook（Stripe 测试模式或 GitHub 仓库事件都行）。</li>
-    <li>做一个 <code>/dev/webhooks/replay/:id</code> 端点，把上一步收到的事件重放一次。</li>
+    <li>给云雀旅行加一个「限量套餐」：<code>remaining</code> 字段初始为 1。先用有竞态的写法实现下单，然后写一个 20 并发的测试，看着它失败。</li>
+    <li>改成原子更新，让测试通过。再加上 <code>RACE_DELAY=50</code> 跑一次，确认仍然通过。</li>
+    <li>给文章编辑加乐观锁：两个浏览器窗口打开同一篇文章，都修改，先后保存。确认第二个人收到的是明确的冲突提示，而不是静默覆盖。</li>
+    <li>给下单接口加幂等键。用同一个键连发两次 <code>curl</code>，确认只创建了一个订单，且两次响应内容相同。</li>
+    <li>给 <code>vacations.remaining</code> 加上 <code>CHECK (remaining &gt;= 0)</code> 约束，然后故意写一段会扣成负数的代码，看数据库怎么拒绝你。</li>
+    <li>翻一遍你自己项目的代码，按上面的自查清单找一遍。找到几处？</li>
   </ol>
 </div>
 
