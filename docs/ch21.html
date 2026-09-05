@@ -569,7 +569,7 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
 
   <rect class="bx-d" x="60" y="228" width="640" height="44" rx="8"/>
   <text class="sm" x="380" y="250" text-anchor="middle">DLQ 有消息 = 需要人工介入的信号。<tspan class="on-r">给它配告警</tspan> ——</text>
-  <text class="sm" x="380" y="266" text-anchor="middle">没人看的死信队列，和没有死信队列是一样的（见第 24 章「隐形故障」）</text>
+  <text class="sm" x="380" y="266" text-anchor="middle">没人看的死信队列，和没有死信队列是一样的（见第 27 章「隐形故障」）</text>
 </svg>
 <figcaption>图 21-4　重试处理临时故障，死信队列兜住永久故障</figcaption>
 </figure>
@@ -834,6 +834,7 @@ async function handleTask(task: Task, env: Bindings) {
   <li>定时任务只负责「拆任务投队列」，不自己做几千件事。</li>
   <li>异步接口返回 202 + 任务 ID；死信队列非空必须告警。</li>
   <li>操作很快、用户要等结果、需要严格顺序 —— 这三种情况别用队列。</li>
+  <li>下一章的 Webhook 接收，正是队列最典型的应用场景之一。</li>
 </ul>
 
 <div class="exercise">

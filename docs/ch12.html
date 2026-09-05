@@ -466,6 +466,11 @@ app.use(async (c, next) =&gt; {
 
 <h3>外部监控</h3>
 
+<div class="box note">
+  <div class="t">&#9432; 这一节只是入门</div>
+  <p>日志、指标、追踪三者怎么配合，告警怎么设计才不会让人麻木，SLO 怎么定 —— <strong>第 24 章</strong>会系统地讲。</p>
+</div>
+
 <ul>
   <li><strong>可用性监控</strong>：UptimeRobot、Better Stack 等，从外部每分钟请求一次 <code>/health</code>。
       必须在外部 —— 你的服务器整个挂了的话，跑在上面的监控也一起挂了。</li>
