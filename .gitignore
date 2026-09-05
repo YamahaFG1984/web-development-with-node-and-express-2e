@@ -98,3 +98,6 @@ credentials.*
 !credentials.*.EXAMPLE
 
 .vscode
+
+# 书籍 PDF（版权材料，不入库）
+*.pdf
