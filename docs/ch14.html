@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 14 章 · 路由深入 — Hono 全栈开发教程</title>
+<title>第 14 章 · 搜索 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="14">
@@ -12,485 +12,772 @@
 <main>
 
 <span class="chapter-eyebrow">第 14 章</span>
-<h1>路由深入</h1>
+<h1>搜索</h1>
 <p class="lede">
-  路由是网站的目录结构，也是唯一会被用户收藏、被搜索引擎收录、被别人写进文章里的东西。
-  这一章先讲怎么设计 URL，再讲 Hono 的路由能力和它为什么这么快。
+  上一章你学会了用索引让查询变快。这一章从一个尴尬的事实开始：
+  <strong>那些索引对「搜索框」完全无效。</strong>
+  几乎每个项目都会先写一个 <code>LIKE '%关键词%'</code>，然后在数据涨到几万条时发现它撑不住。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>掌握 URL 设计的原则，写出十年后还能用的地址</li>
-    <li>用好路径参数、通配符和正则约束</li>
-    <li>用 <code>app.route()</code> 和 <code>basePath()</code> 把大应用拆成小模块</li>
-    <li>理解 Hono 的多路由器机制，知道什么时候该换预设</li>
-    <li>处理子域名路由</li>
+    <li>理解 <code>LIKE '%x%'</code> 为什么用不上索引，以及它效果差在哪</li>
+    <li>搞懂倒排索引和分词，知道中文为什么更麻烦</li>
+    <li>用 PostgreSQL 全文检索和 SQLite FTS5 实现搜索</li>
+    <li>判断什么时候该上专用搜索引擎</li>
+    <li>解决最难的那个问题：<strong>索引和数据库怎么保持同步</strong></li>
+    <li>把搜索体验做对：高亮、分页、零结果、搜索分析</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="ia">先想清楚 URL</h2>
+<h2 id="like">LIKE 为什么撑不住</h2>
 
-<blockquote style="border-left:3px solid var(--line-2);margin:20px 0;padding:8px 18px;color:var(--fg-soft)">
-  网站管理员有责任分配那些两年后、二十年后、两百年后依然站得住的 URI。
-  这需要思考、组织和承诺。
-  <br><span style="font-size:13px">—— Tim Berners-Lee，1998 年</span>
-</blockquote>
+<div class="code" data-lang="sql">
+<pre>
+-- 几乎每个项目的第一版搜索
+SELECT * FROM vacations
+WHERE name LIKE '%海岸%' OR description LIKE '%海岸%';
+</pre>
+</div>
 
-<p>
-  这段话写于 1998 年，今天读依然成立。URL 改一次，所有收藏、外链、搜索排名全部作废。
-  下面这些原则值得在动手前花十分钟想一想：
-</p>
+<p>它有两个独立的问题：<strong>性能</strong>和<strong>效果</strong>。先看性能。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="B-tree 索引对前缀通配符无效">
+  <text class="ttl on-g" x="20" y="22">LIKE '海岸%'　—— 前缀确定，索引可用</text>
+
+  <rect class="bx-g" x="240" y="34" width="120" height="30" rx="6"/>
+  <text class="sm" x="300" y="54" text-anchor="middle">俄勒冈</text>
+  <path class="ln-g" d="M270 66 L180 84" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M330 66 L420 84" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="120" y="88" width="120" height="30" rx="6"/>
+  <text class="sm" x="180" y="108" text-anchor="middle">海岸…</text>
+  <rect class="bx-d" x="360" y="88" width="120" height="30" rx="6"/>
+  <text class="sm" x="420" y="108" text-anchor="middle">胡德河…</text>
+  <text class="sm on-g" x="500" y="108">按首字直接定位，跳过大半棵树</text>
+
+  <path class="ln-d" d="M20 136 H740"/>
+
+  <text class="ttl on-r" x="20" y="164">LIKE '%海岸%'　—— 前缀未知，索引作废</text>
+
+  <rect class="bx-r" x="20" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="88" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="156" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="224" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="292" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="360" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="428" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="496" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="564" y="180" width="60" height="26" rx="4"/>
+  <rect class="bx-r" x="632" y="180" width="108" height="26" rx="4"/>
+  <text class="sm on-r" x="380" y="228" text-anchor="middle">每一行都要取出来，逐字符比对 —— 全表扫描</text>
+
+  <rect class="bx-d" x="20" y="244" width="720" height="46" rx="8"/>
+  <text class="sm" x="380" y="264" text-anchor="middle">B-tree 索引像字典的目录：它按<tspan class="on-a">开头</tspan>排序。</text>
+  <text class="sm" x="380" y="282" text-anchor="middle">「以海岸开头」能查目录，「中间含海岸」只能一页页翻</text>
+</svg>
+<figcaption>图 14-1　通配符在前面，索引就废了 —— 这条规律对所有数据库都成立</figcaption>
+</figure>
+
+<h3>效果问题更严重</h3>
 
 <div class="tw">
 <table>
-  <tr><th>原则</th><th>反面例子</th><th>好的写法</th></tr>
-  <tr>
-    <td>不暴露技术细节</td>
-    <td><code>/vacation.php</code><br><code>/api/v1/getVacationList</code></td>
-    <td><code>/vacations</code><br><code>/api/v1/vacations</code></td>
-  </tr>
-  <tr>
-    <td>不放无意义的词</td>
-    <td><code>/home/about</code><br><code>/pages/contact</code></td>
-    <td><code>/about</code><br><code>/contact</code></td>
-  </tr>
-  <tr>
-    <td>用连字符分词</td>
-    <td><code>/hood_river_day_trip</code><br><code>/HoodRiverDayTrip</code></td>
-    <td><code>/hood-river-day-trip</code></td>
-  </tr>
-  <tr>
-    <td>全小写</td>
-    <td><code>/Vacations/HoodRiver</code></td>
-    <td><code>/vacations/hood-river</code></td>
-  </tr>
-  <tr>
-    <td>层级反映内容结构</td>
-    <td><code>/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
-  </tr>
-  <tr>
-    <td>别为 SEO 硬塞关键词</td>
-    <td><code>/vacations/oregon-coast-portland-hood-river/oregon-coast/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
-  </tr>
+  <tr><th>用户搜</th><th>期望</th><th><code>LIKE</code> 的实际表现</th></tr>
+  <tr><td>「海岸 度假」</td><td>同时含这两个词的结果</td><td>找不到 —— 它在找连续的「海岸 度假」这个整串</td></tr>
+  <tr><td>「breweries」</td><td>也匹配 brewery</td><td>找不到 —— 不认识词形变化</td></tr>
+  <tr><td>「Hood River」</td><td>不分大小写</td><td>取决于数据库排序规则，很可能漏掉</td></tr>
+  <tr><td>「hod river」（拼错）</td><td>猜到用户想搜什么</td><td>零结果</td></tr>
+  <tr><td>任意词</td><td>最相关的排在最前</td><td>没有相关性概念，顺序基本随机</td></tr>
 </table>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 非改不可的时候，用 301</div>
+<div class="box key">
+  <div class="t">&#9733; 搜索和查询是两件事</div>
   <p>
-    真的需要调整 URL 结构时，<strong>保留旧地址并 301 永久重定向到新地址</strong>。
-    搜索引擎会把权重转移过去，老书签也不会失效。留着这些重定向，别急着删。
+    <strong>查询</strong>是精确的：「available = true 且 price &lt; 200」，答案要么对要么错。<br>
+    <strong>搜索</strong>是模糊的：「跟『海边玩水』有关的东西」，答案是<em>一个按相关性排序的列表</em>。<br>
+    用查询的工具（<code>WHERE</code> + B-tree）去做搜索，就像用尺子量温度 —— 工具本身没问题，只是不对口。
   </p>
-  <div class="code" data-lang="ts"><pre>
-app.get('/old-vacations/:slug', (c) =&gt;
-  c.redirect(`/vacations/${c.req.param('slug')}`, 301)
-)
-</pre></div>
 </div>
 
-<h2 id="patterns">路径模式</h2>
+<h2 id="inverted">倒排索引</h2>
+
+<p>
+  全文检索的核心数据结构。理解它，后面所有工具的行为你都能预测。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="正排索引与倒排索引的对比">
+  <rect class="bx-b" x="20" y="20" width="340" height="180" rx="10"/>
+  <text class="ttl on-b" x="36" y="44">正排：文档 → 词</text>
+  <text class="sm" x="36" y="70">（数据库表天然就是这样）</text>
+  <text class="mono sm" x="36" y="98">HR199 → 胡德河 / 帆船 / 啤酒</text>
+  <text class="mono sm" x="36" y="118">OC39  → 海岸 / 小镇 / 海风</text>
+  <text class="mono sm" x="36" y="138">B99   → 攀岩 / 高原 / 沙漠</text>
+  <text class="sm on-r" x="36" y="168">要找「含帆船的」→ 只能把每篇都翻一遍</text>
+  <text class="sm on-r" x="36" y="188">文档越多越慢（O(n)）</text>
+
+  <rect class="bx-g" x="400" y="20" width="340" height="180" rx="10"/>
+  <text class="ttl on-g" x="416" y="44">倒排：词 → 文档</text>
+  <text class="sm" x="416" y="70">（把上面那张表翻转过来）</text>
+  <text class="mono sm" x="416" y="98">胡德河 → [HR199]</text>
+  <text class="mono sm" x="416" y="118">帆船　 → [HR199, OC39]</text>
+  <text class="mono sm" x="416" y="138">海岸　 → [OC39]</text>
+  <text class="sm on-g" x="416" y="168">要找「含帆船的」→ 查一次表直接拿到列表</text>
+  <text class="sm on-g" x="416" y="188">和文档总数无关（近似 O(1)）</text>
+
+  <rect class="bx-a" x="20" y="216" width="720" height="66" rx="10"/>
+  <text class="ttl on-a" x="380" y="238" text-anchor="middle">多词查询就是求交集</text>
+  <text class="sm" x="380" y="260" text-anchor="middle">搜「帆船 海岸」→ [HR199, OC39] ∩ [OC39] = [OC39]</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">这就是为什么全文检索天然支持多关键词，而 LIKE 不行</text>
+</svg>
+<figcaption>图 14-2　把「文档→词」翻转成「词→文档」，这一个动作就是全文检索的全部秘密</figcaption>
+</figure>
+
+<h3>建索引前要做的加工</h3>
+
+<div class="tw">
+<table>
+  <tr><th>步骤</th><th>做什么</th><th>例子</th></tr>
+  <tr><td>分词 Tokenize</td><td>把句子切成词</td><td>"Oregon coast trip" → ["Oregon", "coast", "trip"]</td></tr>
+  <tr><td>归一化</td><td>统一大小写、去掉重音</td><td>"Oregon" → "oregon"，"café" → "cafe"</td></tr>
+  <tr><td>词干化 Stemming</td><td>还原到词根</td><td>"breweries"、"brewery" → "breweri"</td></tr>
+  <tr><td>去停用词</td><td>丢掉没有区分度的词</td><td>the、a、of、的、了</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 中文分词是另一个难度</div>
+  <p>
+    英文靠空格就能切开。中文没有空格：<strong>「俄勒冈海岸度假」</strong>该切成什么？<br>
+    「俄勒冈 / 海岸 / 度假」是对的，但机器不知道 —— 它需要词典或统计模型。
+  </p>
+  <p>
+    更麻烦的是<strong>歧义</strong>：「南京市长江大桥」可以切成「南京市 / 长江大桥」，
+    也可以切成「南京 / 市长 / 江大桥」。<br>
+    <strong>后果很实际：</strong>如果分词器把「海岸度假」当成一个词，用户搜「海岸」就什么都搜不到。
+    所以<em>中文项目一定要实际测一下分词结果</em>，别假设它是对的。
+  </p>
+</div>
+
+<div class="code" data-lang="sql">
+<pre>
+-- PostgreSQL 里可以直接看分词结果，调试时非常有用
+SELECT to_tsvector('english', 'Enjoy the ocean air and quaint coastal towns');
+-- → 'air':4 'coastal':7 'enjoy':1 'ocean':3 'quaint':6 'town':8
+--   注意：the、and 被丢掉了，towns 被还原成 town，数字是词的位置
+</pre>
+</div>
+
+<h2 id="pg">方案一：PostgreSQL 全文检索</h2>
+
+<p>如果你已经在用 Postgres，先试它 —— 不用引入新组件，而且支持事务。</p>
+
+<div class="code" data-lang="sql">
+<pre>
+-- ① 加一个生成列，自动维护 tsvector
+ALTER TABLE vacations ADD COLUMN search_vector tsvector
+  GENERATED ALWAYS AS (
+    -- setweight 给字段分权重：A 最重要，D 最次要
+    setweight(to_tsvector('english', coalesce(name, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(description, '')), 'C')
+  ) STORED;
+
+-- ② GIN 索引 —— 倒排索引在 Postgres 里的实现
+CREATE INDEX idx_vacations_search ON vacations USING GIN (search_vector);
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 生成列解决了同步问题</div>
+  <p>
+    <code>GENERATED ALWAYS AS ... STORED</code> 意味着 <code>name</code> 或
+    <code>description</code> 一变，<code>search_vector</code> <strong>自动跟着变</strong>，
+    而且在同一个事务里。<br>
+    你不可能忘记更新索引 —— 因为根本没有「更新索引」这个步骤。
+    这是本章后面那个「同步」难题在单库方案下的最优解。
+  </p>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/db/search.ts">
+<pre>
+import { sql } from 'drizzle-orm'
+
+export async function searchVacations(q: string, limit = 20, offset = 0) {
+  // websearch_to_tsquery 支持用户熟悉的语法："海岸" -攀岩 OR
+  const query = sql`websearch_to_tsquery('english', ${q})`
+
+  return db.execute(sql`
+    SELECT
+      sku, name, description, price,
+      ts_rank(search_vector, ${query}) AS rank,
+      -- 让数据库直接生成带高亮标记的摘要
+      ts_headline('english', description, ${query},
+                  'StartSel=&lt;mark&gt;, StopSel=&lt;/mark&gt;, MaxWords=30') AS snippet
+    FROM vacations
+    WHERE search_vector @@ ${query}
+      AND available = true
+    ORDER BY rank DESC, packages_sold DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `)
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 三种 tsquery 函数的区别</div>
+  <div class="tw"><table>
+    <tr><th>函数</th><th>输入</th><th>适合</th></tr>
+    <tr><td><code>to_tsquery</code></td><td><code>'海岸 &amp; 度假'</code>，语法错了会报错</td><td>程序构造的查询</td></tr>
+    <tr><td><code>plainto_tsquery</code></td><td>纯文本，所有词按 AND 连接</td><td>简单场景</td></tr>
+    <tr><td><code>websearch_to_tsquery</code></td><td>支持 <code>"引号短语"</code>、<code>-排除</code>、<code>OR</code></td><td><strong>用户输入，首选这个</strong></td></tr>
+  </table></div>
+  <p>
+    <strong>永远不要把用户输入拼进 <code>to_tsquery</code></strong> —— 一个多余的
+    <code>&amp;</code> 就会让查询报错，页面直接 500。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 中文要装扩展</div>
+  <p>
+    Postgres 内置的分词器不认识中文，<code>to_tsvector('english', '海岸度假')</code>
+    会把整串当成一个词。中文需要 <code>zhparser</code> 或 <code>pg_jieba</code> 扩展 ——
+    但<strong>很多托管 Postgres（包括一些 Serverless 服务）不允许装扩展</strong>。
+    选型时先确认这一点，否则做到一半才发现走不通。
+  </p>
+</div>
+
+<h2 id="sqlite">方案二：SQLite FTS5</h2>
+
+<p>用 SQLite 或 Cloudflare D1 的话，FTS5 是内置的：</p>
+
+<div class="code" data-lang="sql">
+<pre>
+-- ① 建一张虚拟表专门放索引
+CREATE VIRTUAL TABLE vacations_fts USING fts5(
+  sku UNINDEXED,          -- 只存不索引，用来关联回主表
+  name,
+  description,
+  content='vacations',    -- 外部内容模式：不重复存正文，省空间
+  content_rowid='rowid',
+  tokenize='porter unicode61'
+);
+
+-- ② 用触发器保持同步（FTS5 没有生成列）
+CREATE TRIGGER vacations_ai AFTER INSERT ON vacations BEGIN
+  INSERT INTO vacations_fts(rowid, sku, name, description)
+  VALUES (new.rowid, new.sku, new.name, new.description);
+END;
+
+CREATE TRIGGER vacations_ad AFTER DELETE ON vacations BEGIN
+  INSERT INTO vacations_fts(vacations_fts, rowid, sku, name, description)
+  VALUES ('delete', old.rowid, old.sku, old.name, old.description);
+END;
+
+CREATE TRIGGER vacations_au AFTER UPDATE ON vacations BEGIN
+  INSERT INTO vacations_fts(vacations_fts, rowid, sku, name, description)
+  VALUES ('delete', old.rowid, old.sku, old.name, old.description);
+  INSERT INTO vacations_fts(rowid, sku, name, description)
+  VALUES (new.rowid, new.sku, new.name, new.description);
+END;
+</pre>
+</div>
 
 <div class="code" data-lang="ts">
 <pre>
-// 静态路径
-app.get('/about', handler)
+export async function searchVacations(db: D1Database, q: string, limit = 20) {
+  // bm25 的负数权重：绝对值越大越重要，name 的权重是 description 的 10 倍
+  const { results } = await db
+    .prepare(`
+      SELECT v.sku, v.name, v.price,
+             snippet(vacations_fts, 2, '&lt;mark&gt;', '&lt;/mark&gt;', '…', 24) AS snippet,
+             bm25(vacations_fts, 10.0, 1.0) AS rank
+      FROM vacations_fts
+      JOIN vacations v ON v.rowid = vacations_fts.rowid
+      WHERE vacations_fts MATCH ?
+        AND v.available = 1
+      ORDER BY rank
+      LIMIT ?
+    `)
+    .bind(toFtsQuery(q), limit)
+    .all()
 
-// 路径参数
-app.get('/vacations/:slug', (c) =&gt; {
-  const slug = c.req.param('slug')          // 'hood-river-day-trip'
+  return results
+}
+
+/** 用户输入不能直接进 MATCH —— FTS5 有自己的查询语法 */
+function toFtsQuery(input: string): string {
+  return input
+    .replace(/["*():^-]/g, ' ')           // 去掉所有语法字符
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) =&gt; `"${term}"*`)          // 每个词加引号，末尾 * 支持前缀匹配
+    .join(' AND ')
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 用户输入永远要清洗</div>
+  <p>
+    用户在搜索框里输入 <code>a" OR "b</code> 或者一个孤零零的 <code>-</code>，
+    直接拼进 <code>MATCH</code> 会导致语法错误 → 500 → 用户看到错误页。<br>
+    这不是安全问题（参数绑定挡住了注入），而是<strong>可用性问题</strong>：
+    <em>搜索框是用户唯一能往你系统里塞任意字符串的地方，它一定会收到奇怪的输入。</em>
+  </p>
+</div>
+
+<h2 id="relevance">相关性排序</h2>
+
+<p>
+  搜索的输出是一个<em>排序</em>的列表。排序质量比召回质量更影响体验 ——
+  用户基本只看前五条。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="BM25 相关性的三个直觉">
+  <text class="ttl" x="20" y="22">BM25（以及 TF-IDF）背后的三个直觉</text>
+
+  <rect class="bx-b" x="20" y="36" width="232" height="110" rx="10"/>
+  <text class="ttl on-b" x="136" y="60" text-anchor="middle">① 词频</text>
+  <text class="sm" x="36" y="84">文档里出现越多次，</text>
+  <text class="sm" x="36" y="104">越可能是在讲这个</text>
+  <text class="sm on-r" x="36" y="130">但有边际递减 ——</text>
+  <text class="sm on-r" x="36" y="140">出现 100 次不比 10 次强 10 倍</text>
+
+  <rect class="bx-a" x="264" y="36" width="232" height="110" rx="10"/>
+  <text class="ttl on-a" x="380" y="60" text-anchor="middle">② 逆文档频率</text>
+  <text class="sm" x="280" y="84">越罕见的词区分度越高</text>
+  <text class="sm" x="280" y="104">「攀岩」比「旅行」有用得多</text>
+  <text class="sm on-a" x="280" y="130">几乎每篇都有的词</text>
+  <text class="sm on-a" x="280" y="140">≈ 没有信息量</text>
+
+  <rect class="bx-g" x="508" y="36" width="232" height="110" rx="10"/>
+  <text class="ttl on-g" x="624" y="60" text-anchor="middle">③ 文档长度</text>
+  <text class="sm" x="524" y="84">短文档里出现一次，</text>
+  <text class="sm" x="524" y="104">比长文档里出现一次更重要</text>
+  <text class="sm on-g" x="524" y="130">否则长文章会</text>
+  <text class="sm on-g" x="524" y="140">仅仅因为长而占据前排</text>
+
+  <rect class="bx-p" x="20" y="160" width="720" height="80" rx="10"/>
+  <text class="ttl on-p" x="380" y="182" text-anchor="middle">但纯文本相关性往往不够</text>
+  <text class="sm" x="380" y="204" text-anchor="middle">真实的排序还要混入业务信号：销量、评分、库存、时间新鲜度、是否推广</text>
+  <text class="mono sm" x="380" y="226" text-anchor="middle">final = 0.6 × 文本相关性 + 0.3 × 归一化销量 + 0.1 × 时间衰减</text>
+</svg>
+<figcaption>图 14-3　「最匹配」和「用户最想要」经常不是同一个</figcaption>
+</figure>
+
+<div class="code" data-lang="sql">
+<pre>
+-- 把业务信号混进排序
+ORDER BY
+  ts_rank(search_vector, query) * 0.6
+  + LEAST(packages_sold / 100.0, 1.0) * 0.3
+  + (1.0 / (1 + EXTRACT(EPOCH FROM now() - created_at) / 86400 / 30)) * 0.1
+  DESC
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 权重靠数据调，不靠拍脑袋</div>
+  <p>
+    这些系数不可能一次调对。做法是：<strong>先上线一个粗糙版本，记录用户搜了什么、点了第几条</strong>
+    （本章最后一节），再根据真实数据调整。<br>
+    「用户搜完点了第 8 条」是个强信号：说明前 7 条排错了。
+  </p>
+</div>
+
+<h2 id="engine">方案三：专用搜索引擎</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 什么时候该升级</div>
+  <p>数据库全文检索够用到什么时候？出现下面任何一条，就该考虑专用引擎了：</p>
+  <ul>
+    <li>需要<strong>拼写容错</strong>（用户打错字也要能搜到）</li>
+    <li>需要<strong>输入即搜</strong>（每敲一个字符都要出结果，要求个位数毫秒）</li>
+    <li>需要<strong>分面筛选</strong>（左侧「品类 (12) / 价格区间 (5)」那种带计数的过滤器）</li>
+    <li>需要<strong>同义词</strong>配置（「笔电」= 「笔记本」= 「laptop」）</li>
+    <li>搜索量大到<strong>拖累主库</strong>（搜索和事务抢同一份资源）</li>
+    <li>需要中文分词但托管数据库<strong>装不了扩展</strong></li>
+  </ul>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>方案</th><th>特点</th><th>适合</th></tr>
+  <tr><td><strong>Meilisearch</strong></td><td>开箱即用的拼写容错和输入即搜，配置极少，自托管简单</td><td>中小项目的首选</td></tr>
+  <tr><td><strong>Typesense</strong></td><td>和 Meilisearch 定位接近，分面和地理搜索更强</td><td>电商类筛选场景</td></tr>
+  <tr><td><strong>Algolia</strong></td><td>托管服务，体验最好，有边缘节点</td><td>不想运维、预算充足</td></tr>
+  <tr><td><strong>Elasticsearch / OpenSearch</strong></td><td>功能最全也最重，聚合分析强</td><td>大规模、复杂需求、兼做日志分析</td></tr>
+  <tr><td><strong>向量检索</strong></td><td>按语义而非关键词匹配（「海边玩水」能搜到「冲浪」）</td><td>作为关键词搜索的<em>补充</em>，不是替代</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+import { MeiliSearch } from 'meilisearch'
+
+const client = new MeiliSearch({ host: c.env.MEILI_HOST, apiKey: c.env.MEILI_KEY })
+const index = client.index('vacations')
+
+// 配置一次即可
+await index.updateSettings({
+  searchableAttributes: ['name', 'category', 'description'],   // 顺序即权重
+  filterableAttributes: ['category', 'available', 'price'],
+  sortableAttributes: ['price', 'packagesSold'],
+  synonyms: { '笔电': ['笔记本', 'laptop'] },
 })
 
-// 多个参数
-app.get('/contest/:year/:month', (c) =&gt; {
-  const { year, month } = c.req.param()     // 一次拿全部
+// 查询
+const res = await index.search(q, {
+  limit: 20,
+  filter: ['available = true', 'price &lt; 300'],
+  facets: ['category'],                       // 返回每个分类的命中数
+  attributesToHighlight: ['name', 'description'],
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 引入搜索引擎 = 引入一个新的数据副本</div>
+  <p>
+    这是最容易被低估的成本。你现在有<strong>两份数据</strong>，它们会不一致：
+    用户改了标题但搜索结果还是旧的、商品下架了还能搜到、
+    删掉的数据还留在索引里。<br>
+    <strong>下一节就是专门讲这个。</strong>数据库自带的全文检索之所以有吸引力，
+    很大程度上就是因为它没有这个问题。
+  </p>
+</div>
+
+<h2 id="sync">最难的部分：索引同步</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="三种索引同步策略">
+  <rect class="bx-r" x="20" y="20" width="720" height="80" rx="10"/>
+  <text class="ttl on-r" x="36" y="42">&#10060; 双写：在同一个函数里写两边</text>
+  <text class="mono sm" x="36" y="64">await db.update(vacations)…　　await index.updateDocuments(…)</text>
+  <text class="sm on-r" x="36" y="86">第一个成功、第二个失败 → 数据永久不一致，而且没人知道。它们不在一个事务里</text>
+
+  <rect class="bx-a" x="20" y="112" width="720" height="86" rx="10"/>
+  <text class="ttl on-a" x="36" y="134">&#9989; 队列：写库成功后投递同步任务</text>
+  <text class="mono sm" x="36" y="156">await db.update(…)　　await QUEUE.send({ type: 'reindex', sku })</text>
+  <text class="sm" x="36" y="176">失败会自动重试，最终一致。任务要幂等（重复执行结果相同）</text>
+  <text class="sm on-g" x="36" y="192">这正是第 22 章队列的典型用途 —— 也是大多数项目的正确答案</text>
+
+  <rect class="bx-b" x="20" y="210" width="720" height="60" rx="10"/>
+  <text class="ttl on-b" x="36" y="232">&#9989; 变更数据捕获（CDC）：监听数据库的变更日志</text>
+  <text class="sm" x="36" y="252">业务代码<tspan class="on-g">完全不用改</tspan>，改数据的任何路径都会被捕获（包括手工 SQL）</text>
+  <text class="sm on-r" x="36" y="266">代价：要额外的基础设施（Debezium 等），运维复杂</text>
+
+  <rect class="bx-d" x="20" y="282" width="720" height="30" rx="6"/>
+  <text class="sm" x="380" y="302" text-anchor="middle">无论用哪种，都还要有一个<tspan class="on-a">定时全量重建</tspan>兜底 —— 增量同步一定会漏</text>
+</svg>
+<figcaption>图 14-4　索引同步是「最终一致」的经典场景，和第 23 章 webhook 的对账思路完全一样</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/tasks/reindex.ts">
+<pre>
+export async function reindexVacation(sku: string, env: Bindings) {
+  const v = await getVacation(env.DB, sku)
+
+  // 记录被删了 → 从索引里也删掉。这一步最容易忘
+  if (!v) {
+    await index.deleteDocument(sku)
+    return
+  }
+
+  // 下架的商品不该被搜到 —— 用删除而不是加过滤条件，索引更小更快
+  if (!v.available) {
+    await index.deleteDocument(sku)
+    return
+  }
+
+  // 幂等：同一个文档写多少次结果都一样
+  await index.addDocuments([{
+    id: v.sku,
+    name: v.name,
+    category: v.category,
+    description: v.description,
+    price: v.price,
+    packagesSold: v.packagesSold,
+    available: v.available,
+  }])
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 写库之后投递任务（第 22 章）
+app.patch('/api/v1/vacations/:sku', async (c) =&gt; {
+  const sku = c.req.param('sku')
+  await c.get('repo').update(sku, c.req.valid('json'))
+
+  await c.env.TASKS.send({ type: 'reindex-vacation', sku })
+
+  return c.json({ ok: true })
+})
+</pre>
+</div>
+
+<h3>全量重建兜底</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+/** 每天凌晨跑一次：把整个索引重建到一个新索引，然后原子切换 */
+export async function rebuildSearchIndex(env: Bindings) {
+  const tmpName = `vacations_${Date.now()}`
+  const tmp = client.index(tmpName)
+  await tmp.updateSettings(SEARCH_SETTINGS)
+
+  let cursor: string | undefined
+  do {
+    const page = await listVacations(env.DB, { cursor, limit: 1000, available: true })
+    await tmp.addDocuments(page.items.map(toSearchDoc))
+    cursor = page.nextCursor
+  } while (cursor)
+
+  // 关键：交换别名，用户全程不会看到空索引
+  await client.swapIndexes([{ indexes: ['vacations', tmpName] }])
+  await client.deleteIndex(tmpName)
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 别原地清空重建</div>
+  <p>
+    「先 <code>deleteAllDocuments()</code> 再重新导入」这个做法很直觉，但在重建的那几分钟里，
+    <strong>所有用户搜索都是零结果</strong>。<br>
+    正确做法是建一个新索引，导完之后<strong>原子地切换别名</strong>。
+    用户完全无感 —— 这和第 18 章「内容指纹」、第 27 章「零停机迁移」是同一个思路：
+    <em>先准备好新的，再切换，最后清理旧的。</em>
+  </p>
+</div>
+
+<h2 id="ux">搜索体验</h2>
+
+<h3>零结果不是错误</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+export const SearchResults: FC&lt;Props&gt; = ({ q, results, suggestions, popular }) =&gt; {
+  if (results.length === 0) {
+    return (
+      &lt;div class="empty"&gt;
+        &lt;h2&gt;没有找到「{q}」相关的行程&lt;/h2&gt;
+        {/* 给出路，而不是死胡同 */}
+        {suggestions.length &gt; 0 &amp;&amp; (
+          &lt;p&gt;你是不是想找：
+            {suggestions.map((s) =&gt; &lt;a href={`/search?q=${encodeURIComponent(s)}`}&gt;{s}&lt;/a&gt;)}
+          &lt;/p&gt;
+        )}
+        &lt;p&gt;或者看看大家都在搜什么：&lt;/p&gt;
+        &lt;ul&gt;{popular.map((p) =&gt; &lt;li&gt;&lt;a href={`/search?q=${p}`}&gt;{p}&lt;/a&gt;&lt;/li&gt;)}&lt;/ul&gt;
+        &lt;p&gt;&lt;a href="/vacations"&gt;浏览全部行程&lt;/a&gt;&lt;/p&gt;
+      &lt;/div&gt;
+    )
+  }
+  // ...
+}
+</pre>
+</div>
+
+<h3>高亮的转义陷阱</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 高亮片段带着 HTML 标签回来</div>
+  <p>
+    <code>ts_headline</code> 和 <code>snippet()</code> 返回的是含 <code>&lt;mark&gt;</code> 的字符串。
+    JSX 会把它<strong>整个转义</strong>，用户看到的是字面的 <code>&lt;mark&gt;</code> 文本。<br>
+    要渲染就得用第 7 章的 <code>raw()</code> —— <strong>但这意味着关掉了 XSS 防护</strong>。
+    而摘要内容来自数据库，可能包含用户提交的文本。
+  </p>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+// ✅ 安全做法：让数据库用不可能出现在正文里的标记，自己转义后再替换
+const snippet = row.snippet     // 用 StartSel=«HL», StopSel=«/HL» 之类的标记
+
+function renderSnippet(s: string) {
+  const escaped = s
+    .replace(/&amp;/g, '&amp;amp;').replace(/&lt;/g, '&amp;lt;').replace(/&gt;/g, '&amp;gt;')
+  // 转义之后才把自定义标记换成真标签
+  return raw(escaped.replace(/«HL»/g, '&lt;mark&gt;').replace(/«\/HL»/g, '&lt;/mark&gt;'))
+}
+
+&lt;p class="snippet"&gt;{renderSnippet(row.snippet)}&lt;/p&gt;
+</pre>
+</div>
+
+<h3>深分页</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="OFFSET 深分页的性能问题">
+  <text class="ttl on-r" x="20" y="22">OFFSET 10000 LIMIT 20</text>
+  <rect class="bx-r" x="20" y="34" width="600" height="26" rx="4"/>
+  <text class="sm on-r" x="320" y="52" text-anchor="middle">数据库要先算出前 10000 条，再<tspan>全部扔掉</tspan></text>
+  <rect class="bx-g" x="624" y="34" width="60" height="26" rx="4"/>
+  <text class="sm on-g" x="654" y="52" text-anchor="middle">要这 20 条</text>
+  <text class="sm on-r" x="20" y="80">页码越大越慢，第 500 页可能要几秒。而且插入新数据会导致翻页时看到重复项</text>
+
+  <path class="ln-d" d="M20 96 H740"/>
+
+  <text class="ttl on-g" x="20" y="124">游标分页：WHERE (rank, id) &lt; (上一页最后一条) LIMIT 20</text>
+  <rect class="bx-g" x="20" y="136" width="120" height="26" rx="4"/>
+  <text class="sm on-g" x="80" y="154" text-anchor="middle">直接定位</text>
+  <path class="ln-g" d="M144 149 H200" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="204" y="136" width="60" height="26" rx="4"/>
+  <text class="sm on-g" x="234" y="154" text-anchor="middle">20 条</text>
+  <text class="sm on-g" x="290" y="154">每页耗时恒定，也不会重复或漏项</text>
+  <text class="sm on-r" x="20" y="182">代价：不能跳到「第 37 页」，只能一页页翻。但搜索场景本来也没人跳页</text>
+  <text class="sm" x="20" y="200">搜索引擎通常还会直接限制最大可翻深度（比如 1000 条），因为再往后也没有价值</text>
+</svg>
+<figcaption>图 14-5　搜索结果适合「加载更多」，不适合传统页码</figcaption>
+</figure>
+
+<h3>其他细节</h3>
+
+<div class="tw">
+<table>
+  <tr><th>细节</th><th>做法</th></tr>
+  <tr><td>输入防抖</td><td>输入即搜要 debounce 200–300 ms，否则每敲一个字符打一次接口</td></tr>
+  <tr><td>竞态</td><td>快速输入时，先发的请求可能后返回，把结果覆盖成旧的。用 <code>AbortController</code> 取消前一个</td></tr>
+  <tr><td>空查询</td><td><code>q=</code> 应该返回默认列表或提示，不是报错，更不是全表扫描</td></tr>
+  <tr><td>超长查询</td><td>截断到合理长度（比如 200 字符），否则是个 DoS 入口</td></tr>
+  <tr><td>URL 可分享</td><td>查询条件放查询串（第 8 章），用户才能收藏和分享搜索结果</td></tr>
+  <tr><td>可访问性</td><td>结果区域加 <code>aria-live="polite"</code>，屏幕阅读器才会播报「找到 12 条结果」</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="js">
+<pre>
+// 防抖 + 取消前一个请求，两个问题一起解决
+let controller
+const search = debounce(async (q) =&gt; {
+  controller?.abort()
+  controller = new AbortController()
+
+  try {
+    const res = await fetch(`/api/v1/search?q=${encodeURIComponent(q)}`,
+                            { signal: controller.signal })
+    render(await res.json())
+  } catch (err) {
+    if (err.name !== 'AbortError') showError()    // 主动取消不算错误
+  }
+}, 250)
+</pre>
+</div>
+
+<h2 id="analytics">搜索分析：被忽视的金矿</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/api/v1/search', zValidator('query', searchSchema), async (c) =&gt; {
+  const { q, page } = c.req.valid('query')
+  const started = Date.now()
+
+  const results = await searchVacations(q, page)
+
+  // 记录每一次搜索（第 25 章的结构化日志）
+  c.get('log')('info', 'search', {
+    query: q.slice(0, 100),
+    resultCount: results.total,
+    durationMs: Date.now() - started,
+    page,
+    userId: c.get('user')?.id,
+  })
+
+  return c.json(results)
 })
 
-// 可选参数
-app.get('/vacations/:region?', (c) =&gt; {
-  const region = c.req.param('region')      // 可能是 undefined
-})
-
-// 正则约束：只匹配数字
-app.get('/orders/:id{[0-9]+}', (c) =&gt; {
-  const id = Number(c.req.param('id'))      // 保证能转成数字
-})
-
-// 约束版本号格式
-app.get('/api/:version{v[0-9]+}/vacations', handler)
-
-// 通配符
-app.get('/files/*', (c) =&gt; {
-  const path = c.req.path                   // '/files/a/b/c.png'
-})
-
-// 包含斜杠的参数
-app.get('/files/:path{.+}', (c) =&gt; {
-  const path = c.req.param('path')          // 'a/b/c.png'
+// 用户点击结果时也记一条，才知道排序好不好
+app.post('/api/v1/search/click', async (c) =&gt; {
+  const { query, sku, position } = await c.req.json()
+  c.get('log')('info', 'search_click', { query, sku, position })
+  return c.body(null, 204)
 })
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 正则约束能省掉一堆校验</div>
+  <div class="t">&#9733; 「零结果查询」清单是产品需求的直接来源</div>
   <p>
-    <code>/orders/:id{[0-9]+}</code> 意味着 <code>/orders/abc</code> 根本不会进你的处理函数，
-    而是走 404。你不用在函数里写 <code>if (isNaN(id)) return 400</code>。
-    <strong>让路由层挡掉明显非法的请求，处理函数就能只关心正常情况。</strong>
+    把 <code>resultCount = 0</code> 的查询按频次排序，你会看到三类东西：
+  </p>
+  <ul>
+    <li><strong>用词不一致</strong>：用户搜「民宿」，你的数据里写的是「客栈」→ 加同义词</li>
+    <li><strong>真实的缺货需求</strong>：一百个人搜「滑雪」而你没有滑雪产品 → 这是采购信号</li>
+    <li><strong>分词或拼写问题</strong>：搜「hood river」搜不到「Hood River」→ 是 bug</li>
+  </ul>
+  <p>
+    <em>这份清单几乎不花成本就能拿到，但很少有团队真的去看。</em>
+    另一个高价值指标是<strong>平均点击位置</strong>：如果用户平均点第 6 条，说明前 5 条排错了。
   </p>
 </div>
 
-<h3>匹配顺序</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// ❌ /vacations/new 会被第一条抢走，当成 slug='new'
-app.get('/vacations/:slug', showVacation)
-app.get('/vacations/new', newVacationForm)
-
-// ✅ 具体的写前面
-app.get('/vacations/new', newVacationForm)
-app.get('/vacations/:slug', showVacation)
-</pre>
-</div>
-
-<h2 id="middleware-route">路由处理函数也是中间件</h2>
-
-<p>
-  第 10 章说过：中间件和处理函数本质是一回事。
-  一个路由可以挂多个函数，只要不返回响应就继续往下走：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-app.get(
-  '/admin/vacations/:sku',
-  requireLogin,          // 中间件：没登录就重定向
-  requireRole('admin'),  // 中间件：不是管理员就 403
-  loadVacation,          // 中间件：查数据库，塞进 c
-  (c) =&gt; c.html(&lt;AdminVacationPage vacation={c.get('vacation')} /&gt;)
-)
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// loadVacation 长这样
-const loadVacation = createMiddleware&lt;{ Variables: { vacation: Vacation } }&gt;(
-  async (c, next) =&gt; {
-    const v = await repo.findBySku(c.req.param('sku'))
-    if (!v) return c.notFound()      // 拦截，后面不执行
-    c.set('vacation', v)
-    await next()
-  }
-)
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 这是消除重复的好办法</div>
-  <p>
-    如果有五个路由都要「按 sku 查出度假套餐，查不到就 404」，
-    把它写成中间件，五个处理函数就都能假设「<code>c.get('vacation')</code> 一定存在且有效」。
-  </p>
-</div>
-
-<h2 id="organize">拆分大应用</h2>
-
-<p>
-  所有路由堆在一个文件里，超过一两百行就没法看了。Hono 用 <code>app.route()</code> 组合子应用：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/routes/vacations.tsx">
-<pre>
-import { Hono } from 'hono'
-
-export const vacationRoutes = new Hono()
-  .get('/', listVacations)                 // 实际路径 /vacations
-  .get('/:slug', showVacation)             // 实际路径 /vacations/:slug
-  .post('/:slug/notify', notifyWhenInSeason)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/routes/api.ts">
-<pre>
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
-
-export const apiRoutes = new Hono()
-  .use('*', cors())                        // 只对 API 生效
-  .get('/vacations', apiListVacations)
-  .get('/vacations/:sku', apiGetVacation)
-  .delete('/vacations/:sku', apiDeleteVacation)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/app.tsx">
-<pre>
-import { Hono } from 'hono'
-import { vacationRoutes } from './routes/vacations'
-import { apiRoutes } from './routes/api'
-import { adminRoutes } from './routes/admin'
-
-export const app = new Hono()
-
-app.get('/', handlers.home)
-app.get('/about', handlers.about)
-
-app.route('/vacations', vacationRoutes)
-app.route('/api/v1', apiRoutes)
-app.route('/admin', adminRoutes)
-</pre>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="用 app.route 组合子应用">
-  <rect class="bx-a" x="280" y="20" width="200" height="46" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">app（主应用）</text>
-  <text class="mono sm" x="380" y="58" text-anchor="middle">/ · /about</text>
-
-  <path class="ln" d="M330 70 L150 108" marker-end="url(#ar)"/>
-  <path class="ln" d="M380 70 V108" marker-end="url(#ar)"/>
-  <path class="ln" d="M430 70 L610 108" marker-end="url(#ar)"/>
-
-  <rect class="bx-b" x="30" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-b" x="150" y="134" text-anchor="middle">vacationRoutes</text>
-  <text class="mono sm" x="150" y="154" text-anchor="middle">挂载于 /vacations</text>
-  <text class="mono sm" x="150" y="172" text-anchor="middle">'/' → /vacations</text>
-
-  <rect class="bx-g" x="290" y="112" width="180" height="74" rx="10"/>
-  <text class="ttl on-g" x="380" y="134" text-anchor="middle">apiRoutes</text>
-  <text class="mono sm" x="380" y="154" text-anchor="middle">挂载于 /api/v1</text>
-  <text class="sm" x="380" y="172" text-anchor="middle">自带 CORS 中间件</text>
-
-  <rect class="bx-p" x="490" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-p" x="610" y="134" text-anchor="middle">adminRoutes</text>
-  <text class="mono sm" x="610" y="154" text-anchor="middle">挂载于 /admin</text>
-  <text class="sm" x="610" y="172" text-anchor="middle">自带权限中间件</text>
-
-  <rect class="bx-d" x="120" y="204" width="520" height="34" rx="8"/>
-  <text class="sm" x="380" y="226" text-anchor="middle">子应用内部只关心相对路径，挂载前缀由主应用决定 —— 换前缀不用改子应用</text>
-</svg>
-<figcaption>图 14-1　子应用可以独立开发、独立测试、独立挂载</figcaption>
-</figure>
-
-<h3>basePath</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// 给整个应用加前缀
-const app = new Hono().basePath('/api/v2')
-
-app.get('/vacations', handler)    // 实际是 /api/v2/vacations
-</pre>
-</div>
-
-<h3>为什么推荐链式写法</h3>
-
-<div class="vs">
-  <div class="old">
-    <div class="h">分开写：类型信息丢失</div>
-    <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-api.get('/vacations', h1)
-api.get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 里没有路由信息
-// RPC 客户端用不了
-</pre></div>
-  </div>
-  <div class="new">
-    <div class="h">链式写：类型一路累加</div>
-    <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-  .get('/vacations', h1)
-  .get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 包含全部路由的
-// 路径、参数和返回值类型
-</pre></div>
-  </div>
-</div>
-
-<p>
-  这个差别在第 15 章（RPC 客户端）和第 5 章（<code>testClient</code>）时会变得非常重要。
-  <strong>养成链式写的习惯</strong>，将来想用这些特性时不用回头重构。
-</p>
-
-<h2 id="subdomain">子域名</h2>
-
-<p>
-  子域名适合承载「和主站关系不大」的部分：<code>api.example.com</code>、<code>admin.example.com</code>。
-  Hono 的路由默认不看域名，需要自己判断：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-const mainApp = new Hono()
-const adminApp = new Hono()
-const apiApp = new Hono()
-
-const root = new Hono()
-
-root.all('*', async (c) =&gt; {
-  const host = c.req.header('host') ?? ''
-
-  if (host.startsWith('admin.')) return adminApp.fetch(c.req.raw, c.env)
-  if (host.startsWith('api.'))   return apiApp.fetch(c.req.raw, c.env)
-  return mainApp.fetch(c.req.raw, c.env)
-})
-
-export default root
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; 本地怎么测子域名</div>
-  <p>
-    改 hosts 文件（macOS/Linux 是 <code>/etc/hosts</code>，Windows 是
-    <code>C:\Windows\System32\drivers\etc\hosts</code>）：
-  </p>
-  <div class="code" data-lang="text"><pre>
-127.0.0.1  meadowlark.local
-127.0.0.1  admin.meadowlark.local
-127.0.0.1  api.meadowlark.local
-</pre></div>
-  <p>用 <code>.local</code> 后缀，避免和真实域名冲突。</p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 子域名对 SEO 不利</div>
-  <p>
-    搜索引擎倾向于把子域名当作<strong>独立站点</strong>，权重不共享。
-    所以博客放 <code>example.com/blog</code> 比 <code>blog.example.com</code> 好。
-    子域名留给 API、后台这些不需要 SEO 的部分。
-  </p>
-</div>
-
-<h2 id="router">Hono 为什么快</h2>
-
-<p>
-  Hono 有个别的框架没有的设计：<strong>它内置了多个路由器实现，启动时自动选一个。</strong>
-</p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="Hono 的多路由器架构">
-  <rect class="bx-a" x="270" y="20" width="220" height="48" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">SmartRouter（默认）</text>
-  <text class="sm" x="380" y="60" text-anchor="middle">第一个请求到来时，挑一个最合适的</text>
-
-  <path class="ln-a" d="M330 72 L190 108" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M430 72 L570 108" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-g" x="50" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-g" x="190" y="134" text-anchor="middle">RegExpRouter</text>
-  <text class="sm" x="66" y="156">把所有路由编译成<tspan>一个</tspan>大正则</text>
-  <text class="sm" x="66" y="176">匹配是 O(1)，不随路由数量变慢</text>
-  <text class="sm on-r" x="66" y="194">但少数复杂模式它处理不了</text>
-
-  <rect class="bx-b" x="430" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-b" x="570" y="134" text-anchor="middle">TrieRouter</text>
-  <text class="sm" x="446" y="156">用前缀树逐段匹配</text>
-  <text class="sm" x="446" y="176">稍慢一点，但<tspan>支持全部模式</tspan></text>
-  <text class="sm on-g" x="446" y="194">作为兜底方案</text>
-
-  <rect class="bx-d" x="120" y="220" width="520" height="46" rx="8"/>
-  <text class="sm" x="380" y="242" text-anchor="middle">SmartRouter 先试 RegExpRouter；如果你的路由里有它搞不定的模式，</text>
-  <text class="sm" x="380" y="260" text-anchor="middle">就自动退回 TrieRouter。你什么都不用配。</text>
-</svg>
-<figcaption>图 14-2　「自动挑最快的那个」是 Hono 性能的来源</figcaption>
-</figure>
-
-<h3>预设</h3>
-
-<p>大多数人不需要改。但如果你的场景特殊，可以换预设：</p>
+<h2 id="path">演进路线</h2>
 
 <div class="tw">
 <table>
-  <tr><th>引入方式</th><th>用的路由器</th><th>适合</th></tr>
-  <tr>
-    <td><code>import { Hono } from 'hono'</code></td>
-    <td>SmartRouter [RegExp + Trie]</td>
-    <td><strong>默认，绝大多数情况</strong>。长驻服务器，注册一次跑很久</td>
-  </tr>
-  <tr>
-    <td><code>import { Hono } from 'hono/quick'</code></td>
-    <td>SmartRouter [Linear + Trie]</td>
-    <td>每个请求都要重新注册路由的环境（某些 FaaS）。注册极快，匹配稍慢</td>
-  </tr>
-  <tr>
-    <td><code>import { Hono } from 'hono/tiny'</code></td>
-    <td>PatternRouter</td>
-    <td>对体积极度敏感的场景。代码最小，性能够用</td>
-  </tr>
+  <tr><th>阶段</th><th>数据量</th><th>方案</th></tr>
+  <tr><td>原型</td><td>&lt; 1000 条</td><td><code>LIKE '%x%'</code> 就行 —— <strong>别提前优化</strong></td></tr>
+  <tr><td>成长</td><td>1 万 – 100 万</td><td>数据库全文检索（Postgres FTS / SQLite FTS5）</td></tr>
+  <tr><td>成熟</td><td>需要容错、分面、输入即搜</td><td>Meilisearch / Typesense + 队列同步</td></tr>
+  <tr><td>规模化</td><td>千万级、复杂聚合</td><td>Elasticsearch，可能配合向量检索做语义补充</td></tr>
 </table>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 怎么判断该不该换</div>
+  <div class="t">&#128161; 从一开始就把搜索藏在接口后面</div>
   <p>
-    默认预设的取舍是：<strong>启动时多花一点时间做编译，换取之后每个请求都快</strong>。
-    这在服务器上是划算的（编译一次，服务几百万个请求）。
-    只有当「进程存活时间极短、每次只处理一两个请求」时，<code>hono/quick</code> 才更划算。
-    不确定就别改。
+    不管现在用什么实现，都把它包成一个函数：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+export interface SearchEngine {
+  search(q: string, opts: SearchOptions): Promise&lt;SearchResult&gt;
+  index(doc: SearchDoc): Promise&lt;void&gt;
+  remove(id: string): Promise&lt;void&gt;
+}
+</pre></div>
+  <p>
+    这样从 <code>LIKE</code> 升级到 FTS 再升级到 Meilisearch，
+    <strong>业务代码一行不用改</strong>。和第 13 章的 <code>VacationRepo</code>、
+    第 11 章的 <code>Mailer</code> 是同一个套路 —— 这个模式在本教程里已经第三次出现了。
   </p>
 </div>
-
-<h2 id="debug">看看路由表长什么样</h2>
-
-<div class="code" data-lang="ts">
-<pre>
-import { showRoutes } from 'hono/dev'
-
-// 在所有路由注册完之后
-showRoutes(app, { verbose: true })
-</pre>
-</div>
-
-<div class="code" data-lang="text">
-<pre>
-GET     /
-GET     /about
-GET     /vacations
-GET     /vacations/:slug
-POST    /vacations/:slug/notify
-GET     /api/v1/vacations
-GET     /api/v1/vacations/:sku
-DELETE  /api/v1/vacations/:sku
-GET     /admin/vacations
-</pre>
-</div>
-
-<p>
-  排查「为什么这个路由不生效」时，先看这张表 ——
-  经常会发现路径拼错了，或者顺序被前面的通配符抢了。
-</p>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>URL 是长期承诺。全小写、连字符分词、不暴露技术细节、层级反映结构。</li>
-  <li>路径参数支持正则约束，用它把非法请求挡在处理函数之外。</li>
-  <li>具体路由写在通配路由前面。</li>
-  <li>用 <code>app.route()</code> 拆分子应用，用链式写法保住类型信息。</li>
-  <li>子域名要自己判断 <code>host</code>；子域名对 SEO 不友好，留给 API 和后台。</li>
-  <li>Hono 的多路由器机制默认就是最优解，不确定就别换预设。</li>
+  <li><code>LIKE '%x%'</code> 用不上索引（前缀未知 → 全表扫描），而且不分词、不排序、不容错。</li>
+  <li>全文检索的核心是<strong>倒排索引</strong>：词 → 文档列表，多词查询就是求交集。</li>
+  <li>中文分词需要词典或模型，托管数据库可能装不了扩展 —— <strong>选型时先验证</strong>。</li>
+  <li>Postgres 的生成列 + GIN 索引能自动保持同步，这是它最大的优势。</li>
+  <li>相关性 = 文本匹配度 + 业务信号，权重要靠真实数据调。</li>
+  <li>引入搜索引擎 = 引入第二份数据副本，<strong>同步用队列，并有定时全量重建兜底</strong>。</li>
+  <li>重建索引要「建新的 → 切别名 → 删旧的」，不要原地清空。</li>
+  <li>零结果要给出路；高亮要小心 XSS；深分页用游标。</li>
+  <li>记录查询词和点击位置，<strong>零结果清单是免费的产品需求</strong>。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>把云雀旅行的路由按 <code>vacations</code> / <code>api</code> / <code>admin</code> 拆成三个子应用，用 <code>app.route()</code> 挂载。全部用链式写法。</li>
-    <li>加一条 <code>/vacations/:region/:slug</code> 路由，并确保 <code>/vacations/new</code> 仍然能进到「新建」页面。</li>
-    <li>给 <code>/orders/:id</code> 加上数字约束，然后访问 <code>/orders/abc</code>，确认返回的是 404 而不是处理函数里的报错。</li>
-    <li>用 <code>showRoutes(app)</code> 打印路由表，检查有没有你意料之外的重复或遮蔽。</li>
-    <li>为你的项目写一份「URL 规划」文档，列出所有计划中的路径。想一想哪些两年后可能要改。</li>
+    <li>给云雀旅行做一个 <code>LIKE</code> 版搜索。然后往表里塞 10 万条假数据，用 <code>EXPLAIN</code> 看执行计划，确认它在做全表扫描，并记录耗时。</li>
+    <li>换成 FTS5 或 Postgres 全文检索，同样的数据量再测一次，对比耗时。</li>
+    <li>搜「海岸 度假」这样的多词查询，确认 <code>LIKE</code> 版找不到而全文检索版能找到。</li>
+    <li>在搜索框里输入 <code>a" OR "b</code> 和一串 <code>((((</code>，确认你的服务没有 500。</li>
+    <li>实现搜索结果高亮，然后往数据里插一条 description 含 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 的记录，搜到它，确认脚本没有执行。</li>
+    <li>把搜索包成 <code>SearchEngine</code> 接口，写一个基于数组的内存实现用于测试。</li>
+    <li>记录搜索日志，自己随便搜十几次（包括故意搜不存在的词），然后把「零结果查询」列出来看看。</li>
   </ol>
 </div>
 

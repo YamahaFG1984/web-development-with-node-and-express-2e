@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 16 章 · 单页应用 — Hono 全栈开发教程</title>
+<title>第 16 章 · REST API 与 JSON — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="16">
@@ -12,544 +12,548 @@
 <main>
 
 <span class="chapter-eyebrow">第 16 章</span>
-<h1>单页应用</h1>
+<h1>REST API 与 JSON</h1>
 <p class="lede">
-  前面十五章，页面都是服务器拼好 HTML 发过来的。这一章换个架构：
-  浏览器加载一次 JavaScript，之后自己渲染页面，Hono 退居幕后只提供 JSON。
+  网站是给人看的，API 是给程序用的。这一章设计并实现云雀旅行的 API，
+  并展示 Hono 的杀手锏：让前端直接拿到后端的类型。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>理解 Web 应用架构的演变，知道 SPA 解决了什么、代价是什么</li>
-    <li>用 Vite 建立一个 React 前端，和 Hono 后端协作</li>
-    <li>用 RPC 客户端调用 API，享受端到端类型安全</li>
-    <li>了解开发和生产两种部署形态</li>
-    <li>知道 <code>hono/jsx/dom</code> 和 HonoX 这两个更轻的选择</li>
+    <li>设计一套讲道理的 REST 接口，并规划错误响应格式</li>
+    <li>用 <code>HTTPException</code> 做统一的错误处理</li>
+    <li>理解 CORS 到底在防什么，正确配置它</li>
+    <li>用 RPC 客户端让前端共享后端类型</li>
+    <li>用 Zod OpenAPI 自动生成接口文档</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="history">简史</h2>
+<h2 id="design">设计 API</h2>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Web 应用架构的四个阶段">
-  <rect class="bx" x="20" y="20" width="700" height="60" rx="8"/>
-  <text class="ttl" x="36" y="42">1990s · 纯静态</text>
-  <text class="sm" x="36" y="62">服务器上放什么文件，浏览器就拿到什么。改内容要重新上传文件。</text>
-  <text class="sm" x="620" y="62" text-anchor="end">没有交互</text>
+<p>REST 的核心思想很简单：<strong>用名词表示资源，用 HTTP 方法表示动作。</strong></p>
 
-  <rect class="bx" x="20" y="88" width="700" height="60" rx="8"/>
-  <text class="ttl" x="36" y="110">1995–2005 · 服务端渲染</text>
-  <text class="sm" x="36" y="130">PHP / JSP / Rails。每次交互都是整页刷新，服务器重新拼一遍 HTML。</text>
-  <text class="sm" x="700" y="130" text-anchor="end">白屏闪烁</text>
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 动词进路径</div>
+    <div class="code" data-lang="text"><pre>
+GET  /api/getVacations
+POST /api/createVacation
+POST /api/deleteVacation
+POST /api/updateVacationPrice
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 名词 + 方法</div>
+    <div class="code" data-lang="text"><pre>
+GET    /api/v1/vacations
+POST   /api/v1/vacations
+DELETE /api/v1/vacations/:sku
+PATCH  /api/v1/vacations/:sku
+</pre></div>
+  </div>
+</div>
 
-  <rect class="bx-b" x="20" y="156" width="700" height="60" rx="8"/>
-  <text class="ttl on-b" x="36" y="178">2005–2014 · Ajax 时代</text>
-  <text class="sm" x="36" y="198">jQuery 局部刷新。页面不整体重载了，但 DOM 操作散落各处，状态难以追踪。</text>
-  <text class="sm" x="700" y="198" text-anchor="end">意大利面条代码</text>
+<p>云雀旅行的 API：</p>
 
-  <rect class="bx-a" x="20" y="224" width="700" height="60" rx="8"/>
-  <text class="ttl on-a" x="36" y="246">2014 至今 · 组件化 SPA</text>
-  <text class="sm" x="36" y="266">React / Vue / Svelte。用「状态 → 界面」的声明式模型代替手动操作 DOM。</text>
-  <text class="sm" x="700" y="266" text-anchor="end">代价：包体积、SEO、复杂度</text>
-</svg>
-<figcaption>图 16-1　每一代都在解决上一代的问题，同时带来新问题</figcaption>
-</figure>
+<div class="tw">
+<table>
+  <tr><th>方法与路径</th><th>作用</th><th>参数位置</th></tr>
+  <tr><td><code>GET /api/v1/vacations</code></td><td>列出度假套餐</td><td>查询串：<code>available</code>、<code>limit</code>、<code>cursor</code></td></tr>
+  <tr><td><code>GET /api/v1/vacations/:sku</code></td><td>取单个</td><td>路径参数</td></tr>
+  <tr><td><code>POST /api/v1/vacations/:sku/notify</code></td><td>订阅到季通知</td><td>JSON 请求体：<code>email</code></td></tr>
+  <tr><td><code>DELETE /api/v1/vacations/:sku</code></td><td>申请下架（标记待审核）</td><td>JSON 请求体：<code>email</code>、<code>notes</code></td></tr>
+</table>
+</div>
 
-<div class="box key">
-  <div class="t">&#9733; SPA 真正的价值</div>
+<div class="box tip">
+  <div class="t">&#128161; 第一天就加版本号</div>
   <p>
-    不是「页面不刷新」这个表象，而是<strong>把「界面应该长什么样」变成状态的纯函数</strong>。
-    你不再手动写「找到这个元素、改它的文字、隐藏那个按钮」，而是描述「当状态是 X 时界面就是 Y」，
-    剩下的交给框架。<br>
-    这个收益在交互复杂时非常大，在展示型页面上则几乎不存在 —— 那种场景 SSR 更合适。
+    路径里的 <code>/v1/</code> 现在看起来多余，但它是你未来唯一的退路。
+    当某天必须做破坏性改动时，你可以上线 <code>/v2/</code> 而让 <code>/v1/</code> 继续服务老客户端。
+    没有版本号的话，你要么永远不能改，要么一改就有人的 App 崩掉。
   </p>
 </div>
 
-<h2 id="arch">项目结构</h2>
+<h3>返回格式</h3>
 
-<p>前后端在同一个仓库里，共享类型：</p>
-
-<div class="code" data-lang="text">
+<div class="code" data-lang="json">
 <pre>
-meadowlark/
-├── package.json
-├── src/                    ← Hono 后端
-│   ├── server.ts
-│   ├── app.ts
-│   ├── routes/
-│   │   └── api.ts          ← 导出 ApiType
-│   └── db/
-└── client/                 ← React 前端
-    ├── index.html
-    ├── vite.config.ts
-    └── src/
-        ├── main.tsx
-        ├── App.tsx
-        ├── api.ts          ← import type { ApiType } from '../../src/routes/api'
-        └── pages/
+// 列表：包一层，方便加分页信息
+{
+  "data": [
+    { "sku": "HR199", "name": "胡德河一日游", "price": 99.95 }
+  ],
+  "nextCursor": "eyJza3UiOiJIUjE5OSJ9"
+}
+
+// 单个资源：直接返回
+{ "sku": "HR199", "name": "胡德河一日游", "price": 99.95 }
+
+// 错误：结构固定，客户端好统一处理
+{
+  "error": {
+    "code": "VACATION_NOT_FOUND",
+    "message": "没有找到 SKU 为 XX000 的度假套餐"
+  }
+}
 </pre>
 </div>
+
+<div class="box warn">
+  <div class="t">&#9888; 列表接口不要直接返回数组</div>
+  <p>
+    返回 <code>[{...}, {...}]</code> 看起来很干净，但等你需要加分页游标、总数、
+    或者「本次结果被截断了」这种元信息时，就必须改变返回结构 —— 这是破坏性变更。
+    一开始就包一层 <code>{ data: [...] }</code>，未来加字段是兼容的。
+  </p>
+</div>
+
+<h2 id="errors">错误处理</h2>
+
+<p>错误分三类，处理方式完全不同：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="SPA 与 API 的协作方式">
-  <rect class="bx-b" x="20" y="26" width="200" height="130" rx="10"/>
-  <text class="ttl on-b" x="120" y="50" text-anchor="middle">浏览器</text>
-  <text class="sm" x="36" y="76">① 请求任意路径</text>
-  <text class="sm" x="36" y="96">② 拿到同一个 index.html</text>
-  <text class="sm" x="36" y="116">③ 加载 JS 包</text>
-  <text class="sm" x="36" y="136">④ React 接管，渲染界面</text>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="三类错误及其处理方式">
+  <rect class="bx-r" x="20" y="20" width="230" height="220" rx="10"/>
+  <text class="ttl on-r" x="135" y="44" text-anchor="middle">灾难性错误</text>
+  <text class="sm" x="34" y="70">程序进入未知状态</text>
+  <text class="sm" x="34" y="90">未捕获异常、内存耗尽</text>
+  <text class="sm on-r" x="34" y="120">状态码：500</text>
+  <text class="sm" x="34" y="146">应对：</text>
+  <text class="sm" x="34" y="166">· 记录 + 上报</text>
+  <text class="sm" x="34" y="186">· 重启进程</text>
+  <text class="sm" x="34" y="206">· 不向客户端暴露细节</text>
+  <text class="sm" x="34" y="228">见第 12 章</text>
 
-  <path class="ln-b" d="M224 70 H320" marker-end="url(#ar)"/>
-  <text class="sm" x="272" y="62" text-anchor="middle">HTML/JS</text>
+  <rect class="bx-a" x="266" y="20" width="230" height="220" rx="10"/>
+  <text class="ttl on-a" x="381" y="44" text-anchor="middle">可恢复的服务端错误</text>
+  <text class="sm" x="280" y="70">程序没坏，依赖出问题了</text>
+  <text class="sm" x="280" y="90">数据库超时、下游 503</text>
+  <text class="sm on-a" x="280" y="120">状态码：500 / 502 / 503</text>
+  <text class="sm" x="280" y="146">应对：</text>
+  <text class="sm" x="280" y="166">· 重试（带退避）</text>
+  <text class="sm" x="280" y="186">· 降级返回缓存数据</text>
+  <text class="sm" x="280" y="206">· 告诉客户端稍后再试</text>
+  <text class="sm" x="280" y="228">带上 Retry-After 头</text>
 
-  <rect class="bx-g" x="324" y="26" width="200" height="130" rx="10"/>
-  <text class="ttl on-g" x="424" y="50" text-anchor="middle">静态资源服务</text>
-  <text class="sm" x="340" y="76">index.html</text>
-  <text class="sm" x="340" y="96">assets/index-a1b2.js</text>
-  <text class="sm" x="340" y="116">assets/index-c3d4.css</text>
-  <text class="sm" x="340" y="136">CDN 或 serveStatic</text>
-
-  <path class="ln-a" d="M120 160 V196 H320" marker-end="url(#ar-a)"/>
-  <text class="sm on-a" x="180" y="190">⑤ fetch JSON</text>
-
-  <rect class="bx-a" x="324" y="172" width="200" height="52" rx="10"/>
-  <text class="ttl on-a" x="424" y="194" text-anchor="middle">Hono API</text>
-  <text class="sm" x="424" y="212" text-anchor="middle">/api/v1/*</text>
-
-  <path class="ln" d="M528 198 H600" marker-end="url(#ar)"/>
-  <rect class="bx" x="604" y="172" width="130" height="52" rx="10"/>
-  <text class="sm" x="669" y="202" text-anchor="middle">数据库</text>
-
-  <rect class="bx-d" x="560" y="26" width="180" height="130" rx="10"/>
-  <text class="sm" x="650" y="52" text-anchor="middle">关键点</text>
-  <text class="sm" x="576" y="78">任何前端路径都返回</text>
-  <text class="sm" x="576" y="96">同一个 index.html，</text>
-  <text class="sm" x="576" y="114">由前端路由决定显示什么。</text>
-  <text class="sm" x="576" y="138">这叫 SPA 回退（fallback）。</text>
+  <rect class="bx-b" x="512" y="20" width="228" height="220" rx="10"/>
+  <text class="ttl on-b" x="626" y="44" text-anchor="middle">客户端错误</text>
+  <text class="sm" x="526" y="70">是调用方用错了</text>
+  <text class="sm" x="526" y="90">参数缺失、格式不对、没权限</text>
+  <text class="sm on-b" x="526" y="120">状态码：4xx</text>
+  <text class="sm" x="526" y="146">应对：</text>
+  <text class="sm" x="526" y="166">· <tspan class="on-r">不要记成错误日志</tspan></text>
+  <text class="sm" x="526" y="186">· 返回<tspan>具体</tspan>的错误说明</text>
+  <text class="sm" x="526" y="206">· 指出是哪个字段错了</text>
+  <text class="sm" x="526" y="228">这不是你的 bug</text>
 </svg>
-<figcaption>图 16-2　后端提供两样东西：静态文件 + JSON API</figcaption>
+<figcaption>图 16-1　把客户端错误当成服务器故障来告警，是运维告警疲劳的头号原因</figcaption>
 </figure>
 
-<h2 id="setup">建立前端</h2>
-
-<div class="code" data-lang="bash">
-<pre>
-npm create vite@latest client -- --template react-ts
-cd client
-npm install
-</pre>
+<div class="box note">
+  <div class="t">&#9432; 空结果不是错误</div>
+  <p>
+    「查询列表，一条都没有」应该返回 <code>200</code> 加一个空数组，不是 404。
+    404 的含义是「你请求的这个<em>资源</em>不存在」，而 <code>/api/v1/vacations</code>
+    这个资源是存在的，只是当前内容为空。
+  </p>
 </div>
 
-<div class="code" data-lang="ts" data-file="client/vite.config.ts">
-<pre>
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+<h3>HTTPException</h3>
 
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    // 开发时把 /api 请求转发给 Hono，避免跨域
-    proxy: {
-      '/api': 'http://localhost:3000',
-    },
-  },
-  build: {
-    // 构建产物直接输出到后端的 public 目录
-    outDir: '../public',
-    emptyOutDir: false,
-  },
+<p>Hono 提供了一个专门的异常类，让你在任何深度都能中断请求并返回指定状态码：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { HTTPException } from 'hono/http-exception'
+
+app.get('/api/v1/vacations/:sku', async (c) =&gt; {
+  const v = await repo.findBySku(c.req.param('sku'))
+
+  if (!v) {
+    throw new HTTPException(404, { message: '没有找到这个度假套餐' })
+  }
+
+  return c.json(v)
 })
 </pre>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 开发时用代理，就不用配 CORS</div>
-  <p>
-    前端跑在 5173 端口，后端在 3000。加上代理之后，浏览器看到的所有请求都来自
-    <code>localhost:5173</code>，同源，没有 CORS 问题。<br>
-    生产环境两者部署在同一个域名下，同样不需要 CORS。<strong>只有前后端真的跨域时才配 CORS。</strong>
-  </p>
-</div>
-
-<h2 id="react">React 快速入门</h2>
-
-<p>如果你没写过 React，三个概念就够开始了。</p>
-
-<h3>① 组件</h3>
-
-<div class="code" data-lang="tsx">
+<div class="code" data-lang="ts" data-file="src/app.ts">
 <pre>
-function VacationCard({ vacation }: { vacation: Vacation }) {
-  return (
-    &lt;article className="vacation"&gt;
-      &lt;h3&gt;{vacation.name}&lt;/h3&gt;
-      &lt;p&gt;{vacation.description}&lt;/p&gt;
-      &lt;span&gt;¥{vacation.price.toFixed(2)}&lt;/span&gt;
-    &lt;/article&gt;
+import { HTTPException } from 'hono/http-exception'
+
+app.onError((err, c) =&gt; {
+  // ① 我们主动抛出的：按原样返回
+  if (err instanceof HTTPException) {
+    return c.json(
+      { error: { code: 'HTTP_ERROR', message: err.message } },
+      err.status
+    )
+  }
+
+  // ② 意料之外的：记录 + 上报，只给客户端一句笼统的话
+  console.error('未预期的错误', err)
+  reportToSentry(err, { path: c.req.path, requestId: c.get('requestId') })
+
+  return c.json(
+    { error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } },
+    500
   )
-}
-</pre>
-</div>
-
-<p>
-  和第 7 章的 Hono JSX 几乎一样。唯一区别：React 用 <code>className</code>，Hono JSX 用 <code>class</code>。
-</p>
-
-<h3>② 状态</h3>
-
-<div class="code" data-lang="tsx">
-<pre>
-import { useState } from 'react'
-
-function Counter() {
-  const [count, setCount] = useState(0)
-
-  return (
-    &lt;button onClick={() =&gt; setCount(count + 1)}&gt;
-      点了 {count} 次
-    &lt;/button&gt;
-  )
-}
-</pre>
-</div>
-
-<p>
-  <code>useState</code> 返回「当前值」和「修改它的函数」。
-  调用修改函数时，React 会<strong>重新执行这个组件函数</strong>，用新的值渲染出新的界面。
-  这就是「状态 → 界面」的声明式模型。
-</p>
-
-<h3>③ 副作用</h3>
-
-<div class="code" data-lang="tsx">
-<pre>
-import { useEffect, useState } from 'react'
-
-function VacationList() {
-  const [vacations, setVacations] = useState&lt;Vacation[]&gt;([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState&lt;string | null&gt;(null)
-
-  useEffect(() =&gt; {
-    let cancelled = false
-
-    fetch('/api/v1/vacations')
-      .then((res) =&gt; {
-        if (!res.ok) throw new Error(`请求失败：${res.status}`)
-        return res.json()
-      })
-      .then((body) =&gt; { if (!cancelled) setVacations(body.data) })
-      .catch((err) =&gt; { if (!cancelled) setError(err.message) })
-      .finally(() =&gt; { if (!cancelled) setLoading(false) })
-
-    // 组件卸载时取消，避免对已卸载组件调用 setState
-    return () =&gt; { cancelled = true }
-  }, [])   // 空数组 = 只在组件首次挂载时执行一次
-
-  if (loading) return &lt;p&gt;加载中…&lt;/p&gt;
-  if (error) return &lt;p role="alert"&gt;出错了：{error}&lt;/p&gt;
-  if (vacations.length === 0) return &lt;p&gt;暂时没有可预订的行程。&lt;/p&gt;
-
-  return (
-    &lt;div&gt;
-      {vacations.map((v) =&gt; &lt;VacationCard key={v.sku} vacation={v} /&gt;)}
-    &lt;/div&gt;
-  )
-}
+})
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 三个状态，一个都不能少</div>
+  <div class="t">&#9888; 永远不要把异常信息直接返回给客户端</div>
   <p>
-    <strong>加载中、出错了、空数据</strong> —— 初学者最常见的错误就是只写「成功且有数据」的分支。
-    结果用户在网速慢时看到一片空白，在接口挂掉时也看到一片空白，完全不知道发生了什么。
-    <br>
-    在真实项目里，用 <a href="https://tanstack.com/query">TanStack Query</a> 或 SWR
-    可以把这三个状态、缓存、重试、去重都管起来，比手写 <code>useEffect</code> 可靠得多。
+    <code>return c.json({ error: err.message }, 500)</code> 看起来很方便，
+    但数据库错误信息里可能包含表名、列名、甚至部分数据；文件错误里包含服务器路径。
+    这些都是攻击者做侦察的素材。<strong>细节写日志，客户端只给一句话和一个请求 ID。</strong>
   </p>
 </div>
 
-<h2 id="rpc-client">用 RPC 调 API</h2>
+<h2 id="cors">CORS</h2>
 
-<p>第 15 章导出的 <code>ApiType</code> 在这里派上用场：</p>
+<p>
+  浏览器有一条铁律叫<strong>同源策略</strong>：<code>https://a.com</code> 上的 JavaScript
+  默认不能读取 <code>https://b.com</code> 的响应内容。
+</p>
 
-<div class="code" data-lang="ts" data-file="client/src/api.ts">
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="同源策略与 CORS 预检流程">
+  <rect class="bx-r" x="20" y="20" width="700" height="70" rx="10"/>
+  <text class="ttl on-r" x="36" y="44">为什么要有同源策略</text>
+  <text class="sm" x="36" y="66">你登录了网银，浏览器存了 Cookie。你又打开一个恶意网站。</text>
+  <text class="sm" x="36" y="82">如果没有同源策略，那个网站的脚本就能带着你的 Cookie 请求网银接口，读走你的余额。</text>
+
+  <text class="ttl" x="20" y="120">CORS 是「有条件地放开」这条限制</text>
+
+  <rect class="bx-b" x="20" y="134" width="140" height="46" rx="8"/>
+  <text class="sm" x="90" y="153" text-anchor="middle">app.example.com</text>
+  <text class="sm" x="90" y="170" text-anchor="middle">前端</text>
+
+  <rect class="bx-g" x="600" y="134" width="140" height="46" rx="8"/>
+  <text class="sm" x="670" y="153" text-anchor="middle">api.example.com</text>
+  <text class="sm" x="670" y="170" text-anchor="middle">你的 Hono API</text>
+
+  <path class="ln-b" d="M164 148 H596" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="142" text-anchor="middle">① OPTIONS 预检：我能用 DELETE 方法、带 Authorization 头请求吗？</text>
+
+  <path class="ln-g" d="M596 172 H168" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="192" text-anchor="middle">② Access-Control-Allow-Origin: https://app.example.com</text>
+  <text class="sm" x="380" y="208" text-anchor="middle">Access-Control-Allow-Methods: GET, POST, DELETE</text>
+
+  <path class="ln-b" d="M164 228 H596" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="222" text-anchor="middle">③ 预检通过，浏览器才发出真正的 DELETE 请求</text>
+
+  <rect class="bx-d" x="20" y="244" width="700" height="30" rx="6"/>
+  <text class="sm" x="380" y="264" text-anchor="middle">注意：CORS 是<tspan>浏览器</tspan>在执行。curl、服务器之间的调用完全不受它影响</text>
+</svg>
+<figcaption>图 16-2　CORS 保护的是「用户的浏览器」，不是你的服务器</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
 <pre>
+import { cors } from 'hono/cors'
+
+app.use(
+  '/api/*',
+  cors({
+    origin: ['https://meadowlarktravel.com', 'https://app.meadowlarktravel.com'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization'],
+    exposeHeaders: ['X-Request-Id'],
+    credentials: true,      // 允许带 Cookie
+    maxAge: 86400,          // 预检结果缓存一天，减少 OPTIONS 请求
+  })
+)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 两个常见的错误配置</div>
+  <ul>
+    <li><strong><code>origin: '*'</code> 配上 <code>credentials: true</code></strong> ——
+        规范禁止这个组合，浏览器会直接拒绝。而且真这么做等于允许任何网站带着用户 Cookie 调你的接口。</li>
+    <li><strong>把 CORS 当成认证。</strong>它完全不是。CORS 只约束浏览器里的脚本，
+        任何人用 <code>curl</code> 都能绕过。<strong>鉴权必须在服务端做</strong>（第 19 章）。</li>
+  </ul>
+</div>
+
+<h2 id="impl">实现</h2>
+
+<div class="code" data-lang="ts" data-file="src/routes/api.ts">
+<pre>
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+import { HTTPException } from 'hono/http-exception'
+import { zValidator } from '@hono/zod-validator'
+import { z } from 'zod'
+
+const listQuery = z.object({
+  available: z.enum(['true', 'false']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+})
+
+const notifyBody = z.object({
+  email: z.string().email(),
+})
+
+const deleteBody = z.object({
+  email: z.string().email(),
+  notes: z.string().max(500).optional(),
+})
+
+export const api = new Hono&lt;Env&gt;()
+  .use('*', cors({ origin: allowedOrigins }))
+
+  .get('/vacations', zValidator('query', listQuery), async (c) =&gt; {
+    const { available, limit } = c.req.valid('query')
+    const data = await c.get('repo').list({
+      available: available === undefined ? undefined : available === 'true',
+      limit,
+    })
+    return c.json({ data })
+  })
+
+  .get('/vacations/:sku', async (c) =&gt; {
+    const v = await c.get('repo').findBySku(c.req.param('sku'))
+    if (!v) throw new HTTPException(404, { message: '没有找到这个度假套餐' })
+    return c.json(v)
+  })
+
+  .post('/vacations/:sku/notify', zValidator('json', notifyBody), async (c) =&gt; {
+    const sku = c.req.param('sku')
+    const { email } = c.req.valid('json')
+
+    const v = await c.get('repo').findBySku(sku)
+    if (!v) throw new HTTPException(404, { message: '没有找到这个度假套餐' })
+
+    await c.get('repo').addInSeasonListener(email, sku)
+    return c.json({ ok: true }, 201)
+  })
+
+  .delete('/vacations/:sku', zValidator('json', deleteBody), async (c) =&gt; {
+    const sku = c.req.param('sku')
+    const { email, notes } = c.req.valid('json')
+
+    // 公开接口不真删，只标记待审核
+    const ok = await c.get('repo').requestDeletion(sku, email, notes)
+    if (!ok) throw new HTTPException(404, { message: '没有找到这个度假套餐' })
+
+    return c.body(null, 204)
+  })
+</pre>
+</div>
+
+<h3>测试</h3>
+
+<div class="code" data-lang="ts" data-file="src/routes/api.test.ts">
+<pre>
+import { describe, it, expect } from 'vitest'
+import { testClient } from 'hono/testing'
+import { api } from './api'
+
+const client = testClient(api)
+
+describe('度假套餐 API', () =&gt; {
+  it('返回列表', async () =&gt; {
+    const res = await client.vacations.$get({ query: {} })
+    expect(res.status).toBe(200)
+
+    const body = await res.json()
+    expect(Array.isArray(body.data)).toBe(true)
+  })
+
+  it('不存在的 SKU 返回 404', async () =&gt; {
+    const res = await client.vacations[':sku'].$get({ param: { sku: 'NOPE' } })
+    expect(res.status).toBe(404)
+  })
+
+  it('邮箱格式错误返回 400', async () =&gt; {
+    const res = await client.vacations[':sku'].notify.$post({
+      param: { sku: 'HR199' },
+      json: { email: '不是邮箱' },
+    })
+    expect(res.status).toBe(400)
+  })
+})
+</pre>
+</div>
+
+<h2 id="rpc">RPC：前端直接用后端的类型</h2>
+
+<p>
+  这是 Hono 最值得炫耀的功能。你不用写 OpenAPI，不用跑代码生成器 ——
+  <strong>把后端的类型 <code>import</code> 到前端就行。</strong>
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api.ts">
+<pre>
+// 后端：导出类型（注意必须是链式定义的）
+export type ApiType = typeof api
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="frontend/src/api-client.ts">
+<pre>
+// 前端：导入类型（只是类型，不会打包任何后端代码）
 import { hc } from 'hono/client'
 import type { ApiType } from '../../src/routes/api'
 
-export const api = hc&lt;ApiType&gt;('/api/v1')
+export const client = hc&lt;ApiType&gt;('https://api.meadowlarktravel.com/v1')
 </pre>
 </div>
 
-<div class="code" data-lang="tsx">
+<div class="code" data-lang="ts">
 <pre>
-import { api } from './api'
+// 使用：全程有补全和检查
+const res = await client.vacations.$get({
+  query: { available: 'true', limit: '20' },
+})
 
-useEffect(() =&gt; {
-  api.vacations
-    .$get({ query: { available: 'true' } })
-    .then(async (res) =&gt; {
-      if (!res.ok) throw new Error('加载失败')
-      const body = await res.json()
-      setVacations(body.data)     // ← body.data 的类型是自动推导出来的
-    })
-    .catch((err) =&gt; setError(err.message))
-}, [])
+if (res.ok) {
+  const body = await res.json()
+  // body.data 的类型是 Vacation[]，编辑器里点得出每个字段
+  body.data.forEach((v) =&gt; console.log(v.name, v.price))
+}
+
+// 写错了当场报错：
+await client.vacations.$get({ query: { availabel: 'true' } })
+//                                     ^^^^^^^^^ 拼写错误，编译不过
+
+await client.vacationz.$get()
+//           ^^^^^^^^^ 没有这个路径，编译不过
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 试一下这个体验</div>
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="RPC 类型共享与传统方式的对比">
+  <rect class="bx-r" x="20" y="20" width="345" height="200" rx="10"/>
+  <text class="ttl on-r" x="192" y="44" text-anchor="middle">传统方式</text>
+  <text class="sm" x="36" y="70">① 后端改了字段名</text>
+  <text class="sm" x="36" y="92">② 更新 OpenAPI 文档（如果记得的话）</text>
+  <text class="sm" x="36" y="114">③ 跑代码生成器</text>
+  <text class="sm" x="36" y="136">④ 前端更新生成的类型</text>
+  <text class="sm" x="36" y="158">⑤ 修改调用代码</text>
+  <text class="sm on-r" x="36" y="186">任何一步漏了 → 运行时才炸</text>
+  <text class="sm on-r" x="36" y="206">而且通常是在用户那里炸</text>
+
+  <rect class="bx-g" x="395" y="20" width="345" height="200" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">Hono RPC</text>
+  <text class="sm" x="411" y="70">① 后端改了字段名</text>
+  <text class="sm on-g" x="411" y="98">② 前端<tspan>立刻</tspan>出现红波浪线</text>
+  <text class="sm" x="411" y="126">没有第三步</text>
+  <text class="sm on-g" x="411" y="160">类型直接来自源码，</text>
+  <text class="sm on-g" x="411" y="180">不可能过期、不可能忘记同步</text>
+  <text class="sm" x="411" y="206">前提：前后端在同一个仓库里</text>
+</svg>
+<figcaption>图 16-3　类型是唯一真相来源，而不是一份需要人工维护的文档</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; RPC 的适用范围</div>
   <p>
-    把后端的 <code>price</code> 字段改名成 <code>priceCny</code>，然后回到前端 ——
-    <code>v.price</code> 那一行立刻出现红波浪线。<br>
-    没有这层类型的话，你要等到打开页面看到「¥undefined」才发现。
-    <strong>而且如果那个页面你今天正好没点开，这个 bug 就上线了。</strong>
+    它要求前后端在同一个 TypeScript 项目（或 monorepo）里。<br>
+    如果你的 API 要给外部团队、给移动端、给第三方用，还是需要 OpenAPI 文档 —— 见下一节。
+    <strong>两者可以同时存在。</strong>
   </p>
 </div>
 
-<h3>提交数据</h3>
-
-<div class="code" data-lang="tsx">
-<pre>
-function NotifyForm({ sku }: { sku: string }) {
-  const [email, setEmail] = useState('')
-  const [status, setStatus] = useState&lt;'idle' | 'sending' | 'done' | 'error'&gt;('idle')
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setStatus('sending')
-
-    const res = await api.vacations[':sku'].notify.$post({
-      param: { sku },
-      json: { email },
-    })
-
-    setStatus(res.ok ? 'done' : 'error')
-  }
-
-  if (status === 'done') return &lt;p&gt;好的，到季节我们会通知你。&lt;/p&gt;
-
-  return (
-    &lt;form onSubmit={handleSubmit}&gt;
-      &lt;label htmlFor="email"&gt;邮箱&lt;/label&gt;
-      &lt;input
-        id="email"
-        type="email"
-        required
-        value={email}
-        onChange={(e) =&gt; setEmail(e.target.value)}
-      /&gt;
-      &lt;button type="submit" disabled={status === 'sending'}&gt;
-        {status === 'sending' ? '提交中…' : '通知我'}
-      &lt;/button&gt;
-      {status === 'error' &amp;&amp; &lt;p role="alert"&gt;提交失败，请重试。&lt;/p&gt;}
-    &lt;/form&gt;
-  )
-}
-</pre>
-</div>
-
-<h2 id="routing">前端路由</h2>
+<h2 id="openapi">生成 OpenAPI 文档</h2>
 
 <div class="code" data-lang="bash">
 <pre>
-npm install react-router-dom
+npm install @hono/zod-openapi @hono/swagger-ui
 </pre>
 </div>
 
-<div class="code" data-lang="tsx" data-file="client/src/App.tsx">
+<div class="code" data-lang="ts">
 <pre>
-import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
+import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
+import { swaggerUI } from '@hono/swagger-ui'
 
-export default function App() {
-  return (
-    &lt;BrowserRouter&gt;
-      &lt;nav&gt;
-        &lt;Link to="/"&gt;首页&lt;/Link&gt;
-        &lt;Link to="/vacations"&gt;行程&lt;/Link&gt;
-        &lt;Link to="/about"&gt;关于&lt;/Link&gt;
-      &lt;/nav&gt;
-      &lt;Routes&gt;
-        &lt;Route path="/" element={&lt;Home /&gt;} /&gt;
-        &lt;Route path="/vacations" element={&lt;VacationList /&gt;} /&gt;
-        &lt;Route path="/vacations/:sku" element={&lt;VacationDetail /&gt;} /&gt;
-        &lt;Route path="*" element={&lt;NotFound /&gt;} /&gt;
-      &lt;/Routes&gt;
-    &lt;/BrowserRouter&gt;
-  )
-}
+const VacationSchema = z
+  .object({
+    sku: z.string().openapi({ example: 'HR199' }),
+    name: z.string().openapi({ example: '胡德河一日游' }),
+    price: z.number().openapi({ example: 99.95 }),
+    inSeason: z.boolean(),
+  })
+  .openapi('Vacation')
+
+const listRoute = createRoute({
+  method: 'get',
+  path: '/vacations',
+  summary: '列出度假套餐',
+  request: {
+    query: z.object({
+      available: z.enum(['true', 'false']).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: '度假套餐列表',
+      content: {
+        'application/json': {
+          schema: z.object({ data: z.array(VacationSchema) }),
+        },
+      },
+    },
+  },
+})
+
+const app = new OpenAPIHono()
+
+app.openapi(listRoute, async (c) =&gt; {
+  const { available } = c.req.valid('query')
+  const data = await repo.list({ available: available === 'true' })
+  return c.json({ data })
+})
+
+// 生成 OpenAPI JSON
+app.doc('/openapi.json', {
+  openapi: '3.0.0',
+  info: { version: '1.0.0', title: '云雀旅行 API' },
+})
+
+// 可交互的文档页面
+app.get('/docs', swaggerUI({ url: '/openapi.json' }))
 </pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 服务端必须配合前端路由</div>
-  <p>
-    用户直接在地址栏输入 <code>/vacations/HR199</code> 并回车，请求会发到<strong>服务器</strong>。
-    如果服务器上没有这个路径，就会返回 404 —— 前端路由根本没机会运行。<br>
-    解决办法是「SPA 回退」：所有没匹配到 API 和静态文件的请求，一律返回 <code>index.html</code>。
-  </p>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/app.ts">
-<pre>
-// 1. API 路由优先
-app.route('/api/v1', apiRoutes)
-
-// 2. 真实存在的静态文件
-app.use('/*', serveStatic({ root: './public' }))
-
-// 3. 其余全部回退到 index.html，交给前端路由
-app.get('*', serveStatic({ path: './public/index.html' }))
-</pre>
-</div>
-
-<h2 id="state">状态管理什么时候需要</h2>
-
-<div class="tw">
-<table>
-  <tr><th>情况</th><th>用什么</th></tr>
-  <tr><td>状态只在一个组件里用</td><td><code>useState</code> 就够了</td></tr>
-  <tr><td>父子组件之间传</td><td>props 往下传，回调往上传</td></tr>
-  <tr><td>很多层组件都要用（当前用户、主题）</td><td>React Context</td></tr>
-  <tr><td>来自服务器的数据（列表、详情）</td><td><strong>TanStack Query / SWR</strong>，不是状态管理库</td></tr>
-  <tr><td>复杂的纯客户端状态（编辑器、画布）</td><td>Zustand / Jotai / Redux</td></tr>
-</table>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 大部分「状态管理」其实是「服务器数据缓存」</div>
+  <div class="t">&#9733; 文档不会过期</div>
   <p>
-    很多项目把 Redux 塞满了从 API 拿回来的数据，然后手写一堆代码去处理加载状态、
-    缓存失效、重新拉取、并发请求去重。<br>
-    这些问题 TanStack Query 已经全部解决了。<strong>先分清「这个状态的真相在服务器还是在浏览器」</strong>，
-    再选工具。真相在服务器的，用数据获取库；真正属于客户端的（比如「侧边栏展开了吗」），才用状态管理。
+    这里的 schema 同时承担三个职责：<strong>运行时校验</strong>、<strong>TypeScript 类型</strong>、
+    <strong>OpenAPI 文档</strong>。三者由同一份代码生成，所以不可能不一致。<br>
+    传统做法里「文档和实现对不上」是常态，因为它们是两份需要人工同步的东西。
   </p>
-</div>
-
-<h2 id="deploy">部署形态</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="两种部署方式">
-  <rect class="bx-b" x="20" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-b" x="192" y="44" text-anchor="middle">A. 同域部署（推荐入门）</text>
-  <text class="sm" x="36" y="70">前端构建产物放进后端的 public/</text>
-  <text class="sm" x="36" y="90">一个域名，一次部署</text>
-  <text class="mono sm" x="36" y="118">meadowlark.com/</text>
-  <text class="mono sm" x="36" y="136">meadowlark.com/api/v1/*</text>
-  <text class="sm on-g" x="36" y="164">&#10003; 不需要 CORS</text>
-  <text class="sm on-g" x="36" y="184">&#10003; Cookie 直接能用</text>
-  <text class="sm on-g" x="36" y="204">&#10003; 部署简单</text>
-
-  <rect class="bx-p" x="395" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-p" x="567" y="44" text-anchor="middle">B. 分离部署</text>
-  <text class="sm" x="411" y="70">前端上 CDN，后端独立部署</text>
-  <text class="sm" x="411" y="90">两个域名，两条流水线</text>
-  <text class="mono sm" x="411" y="118">app.meadowlark.com（CDN）</text>
-  <text class="mono sm" x="411" y="136">api.meadowlark.com（Hono）</text>
-  <text class="sm on-g" x="411" y="164">&#10003; 前端全球加速</text>
-  <text class="sm on-g" x="411" y="184">&#10003; 前后端独立发版</text>
-  <text class="sm on-r" x="411" y="204">&#10007; 要配 CORS 和跨域 Cookie</text>
-</svg>
-<figcaption>图 16-3　先用 A，遇到性能瓶颈再考虑 B</figcaption>
-</figure>
-
-<div class="code" data-lang="json" data-file="package.json">
-<pre>
-{
-  "scripts": {
-    "dev:api": "tsx watch src/server.ts",
-    "dev:web": "vite --root client",
-    "dev": "npm-run-all --parallel dev:api dev:web",
-    "build": "vite build --root client && tsc -p tsconfig.build.json",
-    "start": "node dist/server.js"
-  }
-}
-</pre>
-</div>
-
-<h2 id="alternatives">更轻的选择</h2>
-
-<p>不是每个项目都需要完整的 React。Hono 生态里有两个更轻的方案：</p>
-
-<h3><code>hono/jsx/dom</code>：客户端也用 Hono 的 JSX</h3>
-
-<div class="code" data-lang="tsx">
-<pre>
-import { render, useState } from 'hono/jsx/dom'
-
-function Counter() {
-  const [count, setCount] = useState(0)
-  return &lt;button onClick={() =&gt; setCount(count + 1)}&gt;点了 {count} 次&lt;/button&gt;
-}
-
-render(&lt;Counter /&gt;, document.getElementById('root')!)
-</pre>
-</div>
-
-<p>
-  API 和 React 高度相似，但体积小一个数量级。适合「页面基本是服务端渲染的，
-  只有几个地方需要交互」的场景 —— 而这其实是<strong>大多数网站</strong>的真实情况。
-</p>
-
-<h3>HonoX：全栈元框架</h3>
-
-<p>
-  <a href="https://github.com/honojs/honox">HonoX</a> 是 Hono 官方的全栈框架，
-  提供基于文件的路由、服务端渲染、以及「孤岛架构」——
-  默认整页服务端渲染，只把标记为「岛」的组件送到客户端做水合。
-</p>
-
-<div class="code" data-lang="text">
-<pre>
-app/
-├── routes/
-│   ├── index.tsx           → /
-│   ├── about.tsx           → /about
-│   └── vacations/
-│       └── [sku].tsx       → /vacations/:sku
-├── islands/
-│   └── NotifyForm.tsx      ← 只有这个组件的 JS 会发到浏览器
-└── server.ts
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 怎么选</div>
-  <ul>
-    <li><strong>内容为主、少量交互</strong>（营销站、博客、文档）→ Hono SSR + <code>hono/jsx/dom</code></li>
-    <li><strong>想要文件路由和孤岛架构</strong> → HonoX</li>
-    <li><strong>交互密集的应用</strong>（后台、看板、编辑器）→ Hono API + React/Vue SPA</li>
-    <li><strong>团队已经很熟 React</strong> → 直接上 React，别为了轻量增加学习成本</li>
-  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>SPA 的价值是「状态 → 界面」的声明式模型，不是「页面不刷新」。</li>
-  <li>后端在 SPA 架构里只做两件事：提供静态文件、提供 JSON API。</li>
-  <li>开发时用 Vite 代理避开 CORS；生产同域部署同样不需要 CORS。</li>
-  <li>RPC 客户端让前端拿到后端类型，接口改了当场编译报错。</li>
-  <li>数据请求一定要处理加载中、出错、空数据三种状态。</li>
-  <li>服务器要配 SPA 回退，否则刷新子路径会 404。</li>
-  <li>需要服务器主动推送数据（通知、进度、协作）时，见第 23 章。</li>
-  <li>不是所有项目都需要 React；<code>hono/jsx/dom</code> 和 HonoX 值得考虑。</li>
+  <li>REST：名词做路径，HTTP 方法做动作。第一天就加版本号。</li>
+  <li>列表接口返回 <code>{ data: [...] }</code> 而不是裸数组，为未来加元信息留余地。</li>
+  <li>区分三类错误：4xx 是客户端的问题，不要当故障告警；5xx 才是你的问题。</li>
+  <li>用 <code>HTTPException</code> 抛错，用 <code>app.onError</code> 统一格式化；细节写日志，不返回给客户端。</li>
+  <li>CORS 保护浏览器用户，不是鉴权手段。</li>
+  <li>同仓库前后端用 RPC 共享类型；对外 API 用 <code>@hono/zod-openapi</code> 生成文档。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>用 Vite 建一个 React 前端，通过代理调用你的 <code>/api/v1/vacations</code>，把结果渲染成列表。</li>
-    <li>把 <code>fetch</code> 换成 RPC 客户端 <code>hc</code>。然后在后端把某个字段改名，确认前端立刻编译报错。</li>
-    <li>加上 react-router 和至少两个页面，配好服务端的 SPA 回退，确认直接访问 <code>/vacations</code> 并刷新不会 404。</li>
-    <li>故意把后端停掉，看看你的前端界面表现如何。如果只是一片空白，去补上错误状态。</li>
-    <li>把「到季通知」表单做出来，包含提交中禁用按钮、成功提示、失败重试。</li>
+    <li>实现本章的四个 API 端点，用 <code>testClient</code> 给每个端点写至少两个测试（成功和失败各一个）。</li>
+    <li>用 <code>curl</code> 请求一个不存在的 SKU，确认返回 404 且响应体是你设计的错误格式。</li>
+    <li>写一个最简单的 HTML 页面放在另一个端口上，用 <code>fetch</code> 调你的 API。先不配 CORS，看看浏览器控制台的报错；然后加上 CORS 再试。</li>
+    <li>导出 <code>ApiType</code>，在一个测试文件里用 <code>hc</code> 创建客户端。故意写错一个字段名，确认 <code>tsc</code> 报错。</li>
+    <li>用 <code>@hono/zod-openapi</code> 给一个端点加上文档，打开 <code>/docs</code> 页面，在里面直接发一次请求。</li>
   </ol>
 </div>
 

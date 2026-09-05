@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 21 章 · 后台任务与队列 — Hono 全栈开发教程</title>
+<title>第 21 章 · 并发与数据一致性 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="21">
@@ -12,840 +12,778 @@
 <main>
 
 <span class="chapter-eyebrow">第 21 章</span>
-<h1>后台任务与队列</h1>
+<h1>并发与数据一致性</h1>
 <p class="lede">
-  第 11 章发邮件时，用户要一直等着邮件发完才能看到「下单成功」。
-  这一章讲一个能改变你系统架构的思路：<strong>请求路径上只做必须立刻做的事，其余的丢到后面去。</strong>
+  第 13 章教了怎么读写数据库。这一章要问一个它没问的问题：
+  <strong>如果两个请求在同一毫秒到达，会发生什么？</strong>
+  超卖、重复扣款、丢失更新 —— 线上事故的大头都藏在这里，而它们在本地几乎不可能复现。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>判断哪些操作该移出请求路径</li>
-    <li>掌握三种「延后执行」的手段及各自的可靠性边界</li>
-    <li>理解「至少一次投递」意味着什么，以及它为什么强制要求消费者幂等</li>
-    <li>用 Cloudflare Queues 和 BullMQ 各实现一遍</li>
-    <li>设计重试、退避与死信队列</li>
-    <li>知道什么时候<strong>不该</strong>用队列</li>
+    <li>看懂竞态条件是怎么产生的，以及为什么本地测不出来</li>
+    <li>掌握事务和隔离级别，知道「读到了脏数据」到底是怎么回事</li>
+    <li>会用乐观锁和悲观锁，知道各自的适用场景</li>
+    <li>用原子更新和数据库约束兜底</li>
+    <li>实现幂等，让重复请求不造成重复后果</li>
+    <li>写出能<strong>真的复现</strong>竞态的测试</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="why">请求路径上的时间预算</h2>
+<h2 id="why">为什么本地测不出来</h2>
 
-<p>回顾第 11 章那个下单接口，把每一步的耗时列出来：</p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="同步处理与异步处理的响应时间对比">
-  <text class="ttl on-r" x="20" y="22">同步做完所有事</text>
-
-  <rect class="bx" x="20" y="34" width="90" height="34" rx="6"/>
-  <text class="sm" x="65" y="55" text-anchor="middle">校验 5ms</text>
-  <rect class="bx-g" x="114" y="34" width="120" height="34" rx="6"/>
-  <text class="sm" x="174" y="55" text-anchor="middle">写订单 30ms</text>
-  <rect class="bx-r" x="238" y="34" width="180" height="34" rx="6"/>
-  <text class="sm on-r" x="328" y="55" text-anchor="middle">发确认邮件 800ms</text>
-  <rect class="bx-r" x="422" y="34" width="150" height="34" rx="6"/>
-  <text class="sm on-r" x="497" y="55" text-anchor="middle">生成 PDF 600ms</text>
-  <rect class="bx-r" x="576" y="34" width="150" height="34" rx="6"/>
-  <text class="sm on-r" x="651" y="55" text-anchor="middle">同步 CRM 900ms</text>
-
-  <path class="ln-r" d="M20 80 H726" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="380" y="100" text-anchor="middle">用户盯着转圈：2335 ms　·　任何一个外部服务抖动，整个下单就失败</text>
-
-  <path class="ln-d" d="M20 116 H740"/>
-
-  <text class="ttl on-g" x="20" y="146">只做必须立刻做的</text>
-
-  <rect class="bx" x="20" y="158" width="90" height="34" rx="6"/>
-  <text class="sm" x="65" y="179" text-anchor="middle">校验 5ms</text>
-  <rect class="bx-g" x="114" y="158" width="120" height="34" rx="6"/>
-  <text class="sm" x="174" y="179" text-anchor="middle">写订单 30ms</text>
-  <rect class="bx-a" x="238" y="158" width="120" height="34" rx="6"/>
-  <text class="sm on-a" x="298" y="179" text-anchor="middle">投递任务 10ms</text>
-
-  <path class="ln-g" d="M20 204 H362" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="190" y="224" text-anchor="middle">用户拿到响应：45 ms</text>
-
-  <rect class="bx-p" x="400" y="158" width="326" height="34" rx="6"/>
-  <text class="sm on-p" x="563" y="179" text-anchor="middle">邮件 · PDF · CRM 在后台慢慢做</text>
-  <path class="ln-d" d="M362 175 H396" marker-end="url(#ar)"/>
-  <text class="sm" x="563" y="212" text-anchor="middle">失败了可以重试，不影响用户</text>
-
-  <rect class="bx-a" x="20" y="244" width="720" height="40" rx="8"/>
-  <text class="sm on-a" x="380" y="268" text-anchor="middle">响应快了 50 倍，而且下单的成功率不再取决于三个外部服务是否健康</text>
-</svg>
-<figcaption>图 21-1　同样的功能，两种架构，用户体验和可靠性差一个数量级</figcaption>
-</figure>
-
-<h3>怎么判断该不该移出去</h3>
-
-<p>问一个问题：<strong>「用户看到响应时，这件事必须已经完成吗？」</strong></p>
-
-<div class="tw">
-<table>
-  <tr><th>必须同步做</th><th>可以异步做</th></tr>
-  <tr><td>校验输入（不合法就不该继续）</td><td>发确认邮件 / 短信</td></tr>
-  <tr><td>写入核心业务数据（订单、支付记录）</td><td>生成 PDF / 发票 / 报表</td></tr>
-  <tr><td>扣减库存（涉及正确性，见第 20 章）</td><td>压缩、裁剪、转码上传的图片视频</td></tr>
-  <tr><td>返回用户马上要看的数据</td><td>同步数据到 CRM / 数据仓库 / 搜索引擎</td></tr>
-  <tr><td>权限判断</td><td>推送通知、发 webhook 给第三方</td></tr>
-  <tr><td></td><td>写审计日志、统计埋点</td></tr>
-  <tr><td></td><td>调用 AI 生成摘要、翻译、推荐</td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 一个额外的好处：故障隔离</div>
-  <p>
-    同步架构下，邮件服务挂了 → 下单接口报 500 → <strong>用户下不了单，公司损失收入</strong>。<br>
-    异步架构下，邮件服务挂了 → 任务在队列里堆着 → 下单照常 → 服务恢复后邮件自动补发。<br>
-    <em>队列把「外部依赖的可用性」和「核心业务的可用性」解耦开了。</em>这往往比性能提升更值钱。
-  </p>
-</div>
-
-<h2 id="three">三种延后执行的手段</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种延后执行手段的可靠性对比">
-  <rect class="bx-b" x="20" y="20" width="230" height="180" rx="10"/>
-  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① waitUntil</text>
-  <text class="sm" x="36" y="70">响应先返回，任务在同一个</text>
-  <text class="sm" x="36" y="88">进程里继续跑完</text>
-  <text class="mono sm" x="36" y="114">c.executionCtx.waitUntil(p)</text>
-  <text class="sm on-g" x="36" y="142">&#10003; 零基础设施，一行代码</text>
-  <text class="sm on-r" x="36" y="164">&#10007; 失败了没人知道</text>
-  <text class="sm on-r" x="36" y="182">&#10007; 进程挂了任务就没了</text>
-
-  <rect class="bx-a" x="266" y="20" width="230" height="180" rx="10"/>
-  <text class="ttl on-a" x="381" y="44" text-anchor="middle">② 队列</text>
-  <text class="sm" x="282" y="70">任务写进持久化的队列，</text>
-  <text class="sm" x="282" y="88">由独立的消费者取出执行</text>
-  <text class="mono sm" x="282" y="114">await QUEUE.send(task)</text>
-  <text class="sm on-g" x="282" y="142">&#10003; 不会丢，自动重试</text>
-  <text class="sm on-g" x="282" y="160">&#10003; 可观测、可限速</text>
-  <text class="sm on-r" x="282" y="182">&#10007; 多一个组件要维护</text>
-
-  <rect class="bx-p" x="512" y="20" width="228" height="180" rx="10"/>
-  <text class="ttl on-p" x="626" y="44" text-anchor="middle">③ 定时任务</text>
-  <text class="sm" x="528" y="70">按时间表周期性执行，</text>
-  <text class="sm" x="528" y="88">不由请求触发</text>
-  <text class="mono sm" x="528" y="114">Cron: 0 3 * * *</text>
-  <text class="sm on-g" x="528" y="142">&#10003; 适合批处理、清理、对账</text>
-  <text class="sm on-r" x="528" y="164">&#10007; 有延迟（下次执行才做）</text>
-  <text class="sm on-r" x="528" y="182">&#10007; 要自己防重复执行</text>
-
-  <rect class="bx-d" x="20" y="216" width="720" height="70" rx="10"/>
-  <text class="ttl" x="36" y="240">怎么选</text>
-  <text class="sm" x="36" y="262">丢了也无所谓（统计埋点、缓存预热）→ waitUntil　　丢了会出问题（邮件、支付回调、扣款）→ 队列</text>
-  <text class="sm" x="36" y="280">不由用户触发、要扫全表（日报、清理过期数据、对账）→ 定时任务</text>
-</svg>
-<figcaption>图 21-2　可靠性从左到右递增，复杂度也是</figcaption>
-</figure>
-
-<h3>① waitUntil：最轻量的那个</h3>
+<p>
+  你一个人点页面，请求是一个接一个的。线上有一千个人同时点，请求是<strong>交错</strong>的。
+  这是两种完全不同的世界。
+</p>
 
 <div class="code" data-lang="ts">
 <pre>
-app.post('/api/v1/orders', async (c) =&gt; {
-  const order = await createOrder(...)
+// 看起来完全正常的「秒杀」代码
+app.post('/vacations/:sku/book', async (c) =&gt; {
+  const sku = c.req.param('sku')
 
-  // 响应立刻返回，但运行时会等这个 Promise 结束才回收执行环境
-  c.executionCtx.waitUntil(
-    recordAnalytics({ event: 'order_created', orderId: order.id })
-      .catch((err) =&gt; console.error('埋点失败', err))   // ← 必须自己 catch
-  )
+  const v = await repo.findBySku(sku)            // ① 读
+  if (v.remaining &lt;= 0) {                        // ② 判断
+    return c.json({ error: '已售罄' }, 409)
+  }
 
-  return c.json({ orderId: order.id }, 201)
+  await repo.update(sku, { remaining: v.remaining - 1 })   // ③ 写
+  await repo.createOrder({ sku, userId })
+
+  return c.json({ ok: true })
 })
 </pre>
 </div>
 
-<div class="box warn">
-  <div class="t">&#9888; waitUntil 的三个限制</div>
-  <ol>
-    <li><strong>没有重试。</strong>失败就是失败了，没有任何人会再试一次。</li>
-    <li><strong>没有持久化。</strong>进程/实例在任务跑完前被回收，任务直接消失，不留痕迹。</li>
-    <li><strong>受执行时间上限约束。</strong>边缘平台对单次调用的 CPU 时间和墙钟时间都有限制。</li>
-  </ol>
-  <p>
-    所以它只适合<strong>「做成了最好，没做成也不影响正确性」</strong>的事。
-    发确认邮件用它是不合适的 —— 用户没收到邮件是个真问题。
-  </p>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; Node.js 上没有 waitUntil</div>
-  <p>
-    <code>c.executionCtx</code> 是 Workers 等边缘运行时提供的。在 Node 上，
-    进程是长驻的，你直接 <code>promise.catch(...)</code> 不 await 就行 ——
-    但同样没有重试和持久化保证，而且要小心第 12 章讲的「未处理的 Promise 拒绝」。
-  </p>
-</div>
-
-<h2 id="queue">队列的心智模型</h2>
+<p>这段代码有个致命问题。把两个请求的执行时刻画在一条时间轴上就看清楚了：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="生产者、队列、消费者的关系">
-  <rect class="bx-b" x="20" y="60" width="150" height="70" rx="10"/>
-  <text class="ttl on-b" x="95" y="86" text-anchor="middle">生产者</text>
-  <text class="sm" x="95" y="106" text-anchor="middle">你的 Hono 路由</text>
-  <text class="sm" x="95" y="122" text-anchor="middle">投递任务后立刻返回</text>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="两个请求交错执行导致超卖">
+  <text class="ttl" x="20" y="22">库存 remaining = 1，两个用户同时下单</text>
 
-  <path class="ln-b" d="M174 95 H236" marker-end="url(#ar)"/>
-  <text class="sm" x="205" y="86" text-anchor="middle">send</text>
+  <path class="ln-d" d="M120 40 V270"/>
+  <path class="ln-d" d="M420 40 V270"/>
+  <text class="sm" x="60" y="56">时间 ↓</text>
 
-  <rect class="bx-a" x="240" y="46" width="200" height="98" rx="10"/>
-  <text class="ttl on-a" x="340" y="70" text-anchor="middle">队列</text>
-  <rect class="bx" x="254" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="292" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="330" y="80" width="34" height="26" rx="4"/>
-  <rect class="bx" x="368" y="80" width="34" height="26" rx="4"/>
-  <text class="sm" x="340" y="128" text-anchor="middle">持久化存储，进程重启不丢</text>
+  <text class="ttl on-b" x="150" y="56">请求 A</text>
+  <text class="ttl on-p" x="450" y="56">请求 B</text>
+  <text class="ttl on-g" x="640" y="56">数据库</text>
 
-  <path class="ln-a" d="M444 95 H506" marker-end="url(#ar-a)"/>
-  <text class="sm" x="475" y="86" text-anchor="middle">拉取</text>
+  <rect class="bx-b" x="140" y="70" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="90" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="640" y="90" text-anchor="middle">remaining = 1</text>
 
-  <rect class="bx-g" x="510" y="46" width="230" height="98" rx="10"/>
-  <text class="ttl on-g" x="625" y="70" text-anchor="middle">消费者</text>
-  <text class="sm" x="625" y="90" text-anchor="middle">独立进程 / Worker</text>
-  <text class="sm" x="625" y="110" text-anchor="middle">处理完显式确认（ack）</text>
-  <text class="sm" x="625" y="130" text-anchor="middle">没确认 → 任务会被重新投递</text>
+  <rect class="bx-p" x="440" y="108" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="128" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="700" y="128" text-anchor="middle">1</text>
 
-  <rect class="bx-d" x="20" y="164" width="720" height="120" rx="10"/>
-  <text class="ttl" x="36" y="188">解耦带来的四件事</text>
-  <text class="sm" x="36" y="212">① 削峰：突然来了一万个任务，队列存着，消费者按自己的速度慢慢做，不会被压垮</text>
-  <text class="sm" x="36" y="234">② 重试：消费失败了，任务回到队列，稍后再试，不用生产者操心</text>
-  <text class="sm" x="36" y="256">③ 扩容：处理不过来就多开几个消费者，生产者一行代码不用改</text>
-  <text class="sm" x="36" y="278">④ 隔离：消费者崩了，Web 服务照常响应用户</text>
+  <rect class="bx-b" x="140" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
+
+  <rect class="bx-p" x="440" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
+
+  <rect class="bx-r" x="140" y="184" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="204" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="204" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="440" y="222" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="242" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="242" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="120" y="264" width="520" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="284" text-anchor="middle">结果：库存只有 1 份，却卖出了 2 单。而且库存数字看起来是「对」的</text>
 </svg>
-<figcaption>图 21-3　队列是生产者和消费者之间的缓冲带</figcaption>
+<figcaption>图 21-1　「读 → 判断 → 写」这个模式只要不是原子的，就一定会出问题</figcaption>
 </figure>
 
-<h3>「至少一次投递」是什么意思</h3>
+<div class="box key">
+  <div class="t">&#9733; 记住这个模式的名字</div>
+  <p>
+    <strong>check-then-act</strong>（先检查再行动）—— 先读一个值，根据它做判断，然后基于判断去写。
+    只要「读」和「写」之间有任何间隙，另一个请求就可能挤进来，让你的判断在写入时已经过期了。
+  </p>
+  <p>
+    这个模式在代码里到处都是：检查库存再扣减、检查邮箱是否已注册再插入、
+    检查余额是否够再扣款、检查文件是否存在再创建。<strong>它们全都有同一个 bug。</strong>
+  </p>
+</div>
+
+<h3>为什么开发时发现不了</h3>
+
+<div class="tw">
+<table>
+  <tr><th>本地开发</th><th>生产环境</th></tr>
+  <tr><td>你一个人手动点击</td><td>成百上千用户同时操作</td></tr>
+  <tr><td>请求间隔以秒计</td><td>请求间隔以毫秒计，甚至完全重叠</td></tr>
+  <tr><td>一个进程</td><td>多个实例 / 多个边缘节点</td></tr>
+  <tr><td>数据库在本机，延迟 0.1 ms</td><td>网络延迟 5–50 ms，「间隙」被放大几百倍</td></tr>
+  <tr><td>测试是串行跑的</td><td>—</td></tr>
+</table>
+</div>
 
 <p>
-  绝大多数队列（SQS、Cloudflare Queues、RabbitMQ 默认配置、BullMQ）提供的是
-  <strong>at-least-once</strong> 保证：任务<em>至少</em>会被投递一次，但可能投递多次。
+  最后一行尤其关键：<strong>你写的单元测试和集成测试默认都是串行的</strong>，
+  它们永远不会触发竞态。除非你专门去写并发测试（本章最后会讲）。
 </p>
 
-<div class="code" data-lang="text">
+<h2 id="scenarios">四种经典事故</h2>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128230;</span><h4>超卖</h4>
+    <p>库存 1 份卖出 2 单。上面刚演示过。同类：限量优惠券被多领、活动名额超出。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128184;</span><h4>重复扣款</h4>
+    <p>用户网络卡顿点了两次提交，或者客户端自动重试了一次。两笔订单，两次扣钱。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128260;</span><h4>丢失更新</h4>
+    <p>两个管理员同时编辑同一篇文章，后保存的人把前一个人的修改整个覆盖掉了，而且<strong>双方都没收到任何提示</strong>。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128100;</span><h4>重复注册</h4>
+    <p>同一邮箱同时提交两次，两条 <code>SELECT</code> 都说「没注册过」，于是插入了两个账号。</p>
+  </div>
+</div>
+
+<h2 id="transaction">事务</h2>
+
+<p>
+  事务把多个操作打包成一个「全成功或全失败」的单元。这是数据库给你的第一件武器。
+</p>
+
+<div class="code" data-lang="ts">
 <pre>
-消费者收到任务 → 处理成功 → 准备发送 ack → 此时网络断了 / 进程崩了
-                                          ↓
-                          队列没收到 ack，认为处理失败
-                                          ↓
-                                    重新投递这个任务
-                                          ↓
-                              同一个任务被处理了第二次
+import { drizzle } from 'drizzle-orm/d1'
+import { eq, sql } from 'drizzle-orm'
+
+await db.transaction(async (tx) =&gt; {
+  // 从 A 账户扣钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} - ${amount}` })
+    .where(eq(accounts.id, fromId))
+
+  // 给 B 账户加钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} + ${amount}` })
+    .where(eq(accounts.id, toId))
+
+  // 记一笔流水
+  await tx.insert(transfers).values({ fromId, toId, amount })
+
+  // 任何一步抛异常 → 整个事务回滚，前面的操作全部撤销
+})
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 这个推论极其重要</div>
+<h3>ACID 是什么</h3>
+
+<div class="tw">
+<table>
+  <tr><th>字母</th><th>含义</th><th>白话</th></tr>
+  <tr><td><strong>A</strong>tomicity 原子性</td><td>要么全做，要么全不做</td><td>不会出现「钱扣了但没到账」</td></tr>
+  <tr><td><strong>C</strong>onsistency 一致性</td><td>事务前后数据都满足约束</td><td>余额不会变成负数（如果你定义了 CHECK 约束）</td></tr>
+  <tr><td><strong>I</strong>solation 隔离性</td><td>并发事务互不干扰</td><td><strong>本章的重点，也是最容易误解的一个</strong></td></tr>
+  <tr><td><strong>D</strong>urability 持久性</td><td>提交后即使断电也不丢</td><td>数据库替你保证</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 事务 ≠ 解决了并发问题</div>
   <p>
-    <strong>至少一次投递 ⇒ 你的任务处理逻辑必须是幂等的。</strong><br>
-    这不是「最好做一下」，而是「不做就一定会出事」—— 只是时间问题。<br>
-    第 20 章讲的幂等技巧在这里全部适用，而且这次是<strong>强制</strong>的。
+    这是最常见的误解。把上面那段超卖代码包进事务里，<strong>它照样超卖</strong>。<br>
+    因为默认的隔离级别下，两个事务可以同时读到 <code>remaining = 1</code>，
+    各自判断「够」，然后各自写入 0。事务保证的是「你这几步要么全成要么全败」，
+    <em>不保证「别人不会在中间插队」</em>。
   </p>
 </div>
+
+<h3>隔离级别</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="四种隔离级别与它们各自允许的异常现象">
+  <text class="ttl" x="20" y="22">隔离级别越高越安全，但并发性能越差</text>
+
+  <rect class="bx-r" x="20" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-r" x="107" y="58" text-anchor="middle">读未提交</text>
+  <text class="sm" x="107" y="76" text-anchor="middle">Read Uncommitted</text>
+  <text class="sm on-r" x="34" y="102">✗ 脏读</text>
+  <text class="sm on-r" x="34" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="34" y="142">✗ 幻读</text>
+
+  <rect class="bx-a" x="205" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-a" x="292" y="58" text-anchor="middle">读已提交</text>
+  <text class="sm" x="292" y="76" text-anchor="middle">Read Committed</text>
+  <text class="sm on-g" x="219" y="102">✓ 无脏读</text>
+  <text class="sm on-r" x="219" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="219" y="142">✗ 幻读</text>
+
+  <rect class="bx-b" x="390" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-b" x="477" y="58" text-anchor="middle">可重复读</text>
+  <text class="sm" x="477" y="76" text-anchor="middle">Repeatable Read</text>
+  <text class="sm on-g" x="404" y="102">✓ 无脏读</text>
+  <text class="sm on-g" x="404" y="122">✓ 可重复读</text>
+  <text class="sm on-r" x="404" y="142">✗ 幻读（部分实现有）</text>
+
+  <rect class="bx-g" x="575" y="36" width="165" height="120" rx="10"/>
+  <text class="ttl on-g" x="657" y="58" text-anchor="middle">串行化</text>
+  <text class="sm" x="657" y="76" text-anchor="middle">Serializable</text>
+  <text class="sm on-g" x="589" y="102">✓ 全都没有</text>
+  <text class="sm on-r" x="589" y="128">代价：并发低，</text>
+  <text class="sm on-r" x="589" y="146">冲突时事务被中止</text>
+
+  <rect class="bx-d" x="20" y="172" width="720" height="98" rx="10"/>
+  <text class="ttl" x="36" y="194">三种异常现象</text>
+  <text class="sm" x="36" y="216">脏读：读到了别人还没提交的数据，而对方随后回滚了 —— 你读到的是从未存在过的值</text>
+  <text class="sm" x="36" y="238">不可重复读：同一个事务里读两次同一行，值不一样（中间被别人改了并提交）</text>
+  <text class="sm" x="36" y="260">幻读：同一个查询执行两次，第二次多出了几行（中间被别人插入了）</text>
+</svg>
+<figcaption>图 21-2　PostgreSQL 和 MySQL 的默认级别都挡不住丢失更新</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 各数据库的默认级别</div>
+  <ul>
+    <li><strong>PostgreSQL</strong>：Read Committed</li>
+    <li><strong>MySQL (InnoDB)</strong>：Repeatable Read</li>
+    <li><strong>SQLite / Cloudflare D1</strong>：Serializable（因为它本质上串行执行写操作）</li>
+  </ul>
+  <p>
+    注意 D1 那一行 —— 如果你的应用只跑在 D1 上，很多并发问题会自动消失。
+    但这不是可以不理解它们的理由：一旦换成 Postgres，或者你的逻辑跨了数据库和 KV，问题立刻回来。
+  </p>
+</div>
+
+<h2 id="atomic">最好的办法：让数据库来判断</h2>
+
+<p>
+  在讲锁之前，先说一个更简单也更该优先考虑的思路：
+  <strong>把「读—判断—写」压缩成一条 SQL，让判断发生在数据库内部。</strong>
+</p>
 
 <div class="vs">
   <div class="old">
-    <div class="h">&#10060; 非幂等的任务</div>
+    <div class="h">&#10060; 在应用里判断</div>
     <div class="code" data-lang="ts"><pre>
-async function handle(task) {
-  await mailer.send({
-    to: task.email,
-    subject: '订单确认',
-  })
-  await db.update(accounts)
-    .set({ points: sql`points + 100` })
-    .where(eq(accounts.id, task.userId))
+const v = await repo.findBySku(sku)
+if (v.remaining &lt;= 0) {
+  return c.json({ error: '已售罄' }, 409)
 }
-// 重投一次 = 用户收到两封邮件
-//            + 多得 100 积分
+await repo.update(sku, {
+  remaining: v.remaining - 1
+})
 </pre></div>
   </div>
   <div class="new">
-    <div class="h">&#9989; 幂等的任务</div>
+    <div class="h">&#9989; 让数据库判断</div>
     <div class="code" data-lang="ts"><pre>
-async function handle(task) {
-  // 用任务自带的唯一 id 做去重
-  const claimed = await claimOnce(task.id)
-  if (!claimed) return          // 处理过了，直接结束
-
-  await mailer.send({
-    to: task.email,
-    subject: '订单确认',
-    // 很多邮件服务也支持幂等键
-    idempotencyKey: task.id,
+const rows = await db
+  .update(vacations)
+  .set({
+    remaining: sql`${vacations.remaining} - 1`
   })
-  await db.update(accounts)
-    .set({ points: sql`points + 100` })
-    .where(eq(accounts.id, task.userId))
+  .where(and(
+    eq(vacations.sku, sku),
+    gt(vacations.remaining, 0)   // ← 关键
+  ))
+  .returning({ left: vacations.remaining })
+
+if (rows.length === 0) {
+  return c.json({ error: '已售罄' }, 409)
 }
 </pre></div>
   </div>
 </div>
 
-<div class="code" data-lang="ts">
-<pre>
-/** 用一张表 + 唯一约束实现「只处理一次」*/
-async function claimOnce(taskId: string): Promise&lt;boolean&gt; {
-  try {
-    await db.insert(processedTasks).values({ id: taskId, at: new Date() })
-    return true            // 插入成功 = 我是第一个
-  } catch (err) {
-    if (isUniqueViolation(err)) return false   // 已经有人处理过了
-    throw err
-  }
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 更严谨的做法：先做事，再标记，同一个事务</div>
+<div class="box key">
+  <div class="t">&#9733; 为什么这样就安全了</div>
   <p>
-    上面这个写法有个窄窗口：标记成功后、业务执行前崩溃，任务会被跳过（变成「至多一次」）。
-    如果业务本身在数据库里，把<strong>标记和业务放进同一个事务</strong>就能彻底解决 ——
-    和第 20 章的幂等键写法完全一样。<br>
-    如果业务是外部调用（发邮件），就没法用事务，此时优先<strong>让外部服务承担去重</strong>
-    （传幂等键给它），这是最可靠的。
+    单条 <code>UPDATE</code> 在数据库内部是<strong>原子</strong>的 ——
+    数据库会对这一行加锁，判断和写入之间没有任何间隙可以插队。<br>
+    <code>WHERE remaining &gt; 0</code> 不成立时，这条语句<strong>影响 0 行</strong>，
+    <code>returning</code> 返回空数组，你据此判断「抢完了」。<br>
+    两个请求同时执行，数据库会让它们排队：第一个把 1 改成 0，第二个的 <code>WHERE</code> 不成立，
+    影响 0 行。<strong>不会超卖。</strong>
   </p>
 </div>
 
-<h2 id="cf">实现：Cloudflare Queues</h2>
+<h3>约束是最后一道防线</h3>
 
-<div class="code" data-lang="toml" data-file="wrangler.toml">
+<div class="code" data-lang="sql">
 <pre>
-[[queues.producers]]
-binding = "TASKS"           # 代码里用 c.env.TASKS 投递
-queue = "meadowlark-tasks"
+-- 库存不能为负，写进表定义里
+ALTER TABLE vacations ADD CONSTRAINT remaining_non_negative
+  CHECK (remaining &gt;= 0);
 
-[[queues.consumers]]
-queue = "meadowlark-tasks"
-max_batch_size = 10         # 一次最多取 10 条一起处理
-max_batch_timeout = 5       # 或者攒够 5 秒就处理
-max_retries = 5             # 最多重试 5 次
-dead_letter_queue = "meadowlark-dlq"    # 5 次还失败就丢到这里
+-- 一个邮箱只能注册一次
+CREATE UNIQUE INDEX idx_users_email ON users (lower(email));
+
+-- 同一个用户对同一个套餐只能有一条「到季通知」
+CREATE UNIQUE INDEX idx_listener ON in_season_listeners (email, sku);
 </pre>
 </div>
 
-<h3>定义任务类型</h3>
+<p>有了唯一约束，「先查再插」的竞态就变成了一个可以捕获的错误：</p>
 
-<div class="code" data-lang="ts" data-file="src/tasks/types.ts">
+<div class="code" data-lang="ts">
 <pre>
-export type Task =
-  | { type: 'send-order-email'; id: string; orderId: string; email: string }
-  | { type: 'generate-invoice'; id: string; orderId: string }
-  | { type: 'sync-to-crm'; id: string; customerId: string }
+// ❌ 有竞态：两个请求可能同时通过检查
+const existing = await db.select().from(users).where(eq(users.email, email))
+if (existing.length) return c.json({ error: '邮箱已注册' }, 409)
+await db.insert(users).values({ email, ... })
 
-export function newTask&lt;T extends Task['type']&gt;(
-  type: T,
-  payload: Omit&lt;Extract&lt;Task, { type: T }&gt;, 'type' | 'id'&gt;
-): Task {
-  return { type, id: crypto.randomUUID(), ...payload } as Task
+// ✅ 直接插，让数据库拒绝重复
+try {
+  await db.insert(users).values({ email, ... })
+} catch (err) {
+  if (isUniqueViolation(err)) {
+    return c.json({ error: '邮箱已注册' }, 409)
+  }
+  throw err
 }
+
+// ✅ 或者用 upsert 语义，完全不需要判断
+await db.insert(inSeasonListeners)
+  .values({ email, sku })
+  .onConflictDoNothing()
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 任务里放 ID，不放数据</div>
+  <div class="t">&#128161; 这个思路叫「乐观执行」</div>
   <p>
-    投递 <code>{ orderId: 'o_123' }</code>，而不是把整个订单对象塞进去。原因：<br>
-    ① 消息体有大小限制；<br>
-    ② 任务可能几分钟后才执行，那时数据可能已经变了 —— <strong>你要的是最新数据，不是投递时的快照</strong>；<br>
-    ③ 消息可能被日志记录下来，里面别带敏感信息。
+    与其小心翼翼地先检查再动手（检查结果随时可能过期），不如<strong>直接动手，让数据库告诉你行不行</strong>。
+    代码更短，而且没有竞态窗口。<br>
+    应用层的检查仍然有价值 —— 用来给出友好的错误提示 —— 但它<strong>不能作为正确性的依据</strong>。
+    真正的保证必须在数据库层。
   </p>
 </div>
 
-<h3>生产者</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-type Bindings = { TASKS: Queue&lt;Task&gt;; DB: D1Database }
-
-app.post('/api/v1/orders', async (c) =&gt; {
-  const order = await createOrder(...)     // 同步：必须完成
-
-  // 异步：投递即返回，10 ms 左右
-  await c.env.TASKS.send(
-    newTask('send-order-email', { orderId: order.id, email: order.email })
-  )
-
-  // 批量投递更省事
-  await c.env.TASKS.sendBatch([
-    { body: newTask('generate-invoice', { orderId: order.id }) },
-    { body: newTask('sync-to-crm', { customerId: order.customerId }) },
-  ])
-
-  return c.json({ orderId: order.id }, 201)
-})
-</pre>
-</div>
-
-<h3>消费者</h3>
-
-<div class="code" data-lang="ts" data-file="src/index.ts">
-<pre>
-import { app } from './app'
-import { handleTask } from './tasks/handlers'
-
-export default {
-  // HTTP 请求走 Hono
-  fetch: app.fetch,
-
-  // 队列消息走这里
-  async queue(batch: MessageBatch&lt;Task&gt;, env: Bindings) {
-    for (const msg of batch.messages) {
-      try {
-        await handleTask(msg.body, env)
-        msg.ack()                      // 明确确认：处理成功
-      } catch (err) {
-        console.error('任务失败', {
-          taskId: msg.body.id,
-          type: msg.body.type,
-          attempt: msg.attempts,
-          error: String(err),
-        })
-        // 指数退避后重投；不调 retry 而是让它超时也可以，但显式更清楚
-        msg.retry({ delaySeconds: Math.min(2 ** msg.attempts * 10, 900) })
-      }
-    }
-  },
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/tasks/handlers.ts">
-<pre>
-export async function handleTask(task: Task, env: Bindings) {
-  switch (task.type) {
-    case 'send-order-email':
-      return sendOrderEmail(task, env)
-    case 'generate-invoice':
-      return generateInvoice(task, env)
-    case 'sync-to-crm':
-      return syncToCrm(task, env)
-    default: {
-      // 穷尽检查：将来加了新任务类型忘了处理，这里会编译报错
-      const never: never = task
-      throw new Error(`未知任务类型：${JSON.stringify(never)}`)
-    }
-  }
-}
-
-async function sendOrderEmail(
-  task: Extract&lt;Task, { type: 'send-order-email' }&gt;,
-  env: Bindings
-) {
-  // ① 幂等
-  if (!(await claimOnce(task.id, env))) return
-
-  // ② 取最新数据，而不是用投递时的快照
-  const order = await getOrder(env.DB, task.orderId)
-  if (!order) return          // 订单被删了，任务作废，不是错误
-
-  // ③ 干活
-  const html = renderEmail(&lt;OrderConfirmationEmail order={order} /&gt;)
-  await createMailer(env).send({
-    to: task.email,
-    subject: `预订确认 · ${order.number}`,
-    html,
-    text: htmlToText(html),
-  })
-}
-</pre>
-</div>
-
-<h2 id="node-queue">实现：Node.js 上用 BullMQ</h2>
-
-<p>如果你部署在传统服务器上，BullMQ（基于 Redis）是最成熟的选择：</p>
-
-<div class="code" data-lang="bash">
-<pre>
-npm install bullmq ioredis
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/tasks/queue.ts">
-<pre>
-import { Queue } from 'bullmq'
-import IORedis from 'ioredis'
-
-const connection = new IORedis(process.env.REDIS_URL!, {
-  maxRetriesPerRequest: null,        // BullMQ 要求
-})
-
-export const taskQueue = new Queue&lt;Task&gt;('meadowlark-tasks', {
-  connection,
-  defaultJobOptions: {
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 2000 },
-    removeOnComplete: { age: 3600, count: 1000 },   // 别让 Redis 无限增长
-    removeOnFail: { age: 7 * 24 * 3600 },           // 失败的多留几天用于排查
-  },
-})
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/tasks/worker.ts">
-<pre>
-import { Worker } from 'bullmq'
-import { handleTask } from './handlers'
-
-// 注意：这是一个独立的进程，和 Web 服务分开部署
-const worker = new Worker&lt;Task&gt;(
-  'meadowlark-tasks',
-  async (job) =&gt; {
-    await handleTask(job.data)
-  },
-  { connection, concurrency: 5 }     // 同时处理 5 个任务
-)
-
-worker.on('failed', (job, err) =&gt; {
-  console.error('任务失败', { id: job?.id, attempts: job?.attemptsMade, err: err.message })
-  if (job &amp;&amp; job.attemptsMade &gt;= (job.opts.attempts ?? 1)) {
-    reportToSentry(err, { taskId: job.id, data: job.data })   // 彻底失败了才告警
-  }
-})
-
-// 优雅关闭：让正在处理的任务做完
-for (const sig of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(sig, async () =&gt; {
-    await worker.close()
-    process.exit(0)
-  })
-}
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; Worker 是独立进程</div>
-  <p>
-    别把 Worker 塞进 Web 服务的同一个进程里。分开的好处：
-    可以独立扩容（Web 开 2 个实例，Worker 开 10 个）、
-    重任务不会抢占 Web 的 CPU、Worker 崩了不影响用户访问。<br>
-    部署上就是两条命令：<code>node dist/server.js</code> 和 <code>node dist/worker.js</code>。
-  </p>
-</div>
-
-<h2 id="retry">重试、退避与死信队列</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="任务重试与死信队列的流程">
-  <rect class="bx-a" x="300" y="20" width="160" height="40" rx="8"/>
-  <text class="ttl on-a" x="380" y="45" text-anchor="middle">消费任务</text>
-
-  <path class="ln-g" d="M300 40 H200 V72" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="240" y="34">成功</text>
-  <rect class="bx-g" x="120" y="76" width="160" height="36" rx="8"/>
-  <text class="sm on-g" x="200" y="99" text-anchor="middle">ack，任务结束</text>
-
-  <path class="ln-r" d="M460 40 H560 V72" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="516" y="34">失败</text>
-
-  <rect class="bx-r" x="470" y="76" width="180" height="36" rx="8"/>
-  <text class="sm on-r" x="560" y="99" text-anchor="middle">重试次数 &lt; 上限？</text>
-
-  <path class="ln-a" d="M470 94 H400 V128 H386" marker-end="url(#ar-a)"/>
-  <text class="sm on-a" x="432" y="88">是</text>
-
-  <rect class="bx-a" x="200" y="116" width="186" height="60" rx="8"/>
-  <text class="sm on-a" x="293" y="138" text-anchor="middle">等待后重新投递</text>
-  <text class="mono sm" x="293" y="158" text-anchor="middle">10s → 20s → 40s → 80s</text>
-  <text class="sm" x="293" y="172" text-anchor="middle">指数退避 + 抖动</text>
-
-  <path class="ln-a" d="M293 114 V70 H300" marker-end="url(#ar-a)"/>
-
-  <path class="ln-r" d="M560 116 V152" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="580" y="136">否</text>
-
-  <rect class="bx-r" x="450" y="156" width="220" height="56" rx="8"/>
-  <text class="ttl on-r" x="560" y="178" text-anchor="middle">死信队列（DLQ）</text>
-  <text class="sm" x="560" y="198" text-anchor="middle">不再自动重试，等人来看</text>
-
-  <rect class="bx-d" x="60" y="228" width="640" height="44" rx="8"/>
-  <text class="sm" x="380" y="250" text-anchor="middle">DLQ 有消息 = 需要人工介入的信号。<tspan class="on-r">给它配告警</tspan> ——</text>
-  <text class="sm" x="380" y="266" text-anchor="middle">没人看的死信队列，和没有死信队列是一样的（见第 27 章「隐形故障」）</text>
-</svg>
-<figcaption>图 21-4　重试处理临时故障，死信队列兜住永久故障</figcaption>
-</figure>
-
-<h3>区分两种失败</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-class PermanentTaskError extends Error {}     // 重试也没用
-
-async function sendOrderEmail(task: Task, env: Bindings) {
-  const order = await getOrder(env.DB, task.orderId)
-
-  // 订单不存在 —— 重试一万次也不会存在。直接放弃，不算失败
-  if (!order) {
-    console.warn('订单已不存在，跳过任务', task.orderId)
-    return
-  }
-
-  // 邮箱格式非法 —— 永久错误，重试无意义
-  if (!isValidEmail(task.email)) {
-    throw new PermanentTaskError(`邮箱格式非法：${task.email}`)
-  }
-
-  // 邮件服务 503 —— 临时故障，值得重试
-  await mailer.send({ ... })    // 抛普通 Error
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// 在消费者里区别对待
-try {
-  await handleTask(msg.body, env)
-  msg.ack()
-} catch (err) {
-  if (err instanceof PermanentTaskError) {
-    console.error('永久失败，不重试', { taskId: msg.body.id, err: err.message })
-    reportToSentry(err, { task: msg.body })
-    msg.ack()          // ← 确认掉，别让它一直重试浪费资源
-    continue
-  }
-  msg.retry({ delaySeconds: backoff(msg.attempts) })
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 「毒丸消息」</div>
-  <p>
-    如果一个任务因为数据格式问题<strong>永远</strong>会失败，而你又无限重试，
-    它会一直占用消费能力，拖慢所有其他任务 —— 这叫毒丸消息。<br>
-    防御手段就是上面两条：<strong>设置重试上限</strong>（必须有）+ <strong>识别永久错误直接 ack</strong>。
-  </p>
-</div>
-
-<h2 id="cron">定时任务</h2>
-
-<div class="code" data-lang="toml" data-file="wrangler.toml">
-<pre>
-[triggers]
-crons = [
-  "*/15 * * * *",     # 每 15 分钟：刷新天气缓存
-  "0 3 * * *",        # 每天凌晨 3 点：清理过期会话
-  "0 9 * * 1",        # 每周一上午 9 点：发周报
-]
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-export default {
-  fetch: app.fetch,
-  queue: handleQueue,
-
-  async scheduled(event: ScheduledController, env: Bindings, ctx: ExecutionContext) {
-    switch (event.cron) {
-      case '*/15 * * * *':
-        ctx.waitUntil(refreshWeatherCache(env))
-        break
-      case '0 3 * * *':
-        ctx.waitUntil(cleanupExpiredSessions(env))
-        break
-      case '0 9 * * 1':
-        // 周报要给几千人发 —— 定时任务里不直接发，而是投递任务
-        ctx.waitUntil(enqueueWeeklyReports(env))
-        break
-    }
-  },
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 定时任务负责「决定要做什么」，队列负责「做」</div>
-  <p>
-    定时任务有执行时间上限，而且失败了要等下一个周期。所以它不该自己去做几千件事。<br>
-    正确的分工：<strong>定时任务扫一遍数据库，把要做的事拆成 N 个任务投进队列</strong>，
-    然后立刻结束。队列负责慢慢消化、单独重试失败的那几个。<br>
-    这样一个用户的邮件发失败，不会影响其余 4999 个。
-  </p>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-async function enqueueWeeklyReports(env: Bindings) {
-  let cursor: string | undefined
-
-  do {
-    // 一定要分页，别一次性把几万条读进内存
-    const page = await getSubscribers(env.DB, { cursor, limit: 500 })
-
-    await env.TASKS.sendBatch(
-      page.items.map((u) =&gt; ({
-        body: newTask('send-weekly-report', { userId: u.id, week: currentWeek() }),
-      }))
-    )
-
-    cursor = page.nextCursor
-  } while (cursor)
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 定时任务可能重复执行</div>
-  <p>
-    平台通常只保证「至少执行一次」。而且多实例部署时，如果用的是自己实现的定时器
-    （比如 <code>node-cron</code>），<strong>每个实例都会各跑一遍</strong>。<br>
-    对策：任务本身幂等，或者用一把带日期的「执行锁」——
-    <code>INSERT INTO cron_runs (job, date) VALUES ('weekly-report', '2026-09-07')</code>，
-    靠唯一约束保证一天只有一个实例能插进去。
-  </p>
-</div>
-
-<h2 id="ux">用户界面怎么配合</h2>
+<h2 id="locks">两种锁</h2>
 
 <p>
-  异步带来一个新问题：用户提交后，事情还没做完。界面要诚实地反映这一点。
+  原子更新解决不了所有问题。当一次操作要读出数据、在应用里做复杂计算、再写回去时，
+  就需要锁了。
+</p>
+
+<h3>乐观锁：假设不会冲突，冲突了就重试</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="乐观锁的版本号机制">
+  <text class="ttl on-g" x="20" y="22">乐观锁：每行带一个版本号，写入时检查版本没变过</text>
+
+  <rect class="bx-b" x="20" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-b" x="130" y="62" text-anchor="middle">编辑者 A</text>
+  <text class="sm" x="36" y="86">读出文章，version = 7</text>
+  <text class="sm" x="36" y="106">修改标题</text>
+  <text class="sm on-g" x="36" y="124">保存：WHERE version = 7 ✓</text>
+
+  <rect class="bx-p" x="280" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-p" x="390" y="62" text-anchor="middle">编辑者 B</text>
+  <text class="sm" x="296" y="86">读出文章，version = 7</text>
+  <text class="sm" x="296" y="106">修改正文</text>
+  <text class="sm on-r" x="296" y="124">保存：WHERE version = 7 ✗</text>
+
+  <rect class="bx-g" x="540" y="40" width="200" height="90" rx="8"/>
+  <text class="ttl on-g" x="640" y="62" text-anchor="middle">数据库</text>
+  <text class="mono sm" x="556" y="88">version: 7</text>
+  <path class="ln-g" d="M600 96 V108" marker-end="url(#ar)"/>
+  <text class="mono sm on-g" x="556" y="124">version: 8（A 写入后）</text>
+
+  <path class="ln-b" d="M130 132 V152 H600 V152" marker-end="url(#ar)"/>
+  <path class="ln-r" d="M390 132 V172 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="20" y="188" width="720" height="62" rx="10"/>
+  <text class="ttl on-r" x="380" y="210" text-anchor="middle">B 的更新影响 0 行 —— 数据库告诉他「你手上的版本已经旧了」</text>
+  <text class="sm" x="380" y="232" text-anchor="middle">此时可以：提示用户「内容已被他人修改，请刷新」，或者自动重新读取并重试</text>
+</svg>
+<figcaption>图 21-3　乐观锁把「静默覆盖」变成了「明确的冲突」</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+export const articles = sqliteTable('articles', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  version: integer('version').notNull().default(1),   // ← 版本号
+})
+
+export async function updateArticle(
+  id: string,
+  patch: { title?: string; body?: string },
+  expectedVersion: number
+) {
+  const rows = await db
+    .update(articles)
+    .set({ ...patch, version: expectedVersion + 1 })
+    .where(and(
+      eq(articles.id, id),
+      eq(articles.version, expectedVersion)   // ← 版本必须没变
+    ))
+    .returning()
+
+  if (rows.length === 0) {
+    throw new HTTPException(409, {
+      message: '这篇文章已被他人修改，请刷新后重试',
+    })
+  }
+  return rows[0]
+}
+</pre>
+</div>
+
+<p>表单里把版本号带上，提交时一起发回来：</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+&lt;form method="POST" action={`/articles/${article.id}`}&gt;
+  &lt;input type="hidden" name="version" value={article.version} /&gt;
+  &lt;input name="title" value={article.title} /&gt;
+  &lt;textarea name="body"&gt;{article.body}&lt;/textarea&gt;
+  &lt;button type="submit"&gt;保存&lt;/button&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<h3>悲观锁：先占住，别人等着</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+await db.transaction(async (tx) =&gt; {
+  // FOR UPDATE：锁住这一行，直到事务结束
+  const [account] = await tx
+    .select()
+    .from(accounts)
+    .where(eq(accounts.id, id))
+    .for('update')
+
+  // 在应用里做复杂计算（这段时间别人读这一行会被阻塞）
+  const fee = calculateComplexFee(account, request)
+
+  if (account.balance &lt; fee) {
+    throw new HTTPException(400, { message: '余额不足' })
+  }
+
+  await tx.update(accounts)
+    .set({ balance: account.balance - fee })
+    .where(eq(accounts.id, id))
+})
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th></th><th>乐观锁</th><th>悲观锁</th></tr>
+  <tr><td>假设</td><td>冲突很少见</td><td>冲突很常见</td></tr>
+  <tr><td>做法</td><td>写入时检查版本，冲突了报错/重试</td><td>读取时就加锁，别人排队等</td></tr>
+  <tr><td>适合</td><td>后台文章编辑、用户资料修改</td><td>秒杀、账户余额、票务座位</td></tr>
+  <tr><td>优点</td><td>不阻塞，吞吐高</td><td>不会失败，逻辑简单</td></tr>
+  <tr><td>缺点</td><td>冲突时用户要重做</td><td>并发低；<strong>有死锁风险</strong>；持锁期间不能干慢活</td></tr>
+  <tr><td>边缘环境</td><td>可用</td><td>需要真正的事务型数据库，KV 上做不了</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 持锁的时候绝不能做这三件事</div>
+  <ol>
+    <li><strong>调用外部 API。</strong>对方慢 5 秒，你就锁了 5 秒，所有等这一行的请求全部堆积。</li>
+    <li><strong>等待用户输入。</strong>「锁住座位等他填完表单」—— 用户去泡了杯咖啡，锁就一直在。</li>
+    <li><strong>按不同顺序锁多行。</strong>A 先锁 1 再锁 2，B 先锁 2 再锁 1 → <strong>死锁</strong>。
+        规则：<em>永远按同一个固定顺序加锁</em>（比如按主键升序）。</li>
+  </ol>
+</div>
+
+<h2 id="idempotency">幂等：重复请求不造成重复后果</h2>
+
+<p>
+  上面讲的都是「多个不同用户同时操作」。还有另一类问题：<strong>同一个请求被发了两次</strong>。
 </p>
 
 <div class="tw">
 <table>
-  <tr><th>场景</th><th>做法</th></tr>
-  <tr><td>用户不关心结果（埋点、同步 CRM）</td><td>什么都不说，正常返回</td></tr>
-  <tr><td>用户知道会晚一点（确认邮件）</td><td>文案说明：「确认邮件将在几分钟内送达」</td></tr>
-  <tr><td>用户要等结果（生成报表、AI 处理）</td><td>返回任务 ID，前端轮询状态；或用 SSE 推送进度</td></tr>
-  <tr><td>结果可能失败（导入文件）</td><td>做一个「任务列表」页面，显示状态、失败原因、重试按钮</td></tr>
+  <tr><th>为什么会重复</th><th>说明</th></tr>
+  <tr><td>用户双击提交按钮</td><td>最常见，前端禁用按钮能挡住大部分但不是全部</td></tr>
+  <tr><td>用户网络卡了刷新页面</td><td>如果没用第 8 章的 303 重定向，浏览器会重新提交</td></tr>
+  <tr><td>客户端自动重试</td><td>第 20 章讲过：响应超时了，但服务器其实处理成功了</td></tr>
+  <tr><td>第三方 webhook 重投</td><td>支付平台没收到你的 200，就会一直重发</td></tr>
+  <tr><td>队列的重试</td><td>下一章会讲：至少一次投递意味着可能投递多次</td></tr>
 </table>
 </div>
 
+<div class="box key">
+  <div class="t">&#9733; 幂等的定义</div>
+  <p>
+    一个操作执行一次和执行 N 次，<strong>对系统状态的影响相同</strong>。<br>
+    <code>SET balance = 100</code> 是幂等的。<code>balance = balance - 10</code> <strong>不是</strong>。<br>
+    注意「幂等」说的是<em>结果</em>，不是<em>不执行</em>。重复请求可以照常返回成功，
+    只是不能产生第二笔订单。
+  </p>
+</div>
+
+<h3>幂等键</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="幂等键的处理流程">
+  <rect class="bx-b" x="20" y="24" width="180" height="46" rx="8"/>
+  <text class="sm" x="110" y="44" text-anchor="middle">客户端生成唯一键</text>
+  <text class="mono sm" x="110" y="60" text-anchor="middle">Idempotency-Key: abc-123</text>
+
+  <path class="ln-b" d="M204 47 H280" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="284" y="24" width="200" height="46" rx="8"/>
+  <text class="sm on-a" x="384" y="52" text-anchor="middle">查这个键处理过吗？</text>
+
+  <path class="ln-g" d="M384 74 V104" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="330" y="94">没有</text>
+
+  <path class="ln-a" d="M488 47 H600" marker-end="url(#ar)"/>
+  <text class="sm on-a" x="544" y="40" text-anchor="middle">有</text>
+  <rect class="bx-p" x="604" y="24" width="136" height="46" rx="8"/>
+  <text class="sm on-p" x="672" y="44" text-anchor="middle">直接返回</text>
+  <text class="sm on-p" x="672" y="60" text-anchor="middle">上次的结果</text>
+
+  <rect class="bx-g" x="264" y="108" width="240" height="46" rx="8"/>
+  <text class="sm on-g" x="384" y="128" text-anchor="middle">在同一个事务里：</text>
+  <text class="sm on-g" x="384" y="146" text-anchor="middle">插入幂等键 + 执行业务</text>
+
+  <path class="ln-g" d="M384 158 V186" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="264" y="190" width="240" height="40" rx="8"/>
+  <text class="sm" x="384" y="214" text-anchor="middle">保存结果，返回</text>
+
+  <rect class="bx-d" x="60" y="244" width="640" height="30" rx="6"/>
+  <text class="sm" x="380" y="264" text-anchor="middle">关键：幂等键的插入和业务操作必须在同一个事务里，否则中间崩溃会留下不一致的状态</text>
+</svg>
+<figcaption>图 21-4　幂等键让「重试」变成一件安全的事</figcaption>
+</figure>
+
 <div class="code" data-lang="ts">
 <pre>
-// 返回任务 ID，让前端能查进度
-app.post('/api/v1/reports', async (c) =&gt; {
-  const jobId = crypto.randomUUID()
-  await db.insert(jobs).values({ id: jobId, status: 'queued', createdAt: new Date() })
-  await c.env.TASKS.send(newTask('generate-report', { jobId, ...params }))
-
-  return c.json({ jobId, status: 'queued' }, 202)   // 202 Accepted：已受理，尚未完成
+export const idempotencyKeys = sqliteTable('idempotency_keys', {
+  key: text('key').primaryKey(),
+  userId: text('user_id').notNull(),
+  responseBody: text('response_body', { mode: 'json' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 })
 
-app.get('/api/v1/jobs/:id', async (c) =&gt; {
-  const job = await getJob(c.env.DB, c.req.param('id'))
-  if (!job) throw new HTTPException(404, { message: '任务不存在' })
-  return c.json({ status: job.status, progress: job.progress, resultUrl: job.resultUrl })
+app.post('/api/v1/orders', async (c) =&gt; {
+  const key = c.req.header('Idempotency-Key')
+  if (!key) {
+    throw new HTTPException(400, { message: '缺少 Idempotency-Key 请求头' })
+  }
+
+  const userId = c.get('user').id
+
+  // 1. 这个键处理过吗？
+  const [seen] = await db.select().from(idempotencyKeys)
+    .where(and(eq(idempotencyKeys.key, key), eq(idempotencyKeys.userId, userId)))
+
+  if (seen) {
+    // 处理过了，原样返回上次的结果
+    return c.json(seen.responseBody as object, 200, { 'Idempotent-Replay': 'true' })
+  }
+
+  // 2. 没处理过：业务 + 记键，同一个事务
+  const body = await c.req.json()
+
+  try {
+    const result = await db.transaction(async (tx) =&gt; {
+      const order = await createOrderIn(tx, userId, body)
+      await tx.insert(idempotencyKeys).values({
+        key, userId,
+        responseBody: { orderId: order.id },
+        createdAt: new Date(),
+      })
+      return { orderId: order.id }
+    })
+    return c.json(result, 201)
+  } catch (err) {
+    // 两个请求同时到达时，慢的那个会在这里撞上主键冲突
+    if (isUniqueViolation(err)) {
+      const [now] = await db.select().from(idempotencyKeys)
+        .where(eq(idempotencyKeys.key, key))
+      return c.json(now.responseBody as object, 200)
+    }
+    throw err
+  }
 })
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 202 这个状态码就是为此而生的</div>
+  <div class="t">&#128161; 键从哪来</div>
   <p>
-    <code>200 OK</code> 的语义是「做完了，这是结果」。<br>
-    <code>202 Accepted</code> 的语义是「收到了，会去做，但还没做完」。<br>
-    异步接口用 202，配上一个能查询状态的 URL，是 REST 里的标准做法。
+    <strong>客户端生成</strong>，用 <code>crypto.randomUUID()</code>，并且在<strong>重试时使用同一个键</strong>
+    —— 这是关键。如果每次重试都换个新键，幂等就失效了。<br>
+    表单场景可以在渲染页面时生成一个键放进隐藏字段，这样用户刷新重复提交也能被识别。<br>
+    别忘了给这张表加过期清理（比如保留 24 小时），否则它会无限增长。
   </p>
 </div>
 
-<h2 id="dont">什么时候不该用队列</h2>
+<h2 id="distributed">多实例带来的额外麻烦</h2>
+
+<p>
+  上面的方案都依赖数据库来做仲裁。一旦状态跑到数据库之外，事情就变复杂了。
+</p>
 
 <div class="box warn">
-  <div class="t">&#9888; 队列不是免费的</div>
-  <p>
-    它引入了一个新组件（要部署、要监控、要付费）、一套新的故障模式（积压、毒丸、重复消费）、
-    以及调试难度（日志分散在两个进程里）。<strong>不要默认所有东西都走队列。</strong>
-  </p>
+  <div class="t">&#9888; 这些「优化」会悄悄破坏正确性</div>
+  <ul>
+    <li><strong>进程内缓存。</strong>「我把库存缓存在内存里减少查询」—— 三个实例三份缓存，
+        全都是过期的（第 12 章讲过）。</li>
+    <li><strong>进程内的锁。</strong>JavaScript 里用一个 <code>Map</code> 记「这个 sku 正在处理中」——
+        只对当前进程有效，另外两个实例根本不知道。</li>
+    <li><strong>KV 上做计数器。</strong>Cloudflare KV 是最终一致的，
+        <code>get</code> 到的值可能是几秒前的。用它做「限量 100 个」必然超发。</li>
+  </ul>
 </div>
 
 <div class="tw">
 <table>
-  <tr><th>不该用的情况</th><th>为什么 / 改用什么</th></tr>
-  <tr>
-    <td>操作只要 20 ms</td>
-    <td>投递本身就要 10 ms，还多了一堆复杂度。直接同步做</td>
-  </tr>
-  <tr>
-    <td>用户必须立刻看到结果</td>
-    <td>异步做完还要轮询，总时长反而更长，体验更差</td>
-  </tr>
-  <tr>
-    <td>需要严格的顺序执行</td>
-    <td>大多数队列不保证全局顺序。要顺序就用单分区/单消费者，但那就失去了扩容能力</td>
-  </tr>
-  <tr>
-    <td>任务失败必须让用户当场知道</td>
-    <td>异步失败时用户早就走了。这类操作应该同步做，让用户看到错误</td>
-  </tr>
-  <tr>
-    <td>整个项目只有一个异步需求</td>
-    <td><code>waitUntil</code> + 一张重试表可能就够了，先别上队列</td>
-  </tr>
+  <tr><th>需求</th><th>用什么</th></tr>
+  <tr><td>强一致的计数、余额、库存</td><td>关系型数据库的原子更新 / 事务</td></tr>
+  <tr><td>Cloudflare 上的强一致状态</td><td>Durable Objects（每个对象全球单实例，天然串行）</td></tr>
+  <tr><td>限流计数（可以差一点点）</td><td>Redis <code>INCR</code>，或 Cloudflare Rate Limiting</td></tr>
+  <tr><td>分布式锁</td><td>Redis 的 <code>SET key val NX EX 30</code>；<strong>但先想想能不能不用</strong></td></tr>
 </table>
 </div>
 
-<h2 id="observe">让队列可观测</h2>
-
-<p>队列最容易出的问题是<strong>悄悄积压</strong>：一切看起来正常，只是邮件晚了六个小时。</p>
-
 <div class="box key">
-  <div class="t">&#9733; 至少监控这四个指标</div>
-  <ul>
-    <li><strong>队列深度</strong> —— 待处理任务数。持续增长 = 消费能力不够，该扩容了</li>
-    <li><strong>任务年龄</strong> —— 最老的任务等了多久。比深度更能反映用户感受</li>
-    <li><strong>失败率</strong> —— 突然上升通常意味着某个下游服务出问题了</li>
-    <li><strong>死信队列长度</strong> —— <strong>只要不是 0 就该告警</strong></li>
-  </ul>
+  <div class="t">&#9733; 分布式锁比你想的难</div>
+  <p>
+    自己实现的分布式锁几乎总是有 bug：持锁的进程崩了怎么办（要有超时）？
+    超时了但它其实还活着，两个进程同时以为自己持锁怎么办？释放锁时，
+    怎么保证你释放的是自己那把而不是别人的？<br>
+    <strong>结论：能用数据库的原子操作解决，就别上分布式锁。</strong>
+    单条 <code>UPDATE ... WHERE</code> 能解决的问题，不要用一百行锁代码去解决。
+  </p>
 </div>
 
-<div class="code" data-lang="ts">
+<h2 id="test">怎么把竞态测出来</h2>
+
+<p>
+  这是本章最实用的一节。竞态之所以难缠，是因为普通测试碰不到它。
+  但你可以<strong>主动制造并发</strong>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/booking.test.ts">
 <pre>
-// 在消费者里打结构化日志（第 12 章）
-async function handleTask(task: Task, env: Bindings) {
-  const start = Date.now()
-  try {
-    await dispatch(task, env)
-    log('info', 'task_done', {
-      taskId: task.id,
-      type: task.type,
-      durationMs: Date.now() - start,
-      // 从投递到完成的总延迟 —— 这才是用户实际等待的时间
-      latencyMs: Date.now() - task.createdAt,
-    })
-  } catch (err) {
-    log('error', 'task_failed', { taskId: task.id, type: task.type, error: String(err) })
-    throw err
-  }
-}
+import { describe, it, expect, beforeEach } from 'vitest'
+
+describe('库存扣减', () =&gt; {
+  beforeEach(async () =&gt; {
+    await resetDb()
+    await seedVacation({ sku: 'HR199', remaining: 1 })   // 只有 1 份
+  })
+
+  it('20 个并发请求只能成功 1 个', async () =&gt; {
+    // 关键：同时发出，而不是 for 循环里 await
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =&gt;
+        app.request('/vacations/HR199/book', { method: 'POST' })
+      )
+    )
+
+    const ok = results.filter((r) =&gt; r.status === 200).length
+    const soldOut = results.filter((r) =&gt; r.status === 409).length
+
+    expect(ok).toBe(1)          // ← 有竞态的实现会得到 2、3 甚至 20
+    expect(soldOut).toBe(19)
+
+    // 更重要：验证数据库最终状态
+    const v = await repo.findBySku('HR199')
+    expect(v.remaining).toBe(0)
+    expect(await countOrders('HR199')).toBe(1)
+  })
+
+  it('重复的幂等键只创建一个订单', async () =&gt; {
+    const key = crypto.randomUUID()
+    const send = () =&gt;
+      app.request('/api/v1/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: JSON.stringify({ sku: 'HR199' }),
+      })
+
+    const [a, b] = await Promise.all([send(), send()])
+
+    const bodyA = await a.json()
+    const bodyB = await b.json()
+    expect(bodyA.orderId).toBe(bodyB.orderId)     // 同一个订单
+    expect(await countOrders('HR199')).toBe(1)
+  })
+})
 </pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 让竞态窗口变大，更容易复现</div>
+  <p>
+    如果并发测试偶尔通过偶尔失败，说明窗口太窄。在「读」和「写」之间人为插一个延迟，
+    可以让 bug 稳定复现：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+const v = await repo.findBySku(sku)
+
+// 只在测试环境生效的「竞态放大器」
+if (process.env.RACE_DELAY) {
+  await new Promise((r) =&gt; setTimeout(r, Number(process.env.RACE_DELAY)))
+}
+
+await repo.update(sku, { remaining: v.remaining - 1 })
+</pre></div>
+  <p>
+    修好之后再跑一遍：<strong>正确的实现加了延迟也应该通过</strong>。
+    这是验证「你是真修好了」还是「只是把窗口变窄了」的好办法。
+  </p>
+</div>
+
+<h2 id="checklist">自查清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 在代码里找这些模式</div>
+  <ul>
+    <li>☐ 有没有「先 <code>SELECT</code> 判断，再 <code>INSERT</code>/<code>UPDATE</code>」的地方？
+        → 改成原子更新或依赖唯一约束</li>
+    <li>☐ 有没有 <code>x = x + 1</code> 形式的读改写？
+        → 改成 <code>SET x = x + 1</code> 让数据库算</li>
+    <li>☐ 表单编辑有没有可能静默覆盖别人的修改？→ 加版本号</li>
+    <li>☐ 创建订单、扣款、发消息的接口，重复调用会怎样？→ 加幂等键</li>
+    <li>☐ 有没有状态存在进程内存里？→ 挪到数据库或共享存储</li>
+    <li>☐ 关键的业务约束（余额非负、唯一性）有没有写进数据库约束？</li>
+    <li>☐ 持有锁的代码块里有没有网络调用？</li>
+    <li>☐ 有没有至少一个并发测试？</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>问「用户看到响应时这件事必须完成吗」，不必须的就移出请求路径。</li>
-  <li>队列的最大价值不是快，是<strong>把外部依赖的可用性和核心业务解耦</strong>。</li>
-  <li>三种手段：<code>waitUntil</code>（丢了无所谓）、队列（不能丢）、定时任务（周期性）。</li>
-  <li><strong>至少一次投递 ⇒ 消费者必须幂等</strong>。这是硬性要求，不是可选项。</li>
-  <li>任务里放 ID 不放数据，执行时取最新状态。</li>
-  <li>区分临时失败（重试）和永久失败（直接 ack + 告警），设置重试上限防毒丸。</li>
-  <li>定时任务只负责「拆任务投队列」，不自己做几千件事。</li>
-  <li>异步接口返回 202 + 任务 ID；死信队列非空必须告警。</li>
-  <li>操作很快、用户要等结果、需要严格顺序 —— 这三种情况别用队列。</li>
-  <li>下一章的 Webhook 接收，正是队列最典型的应用场景之一。</li>
+  <li><strong>check-then-act</strong> 是所有竞态的根源：读和写之间的间隙会被别人插队。</li>
+  <li>事务保证「全成或全败」，<strong>不保证「别人不插队」</strong>—— 两者是不同的问题。</li>
+  <li>优先用<strong>原子更新</strong>（<code>UPDATE ... WHERE 条件</code>）把判断交给数据库。</li>
+  <li>数据库约束（UNIQUE、CHECK）是最后一道防线，应用层检查只负责友好提示。</li>
+  <li>乐观锁适合冲突少的编辑场景，悲观锁适合冲突多的抢占场景；持锁期间不做慢操作。</li>
+  <li>幂等键让重复请求安全；键必须由客户端生成并在重试时复用。</li>
+  <li>能用数据库原子操作就别上分布式锁。</li>
+  <li>用 <code>Promise.all</code> 写并发测试，用人为延迟放大竞态窗口。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>把第 11 章的确认邮件改成异步：下单接口只写库 + 投递任务，用 <code>curl -w '%{time_total}'</code> 对比改造前后的响应时间。</li>
-    <li>故意让邮件服务返回 500，观察任务被重试的过程（看日志里的 <code>attempt</code> 递增）。确认下单接口本身<strong>没有</strong>受影响。</li>
-    <li>把同一个任务手动投递两次，确认只发出一封邮件。如果发了两封，说明幂等没做对。</li>
-    <li>制造一个「毒丸」：投递一个 email 字段为 <code>null</code> 的任务。它会被重试几次？加上 <code>PermanentTaskError</code> 后呢？</li>
-    <li>加一个定时任务，每 15 分钟刷新一次第 19 章的天气缓存。想一想：如果同时有 3 个实例在跑，会发生什么？怎么防？</li>
-    <li>做一个 <code>/api/v1/reports</code> 接口，返回 202 + 任务 ID，再做一个查询状态的接口。前端用轮询显示进度。</li>
+    <li>给云雀旅行加一个「限量套餐」：<code>remaining</code> 字段初始为 1。先用有竞态的写法实现下单，然后写一个 20 并发的测试，看着它失败。</li>
+    <li>改成原子更新，让测试通过。再加上 <code>RACE_DELAY=50</code> 跑一次，确认仍然通过。</li>
+    <li>给文章编辑加乐观锁：两个浏览器窗口打开同一篇文章，都修改，先后保存。确认第二个人收到的是明确的冲突提示，而不是静默覆盖。</li>
+    <li>给下单接口加幂等键。用同一个键连发两次 <code>curl</code>，确认只创建了一个订单，且两次响应内容相同。</li>
+    <li>给 <code>vacations.remaining</code> 加上 <code>CHECK (remaining &gt;= 0)</code> 约束，然后故意写一段会扣成负数的代码，看数据库怎么拒绝你。</li>
+    <li>翻一遍你自己项目的代码，按上面的自查清单找一遍。找到几处？</li>
   </ol>
 </div>
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 28 章 · 更多资源 — Hono 全栈开发教程</title>
+<title>第 28 章 · 维护 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="28">
@@ -12,279 +12,444 @@
 <main>
 
 <span class="chapter-eyebrow">第 28 章</span>
-<h1>更多资源</h1>
+<h1>维护</h1>
 <p class="lede">
-  二十七章走下来，你已经从「Hello World」做到了一个能上线、能维护、
-  并且在出问题时能自己说出哪里不对的完整应用。
-  这一章给出继续深入的方向、值得收藏的资料，以及一份帮你巩固的复习地图。
+  上线不是终点。一个项目八成的生命周期是在上线之后度过的。
+  这一章讲怎么让它活过三年 —— 而不是变成一个没人敢碰的黑箱。
 </p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>为项目制定一个符合实际的长期计划</li>
+    <li>建立依赖更新的日常节奏，避免「三年不动，一动就崩」</li>
+    <li>识别并处理技术债</li>
+    <li>让「隐形故障」显形</li>
+    <li>把重复的代码提炼成可复用的中间件和库</li>
+  </ul>
+</div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="recap">你学到了什么</h2>
+<h2 id="plan">先想清楚这个项目要活多久</h2>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="全书知识地图：HTTP 基础、Hono 核心、工程实践、安全、数据与集成、并发与异步">
-  <rect class="bx-a" x="290" y="16" width="180" height="42" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">Hono 应用</text>
+<p>
+  不同寿命的项目，值得投入的维护成本完全不同。上线前就该说清楚：
+</p>
 
-  <path class="ln-d" d="M330 60 L130 96"/>
-  <path class="ln-d" d="M360 60 L300 96"/>
-  <path class="ln-d" d="M400 60 L460 96"/>
-  <path class="ln-d" d="M430 60 L630 96"/>
-
-  <rect class="bx-b" x="20" y="100" width="220" height="96" rx="10"/>
-  <text class="ttl on-b" x="34" y="122">HTTP 基础</text>
-  <text class="sm" x="34" y="142">URL 结构 · 方法 · 状态码</text>
-  <text class="sm" x="34" y="160">请求头 / 响应头</text>
-  <text class="sm" x="34" y="178">Cookie · 会话 · 缓存</text>
-  <text class="sm" x="34" y="192">第 6、9、17 章</text>
-
-  <rect class="bx-p" x="252" y="100" width="220" height="96" rx="10"/>
-  <text class="ttl on-p" x="266" y="122">Hono 核心</text>
-  <text class="sm" x="266" y="142">路由 · Context · 中间件</text>
-  <text class="sm" x="266" y="160">JSX 渲染 · 校验器</text>
-  <text class="sm" x="266" y="178">RPC · 测试客户端</text>
-  <text class="sm" x="266" y="192">第 3、7、10、14、15 章</text>
-
-  <rect class="bx-g" x="484" y="100" width="256" height="96" rx="10"/>
-  <text class="ttl on-g" x="498" y="122">工程实践</text>
-  <text class="sm" x="498" y="142">测试 · 类型 · 分层</text>
-  <text class="sm" x="498" y="160">日志 · 监控 · CI/CD</text>
-  <text class="sm" x="498" y="178">可观测性 · 依赖管理</text>
-  <text class="sm" x="498" y="192">第 4、5、12、24、25、27 章</text>
-
-  <rect class="bx-r" x="20" y="212" width="232" height="100" rx="10"/>
-  <text class="ttl on-r" x="34" y="234">安全</text>
-  <text class="sm" x="34" y="256">HTTPS · CSP · CSRF · XSS</text>
-  <text class="sm" x="34" y="274">密码哈希 · JWT · OAuth</text>
-  <text class="sm" x="34" y="292">输入校验 · 限流</text>
-  <text class="sm" x="34" y="306">第 8、18 章</text>
-
-  <rect class="bx" x="264" y="212" width="232" height="100" rx="10"/>
-  <text class="ttl" x="278" y="234">数据与集成</text>
-  <text class="sm" x="278" y="256">SQL · ORM · 迁移 · 索引</text>
-  <text class="sm" x="278" y="274">对象存储 · KV · 缓存</text>
-  <text class="sm" x="278" y="292">第三方 API · 熔断降级</text>
-  <text class="sm" x="278" y="306">第 13、19 章</text>
-
-  <rect class="bx-a" x="508" y="212" width="232" height="100" rx="10"/>
-  <text class="ttl on-a" x="522" y="234">并发 · 异步 · 实时</text>
-  <text class="sm" x="522" y="256">竞态 · 事务 · 锁 · 幂等</text>
-  <text class="sm" x="522" y="274">队列 · 重试 · Webhook</text>
-  <text class="sm" x="522" y="292">SSE · WebSocket · 广播</text>
-  <text class="sm" x="522" y="306">第 20–23 章</text>
-</svg>
-<figcaption>图 28-1　这些知识里，只有中间那一块是 Hono 专属的</figcaption>
-</figure>
+<div class="tw">
+<table>
+  <tr><th>类型</th><th>预期寿命</th><th>该做什么</th></tr>
+  <tr>
+    <td>活动页 / 一次性项目</td>
+    <td>几周到几个月</td>
+    <td>写好下线日期。<strong>到期真的下线</strong>，不要让它变成没人管的僵尸</td>
+  </tr>
+  <tr>
+    <td>内部工具</td>
+    <td>一到三年</td>
+    <td>基本的测试和文档。明确写出「谁负责」</td>
+  </tr>
+  <tr>
+    <td>核心产品</td>
+    <td>多年</td>
+    <td>完整的测试、监控、依赖更新流程、值班机制</td>
+  </tr>
+</table>
+</div>
 
 <div class="box key">
-  <div class="t">&#9733; 最值钱的部分不会过时</div>
+  <div class="t">&#9733; 「没有计划」也是一种计划，而且是最糟的那种</div>
   <p>
-    HTTP 的工作方式、缓存的原理、安全的攻防、分层的思路、测试的方法 ——
-    这些和框架无关。哪天你换到别的语言、别的框架，它们照样带得走。<br>
-    Hono 只是一个特别顺手的容器，让你能把注意力放在这些真正重要的东西上。
+    最常见的情况是：一个「临时」项目上线了，三年后它变成了业务关键系统，
+    但从来没人给过它测试、文档或维护预算。原作者早就离职了，
+    没人知道它怎么部署，也没人敢改它。<br>
+    <strong>在 README 里写一句「这个项目预期服务到 X 时间，负责人是 Y」，
+    成本是一分钟，价值是三年。</strong>
   </p>
 </div>
 
-<h2 id="official">官方资料</h2>
+<h2 id="deps">依赖更新</h2>
 
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128218;</span><h4>hono.dev</h4>
-    <p>官方文档。写得非常好，而且每个 API 都有可运行的例子。有中文版。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128187;</span><h4>github.com/honojs/hono</h4>
-    <p>源码。核心不到一万行，读起来比你想的容易。想搞懂中间件怎么串起来的，直接看 <code>compose.ts</code>。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#129513;</span><h4>github.com/honojs/middleware</h4>
-    <p>所有 <code>@hono/*</code> 官方扩展都在这里：zod-validator、zod-openapi、oauth-providers、swagger-ui 等。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128172;</span><h4>Discord 社区</h4>
-    <p>官方 Discord，维护者很活跃。提问前先搜一下，很多问题有人问过了。</p>
-  </div>
-</div>
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="定期小更新与长期不更新的对比">
+  <rect class="bx-g" x="20" y="20" width="345" height="180" rx="10"/>
+  <text class="ttl on-g" x="192" y="44" text-anchor="middle">每周花 15 分钟</text>
+  <text class="sm" x="36" y="72">每次只升几个小版本</text>
+  <text class="sm" x="36" y="94">改动小，出问题一眼能看出是谁</text>
+  <text class="sm" x="36" y="116">CHANGELOG 短，读得完</text>
+  <text class="sm" x="36" y="138">出事了容易回滚</text>
+  <text class="sm on-g" x="36" y="168">安全补丁及时到位</text>
+  <text class="sm on-g" x="36" y="188">年成本：约 13 小时</text>
 
-<h2 id="mdn">Web 基础（比框架文档更值得读）</h2>
+  <rect class="bx-r" x="395" y="20" width="345" height="180" rx="10"/>
+  <text class="ttl on-r" x="567" y="44" text-anchor="middle">两年不动一次</text>
+  <text class="sm" x="411" y="72">几十个包跨了多个大版本</text>
+  <text class="sm" x="411" y="94">破坏性变更堆在一起</text>
+  <text class="sm" x="411" y="116">升级 A 要求先升 B，B 又和 C 冲突</text>
+  <text class="sm" x="411" y="138">出了问题不知道是哪个包引起的</text>
+  <text class="sm on-r" x="411" y="168">期间一直带着已知漏洞在跑</text>
+  <text class="sm on-r" x="411" y="188">一次成本：两周起，而且很痛苦</text>
+</svg>
+<figcaption>图 28-1　依赖更新的成本不是线性的，是指数的</figcaption>
+</figure>
 
-<div class="tw">
-<table>
-  <tr><th>资源</th><th>为什么值得读</th></tr>
-  <tr>
-    <td><strong>MDN Web Docs</strong></td>
-    <td>Fetch API、Request、Response、Headers、URL、FormData、Web Crypto ——
-        Hono 的一切都建立在这些之上。<strong>读 MDN 就是在读 Hono 的底层。</strong></td>
-  </tr>
-  <tr>
-    <td><strong>MDN HTTP 指南</strong></td>
-    <td>缓存、CORS、Cookie、安全响应头的权威解释。本教程第 6、9、15、17、18 章的内容在这里有更完整的版本</td>
-  </tr>
-  <tr>
-    <td><strong>web.dev</strong></td>
-    <td>性能优化、Core Web Vitals、可访问性。前端和后端的交界地带</td>
-  </tr>
-  <tr>
-    <td><strong>OWASP Top 10</strong></td>
-    <td>Web 安全的必读清单。第 18 章覆盖了其中大部分，但值得读原文</td>
-  </tr>
-  <tr>
-    <td><strong>HTTP RFC（9110 / 9111）</strong></td>
-    <td>枯燥但权威。遇到「到底该返回哪个状态码」的争论时，这里有答案</td>
-  </tr>
-</table>
-</div>
-
-<h2 id="ecosystem">生态里值得认识的工具</h2>
-
-<div class="tw">
-<table>
-  <tr><th>领域</th><th>工具</th><th>用途</th></tr>
-  <tr><td>校验</td><td>Zod / Valibot / ArkType</td><td>Valibot 体积更小，适合边缘部署</td></tr>
-  <tr><td>数据库</td><td>Drizzle / Prisma / Kysely</td><td>Kysely 是「带类型的 SQL 构造器」，介于原生 SQL 和 ORM 之间</td></tr>
-  <tr><td>认证</td><td>Lucia / better-auth / Auth.js</td><td>不想自己实现会话和 OAuth 时</td></tr>
-  <tr><td>全栈框架</td><td>HonoX</td><td>文件路由 + 孤岛架构，第 16 章介绍过</td></tr>
-  <tr><td>测试</td><td>Vitest / Playwright / MSW</td><td>MSW 用于拦截和模拟外部 HTTP 请求</td></tr>
-  <tr><td>代码质量</td><td>Biome / ESLint + Prettier</td><td>Biome 一个工具搞定检查和格式化</td></tr>
-  <tr><td>可观测性</td><td>Sentry / Axiom / Baselime</td><td>后两个对边缘环境支持较好</td></tr>
-  <tr><td>队列与定时</td><td>Cloudflare Queues / Cron Triggers</td><td>把慢操作移出请求路径</td></tr>
-</table>
-</div>
-
-<h2 id="next">接下来做什么</h2>
-
-<p>看完教程最容易发生的事是「学了但没用上，两个月后忘光」。避免的办法只有一个：<strong>做点东西。</strong></p>
-
-<h3>三个练手项目，难度递增</h3>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128279;</span><h4>短链接服务</h4>
-    <p>
-      涉及：路由、KV 存储、重定向、防滥用限流、点击统计。<br>
-      <strong>一个周末</strong>能做完，而且真的能用。
-    </p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128221;</span><h4>带认证的记事本</h4>
-    <p>
-      涉及：注册登录、会话、数据库 CRUD、权限（只能看自己的）、表单校验、分页。<br>
-      <strong>覆盖本教程八成内容。</strong>
-    </p>
-  </div>
-  <div class="card">
-    <span class="ic">&#127760;</span><h4>API + SPA 全栈应用</h4>
-    <p>
-      涉及：REST 设计、RPC 类型共享、React 前端、文件上传、第三方登录、部署流水线。<br>
-      <strong>接近真实产品的复杂度。</strong>
-    </p>
-  </div>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 做项目时逼自己做这三件事</div>
-  <ol>
-    <li><strong>真的部署上去。</strong>本地能跑和线上能跑之间隔着一整章（第 26 章）的坑。</li>
-    <li><strong>真的写测试。</strong>哪怕只有五个。你会立刻发现哪些代码难测 —— 那通常也是设计有问题的地方。</li>
-    <li><strong>三个月后回来加个功能。</strong>这时你才会真正体会到第 4 章的分层、第 27 章的文档值多少钱。</li>
-  </ol>
-</div>
-
-<h2 id="ask">怎么问出好问题</h2>
-
-<p>
-  卡住时，问问题的质量直接决定你多久能被解答。一个好问题包含：
-</p>
-
-<div class="code" data-lang="text">
+<div class="code" data-lang="bash">
 <pre>
-【环境】
-Hono 4.6.3 · Node 20.11 · 部署在 Cloudflare Workers
+# 看看有哪些可以升
+npm outdated
 
-【我想做什么】
-在中间件里读会话，然后在路由处理函数中用 c.get('user')
+# 安全漏洞
+npm audit
+npm audit fix
 
-【实际发生了什么】
-c.get('user') 永远是 undefined，中间件里的 console.log 确实打印了用户对象
+# 交互式升级（推荐，能看清每个包跨了几个版本）
+npx npm-check-updates -i
+</pre>
+</div>
 
-【最小复现代码】
-（20 行以内，能直接跑起来的）
+<p>更好的做法是让机器人来提醒你。GitHub 自带的 Dependabot 配一个文件就行：</p>
 
-【我已经试过】
-- 确认中间件注册在路由之前
-- 确认 c.set 确实被调用了
-- 查了文档的 Variables 一节，但没找到相关说明
+<div class="code" data-lang="yaml" data-file=".github/dependabot.yml">
+<pre>
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # 把小版本更新合并成一个 PR，减少噪音
+      minor-and-patch:
+        update-types: ["minor", "patch"]
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 「橡皮鸭效应」</div>
+  <div class="t">&#128161; 有测试，升级才敢点合并</div>
   <p>
-    很多人在写完最小复现代码的过程中就自己找到了原因 ——
-    因为把问题精确表达出来，本身就是一次严格的排查。<br>
-    <strong>所以就算最后没发出去，写下来也不亏。</strong>
+    Dependabot 开的 PR 会自动跑你的 CI。如果测试是绿的，
+    小版本更新基本可以直接合并；大版本更新则需要人工看 CHANGELOG。<br>
+    <strong>没有测试的项目，依赖更新只能靠祈祷。</strong>这是第 5 章那些测试的长期回报。
   </p>
 </div>
 
-<h2 id="contribute">参与开源</h2>
+<h3>Node 和运行时版本</h3>
 
-<p>Hono 是个欢迎新人的项目。如果你想回馈：</p>
+<p>
+  Node.js 的 LTS 版本大约 30 个月后停止支持。到期后不再有安全补丁 ——
+  这不是「可以拖一拖」的事。在 <code>package.json</code> 里声明你支持的版本，
+  并在日历上标好升级时间：
+</p>
 
-<ul>
-  <li><strong>改文档。</strong>发现文档里有错、有过时的例子、或者某处让你困惑 —— 提个 PR。
-      这是门槛最低也最受欢迎的贡献。</li>
-  <li><strong>提有质量的 issue。</strong>带最小复现的 bug 报告，对维护者的价值极高。</li>
-  <li><strong>回答别人的问题。</strong>你刚踩过的坑，正是别人现在踩的。</li>
-  <li><strong>写中间件。</strong>做了个通用的东西？发到 npm，或者提交到官方 middleware 仓库。</li>
-  <li><strong>写文章。</strong>把你解决某个问题的过程写出来。搜索引擎会替你把它送到需要的人面前。</li>
-</ul>
-
-<h2 id="last">最后几句</h2>
-
-<div class="box key">
-  <div class="t">&#9733; 三个会一直有用的判断</div>
-  <ol>
-    <li>
-      <strong>「这个响应能给另一个用户看吗？」</strong><br>
-      这一个问题同时决定了：能不能缓存（第 17 章）、能不能放 CDN、
-      有没有数据泄露风险（第 18 章）。
-    </li>
-    <li>
-      <strong>「如果现在同时跑三个实例，会出什么问题？」</strong><br>
-      它会立刻暴露出所有藏在内存里的状态（第 12 章）。
-    </li>
-    <li>
-      <strong>「这个依赖挂了，我的应用会怎样？」</strong><br>
-      数据库、第三方 API、邮件服务 —— 每一个都会挂。想清楚降级方案（第 19 章）。
-    </li>
-  </ol>
+<div class="code" data-lang="json">
+<pre>
+{
+  "engines": { "node": "&gt;=20.0.0" }
+}
+</pre>
 </div>
 
-<p>
-  最后回到第 1 章那句话：<strong>Hono 应用就是一个 <code>(Request) =&gt; Response</code> 的函数，
-  中间件是包在它外面的一层层洋葱皮。</strong>
-</p>
+<h2 id="debt">技术债</h2>
 
 <p>
-  二十八章过去，这句话应该已经从一句抽象的描述，变成了你脑子里一幅具体的图像：
-  请求进来，穿过日志、安全头、会话、认证一层层中间件，
-  到达处理函数，读参数、查数据库、渲染视图，
-  然后响应带着结果原路返回，沿途被压缩、被加上缓存头、被记录耗时。
+  技术债不全是坏事。为了赶上线期而临时写的糙代码，是<strong>主动借的债</strong> ——
+  只要你记得它存在，并且打算还。
 </p>
 
+<div class="code" data-lang="ts">
+<pre>
+// TODO(2026-03): 支持多币种后要重构这里
+// FIXME: 大数据量下这个查询会超时，需要加分页。见 issue #142
+// HACK: 临时绕过第三方接口的 bug，对方修复后（预计 4 月）删掉这段
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 不带上下文的 TODO 等于垃圾</div>
+  <p>
+    <code>// TODO: 优化一下</code> —— 优化什么？谁写的？还需要吗？<br>
+    三年后没人敢删（万一有用呢），也没人会做（不知道要做什么）。<br>
+    <strong>每条 TODO 要包含：要做什么、为什么、什么时候、关联的 issue 编号。</strong>
+    做不到就别写，直接开个 issue。
+  </p>
+</div>
+
+<h3>什么时候该还债</h3>
+
+<div class="tw">
+<table>
+  <tr><th>信号</th><th>说明</th></tr>
+  <tr><td>同一个地方反复出 bug</td><td>这里的设计有问题，不只是这次写错了</td></tr>
+  <tr><td>「改这个要小心，会牵一发动全身」</td><td>耦合太紧，该拆了</td></tr>
+  <tr><td>估一个小需求要三天</td><td>不是需求复杂，是代码在阻碍你</td></tr>
+  <tr><td>新人上手要两周</td><td>结构不清晰或文档缺失</td></tr>
+  <tr><td>没人敢碰某个文件</td><td>最危险的信号。它迟早会炸</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 别搞「重构冲刺」</div>
+  <p>
+    「我们花两周专门重构」这种计划几乎总是失败：它没有产出可见价值，
+    第一个紧急需求来了就被砍掉，留下一堆半成品，比原来更乱。<br>
+    <strong>更有效的是「童子军规则」：每次经过一段代码，让它比你来的时候好一点点。</strong>
+    改 bug 时顺手补个测试，加功能时顺手拆掉一个太长的函数。积少成多，而且永远不会被砍。
+  </p>
+</div>
+
+<h2 id="invisible">让隐形故障显形</h2>
+
 <p>
-  剩下的，就是去写点什么了。
+  最危险的故障是那种「网站看起来一切正常」的故障：
 </p>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128231;</span><h4>邮件停了</h4>
+    <p>API Key 过期，发信全部失败，但代码里 catch 住了没抛出来。用户注册后收不到确认邮件，也没人报告。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128179;</span><h4>支付回调失败</h4>
+    <p>用户付了钱，但你的系统没收到通知，订单一直是「待支付」。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128200;</span><h4>数据没同步</h4>
+    <p>定时任务在两个月前就悄悄失败了，报表数据一直停在那天。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128190;</span><h4>备份停了</h4>
+    <p>存储桶权限变了，备份任务每次都失败。等到需要恢复时才发现。</p>
+  </div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 解法：监控「应该发生的事」，而不只是「不该发生的事」</div>
+  <p>
+    错误监控只能发现「发生了错误」。但上面这些故障的特征是<strong>什么都没发生</strong>。
+    所以要反过来监控：
+  </p>
+  <ul>
+    <li><strong>心跳</strong>：定时任务每次成功后 ping 一个监控服务（如 Healthchecks.io）。
+        超时没收到 ping 就告警。</li>
+    <li><strong>业务指标</strong>：「过去一小时的订单数为 0」在半夜可能正常，在中午一定是出事了。</li>
+    <li><strong>合成监控</strong>：定期用脚本走一遍关键流程（注册 → 下单 → 收邮件），确认端到端是通的。</li>
+  </ul>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 定时任务的心跳
+export async function syncDailyReports(env: Env) {
+  try {
+    await doTheWork()
+    // 成功了才 ping
+    await fetch(env.HEARTBEAT_URL)
+  } catch (err) {
+    reportToSentry(err)
+    throw err     // 让平台知道这次执行失败了
+  }
+}
+</pre>
+</div>
+
+<h2 id="reuse">提炼可复用的东西</h2>
+
+<p>
+  维护期最常做的一件事，是发现「这段逻辑我已经写第三遍了」。
+  Hono 里最自然的复用单位是<strong>中间件</strong>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/middleware/pagination.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+import { z } from 'zod'
+
+const schema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  perPage: z.coerce.number().int().min(1).max(100).default(20),
+})
+
+export const pagination = createMiddleware&lt;{
+  Variables: { pagination: { limit: number; offset: number } }
+}&gt;(async (c, next) =&gt; {
+  const parsed = schema.safeParse(c.req.query())
+  if (!parsed.success) {
+    return c.json({ error: { message: '分页参数不合法' } }, 400)
+  }
+
+  const { page, perPage } = parsed.data
+  c.set('pagination', { limit: perPage, offset: (page - 1) * perPage })
+
+  await next()
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 现在所有列表接口都能直接用
+app.get('/api/v1/vacations', pagination, async (c) =&gt; {
+  const { limit, offset } = c.get('pagination')
+  const data = await repo.list({ limit, offset })
+  return c.json({ data })
+})
+</pre>
+</div>
+
+<h3>什么时候抽出去</h3>
+
+<div class="box tip">
+  <div class="t">&#128161; 三次规则</div>
+  <p>
+    第一次写：就那么写。<br>
+    第二次写：注意到了，但还不动 —— 两处相似不代表它们会一直相似。<br>
+    <strong>第三次写：抽出来。</strong>这时候你已经见过三个变体，
+    知道哪些部分是真的通用，哪些应该做成参数。<br>
+    <em>过早抽象的代价，往往比重复更高。</em>
+  </p>
+</div>
+
+<h3>跨项目复用</h3>
+
+<p>
+  如果你有多个 Hono 项目共用同一套中间件，可以发成私有 npm 包：
+</p>
+
+<div class="code" data-lang="json" data-file="package.json">
+<pre>
+{
+  "name": "@meadowlark/hono-kit",
+  "version": "1.2.0",
+  "type": "module",
+  "exports": {
+    "./pagination": "./dist/pagination.js",
+    "./session": "./dist/session.js",
+    "./rate-limit": "./dist/rate-limit.js"
+  },
+  "peerDependencies": { "hono": "^4.0.0" }
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 注意 <code>peerDependencies</code></div>
+  <p>
+    共享库不应该把 <code>hono</code> 列进 <code>dependencies</code>，否则项目里会装两份 Hono，
+    导致类型不兼容和奇怪的运行时问题。用 <code>peerDependencies</code> 声明「我需要宿主项目提供 Hono」。
+  </p>
+</div>
+
+<h2 id="docs">文档</h2>
+
+<p>
+  文档不用多，但有几样是必须的。而且要放在<strong>代码仓库里</strong>，
+  这样它才会跟着代码一起演进：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>文件</th><th>回答什么问题</th></tr>
+  <tr><td><code>README.md</code></td><td>这是什么？怎么在本地跑起来？（新人第一天要看的）</td></tr>
+  <tr><td><code>CONTRIBUTING.md</code></td><td>怎么提交改动？分支怎么命名？提交信息什么格式？</td></tr>
+  <tr><td><code>docs/architecture.md</code></td><td>系统由哪几块组成？数据怎么流动？</td></tr>
+  <tr><td><code>docs/runbook.md</code></td><td><strong>半夜出故障时看的</strong>：怎么回滚？日志在哪？谁能联系上？</td></tr>
+  <tr><td><code>docs/decisions/</code></td><td>为什么选了 A 而不是 B？（避免三年后有人重新纠结同一个问题）</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 记录「为什么」，而不是「是什么」</div>
+  <p>
+    「这里用了 Drizzle」—— 看代码就知道，不用写。<br>
+    「<strong>为什么</strong>用 Drizzle 而不是 Prisma：因为要跑在 Cloudflare Workers 上，
+    Prisma 当时的边缘支持还不成熟」—— 这个必须写。<br>
+    代码能表达「是什么」，只有文档能保存「为什么」。而「为什么」恰恰是最容易随人流失的东西。
+  </p>
+</div>
+
+<h2 id="routine">日常节奏</h2>
+
+<div class="box tip">
+  <div class="t">&#128161; 一个可执行的维护清单</div>
+  <p><strong>每周（15 分钟）</strong></p>
+  <ul>
+    <li>处理 Dependabot 的 PR</li>
+    <li>扫一眼错误监控里的新增错误</li>
+    <li>看一眼响应时间趋势有没有异常</li>
+  </ul>
+  <p><strong>每月（1 小时）</strong></p>
+  <ul>
+    <li><code>npm audit</code> 并处理高危项</li>
+    <li>检查证书、API Key、订阅的到期时间</li>
+    <li>看看日志里有没有反复出现但没人管的告警</li>
+  </ul>
+  <p><strong>每季度（半天）</strong></p>
+  <ul>
+    <li>做一次备份恢复演练</li>
+    <li>回顾技术债清单，挑一两项还掉</li>
+    <li>更新 README 和架构文档</li>
+    <li>检查运行时和主要依赖的大版本升级计划</li>
+  </ul>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="每周、每月、每季度的维护节奏">
+  <rect class="bx-g" x="20" y="20" width="230" height="240" rx="10"/>
+  <text class="ttl on-g" x="135" y="46" text-anchor="middle">每周 · 15 分钟</text>
+  <text class="sm" x="36" y="76">· 处理依赖更新 PR</text>
+  <text class="sm" x="36" y="98">· 扫一眼新增错误</text>
+  <text class="sm" x="36" y="120">· 看响应时间趋势</text>
+  <text class="sm on-g" x="36" y="158">目标：不让问题攒起来</text>
+  <text class="sm" x="36" y="196">花的是最便宜的时间：</text>
+  <text class="sm" x="36" y="216">此刻改一行，</text>
+  <text class="sm" x="36" y="236">胜过半年后改一百行</text>
+
+  <rect class="bx-b" x="266" y="20" width="230" height="240" rx="10"/>
+  <text class="ttl on-b" x="381" y="46" text-anchor="middle">每月 · 1 小时</text>
+  <text class="sm" x="282" y="76">· npm audit 并修高危</text>
+  <text class="sm" x="282" y="98">· 检查证书 / Key 到期</text>
+  <text class="sm" x="282" y="120">· 清理反复出现的告警</text>
+  <text class="sm on-b" x="282" y="158">目标：不被到期日偷袭</text>
+  <text class="sm" x="282" y="196">「证书忘了续」是</text>
+  <text class="sm" x="282" y="216">最愚蠢也最常见的</text>
+  <text class="sm" x="282" y="236">线上事故原因之一</text>
+
+  <rect class="bx-p" x="512" y="20" width="228" height="240" rx="10"/>
+  <text class="ttl on-p" x="626" y="46" text-anchor="middle">每季度 · 半天</text>
+  <text class="sm" x="528" y="76">· 备份恢复演练</text>
+  <text class="sm" x="528" y="98">· 还一两项技术债</text>
+  <text class="sm" x="528" y="120">· 更新文档</text>
+  <text class="sm" x="528" y="142">· 规划大版本升级</text>
+  <text class="sm on-p" x="528" y="180">目标：让系统不腐化</text>
+  <text class="sm" x="528" y="216">这是唯一会被</text>
+  <text class="sm" x="528" y="236">「更紧急的事」挤掉的一项</text>
+</svg>
+<figcaption>图 28-2　把维护变成日程，而不是靠想起来</figcaption>
+</figure>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>上线前就写清楚项目预期寿命和负责人。</li>
+  <li>依赖更新的成本是指数增长的，每周一点点远比两年一次便宜。</li>
+  <li>技术债要么带上下文记录下来，要么当场还掉。别写没有信息的 TODO。</li>
+  <li>用童子军规则代替重构冲刺。</li>
+  <li>监控「应该发生的事」，让隐形故障显形。</li>
+  <li>三次规则决定什么时候抽象；共享库用 <code>peerDependencies</code>。</li>
+  <li>文档记录「为什么」，尤其是运维手册和技术决策记录。</li>
+</ul>
 
 <div class="exercise">
-  <h3>最后一个练习</h3>
+  <h3>动手练习</h3>
   <ol>
-    <li>从上面三个练手项目里挑一个，今天就把仓库建起来，写出第一个路由。</li>
-    <li>给它配好第 5 章的测试和第 26 章的部署流水线 —— 在项目还小的时候做，成本几乎为零。</li>
-    <li>把它部署到线上，发给一个朋友看。</li>
-    <li>在 README 里写清楚：这是什么、怎么跑、你为什么做它。</li>
+    <li>给项目配上 Dependabot，看看第一批 PR 里有哪些包已经落后了很多个版本。</li>
+    <li>跑 <code>npm audit</code>，把高危漏洞处理掉。如果某个漏洞暂时无法修复，写下原因和影响评估。</li>
+    <li>搜一遍代码里的 <code>TODO</code> 和 <code>FIXME</code>。有多少条你已经不记得是什么意思了？把它们补全或删掉。</li>
+    <li>写一份 <code>docs/runbook.md</code>：假设你今晚不在，同事要处理线上故障，他需要知道什么？</li>
+    <li>找出你项目里写了三遍以上的逻辑，把它抽成一个中间件。</li>
+    <li>给一个定时任务加上心跳监控，然后故意让它失败，确认你收到了告警。</li>
   </ol>
 </div>
 

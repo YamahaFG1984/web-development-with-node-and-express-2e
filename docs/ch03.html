@@ -427,7 +427,7 @@ app.use('/*', serveStatic({ root: './public' }))
     <tr><td>Node.js</td><td><code>@hono/node-server/serve-static</code></td></tr>
     <tr><td>Bun</td><td><code>hono/bun</code></td></tr>
     <tr><td>Deno</td><td><code>hono/deno</code></td></tr>
-    <tr><td>Cloudflare Workers</td><td>用平台的静态资源绑定（第 17 章讲）</td></tr>
+    <tr><td>Cloudflare Workers</td><td>用平台的静态资源绑定（第 18 章讲）</td></tr>
   </table></div>
 </div>
 
@@ -471,7 +471,7 @@ app.get('/about', (c) =&gt; c.html(&lt;About fortune={getFortune()} /&gt;))
   <p>
     <code>/img/logo.png</code> 是<strong>静态资源</strong>：每次请求返回的字节完全一样，可以放 CDN，可以长期缓存。<br>
     <code>/about</code> 是<strong>视图</strong>：每次请求都要执行代码才能算出结果。哪怕结果碰巧一样，它也不能被无脑缓存。<br>
-    这个区分会在第 17 章（静态资源与 CDN）变得非常重要。
+    这个区分会在第 18 章（静态资源与 CDN）变得非常重要。
   </p>
 </div>
 

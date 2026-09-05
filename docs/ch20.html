@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 20 章 · 并发与数据一致性 — Hono 全栈开发教程</title>
+<title>第 20 章 · 集成第三方 API — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="20">
@@ -12,778 +12,592 @@
 <main>
 
 <span class="chapter-eyebrow">第 20 章</span>
-<h1>并发与数据一致性</h1>
+<h1>集成第三方 API</h1>
 <p class="lede">
-  第 13 章教了怎么读写数据库。这一章要问一个它没问的问题：
-  <strong>如果两个请求在同一毫秒到达，会发生什么？</strong>
-  超卖、重复扣款、丢失更新 —— 线上事故的大头都藏在这里，而它们在本地几乎不可能复现。
+  天气、地图、支付、短信、AI —— 现代应用的很大一部分能力来自别人的服务。
+  这一章讲怎么调用它们，以及更重要的：<strong>怎么在它们出问题时不被拖垮</strong>。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>看懂竞态条件是怎么产生的，以及为什么本地测不出来</li>
-    <li>掌握事务和隔离级别，知道「读到了脏数据」到底是怎么回事</li>
-    <li>会用乐观锁和悲观锁，知道各自的适用场景</li>
-    <li>用原子更新和数据库约束兜底</li>
-    <li>实现幂等，让重复请求不造成重复后果</li>
-    <li>写出能<strong>真的复现</strong>竞态的测试</li>
+    <li>在服务端用 <code>fetch</code> 调外部 API，处理超时和重试</li>
+    <li>给云雀旅行的天气组件接上真实数据</li>
+    <li>用缓存把外部调用次数降下来</li>
+    <li>做地理编码并在页面上显示地图</li>
+    <li>用降级和熔断保证「第三方挂了，我不挂」</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="why">为什么本地测不出来</h2>
-
-<p>
-  你一个人点页面，请求是一个接一个的。线上有一千个人同时点，请求是<strong>交错</strong>的。
-  这是两种完全不同的世界。
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-// 看起来完全正常的「秒杀」代码
-app.post('/vacations/:sku/book', async (c) =&gt; {
-  const sku = c.req.param('sku')
-
-  const v = await repo.findBySku(sku)            // ① 读
-  if (v.remaining &lt;= 0) {                        // ② 判断
-    return c.json({ error: '已售罄' }, 409)
-  }
-
-  await repo.update(sku, { remaining: v.remaining - 1 })   // ③ 写
-  await repo.createOrder({ sku, userId })
-
-  return c.json({ ok: true })
-})
-</pre>
-</div>
-
-<p>这段代码有个致命问题。把两个请求的执行时刻画在一条时间轴上就看清楚了：</p>
+<h2 id="where">在哪里调：前端还是后端</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="两个请求交错执行导致超卖">
-  <text class="ttl" x="20" y="22">库存 remaining = 1，两个用户同时下单</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="前端直连与后端代理两种方式">
+  <rect class="bx-r" x="20" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-r" x="192" y="44" text-anchor="middle">浏览器直接调第三方</text>
+  <text class="sm" x="36" y="72">浏览器 → api.weather.gov</text>
+  <text class="sm on-r" x="36" y="102">&#10007; API Key 会暴露在前端代码里</text>
+  <text class="sm on-r" x="36" y="124">&#10007; 每个用户都消耗一次配额</text>
+  <text class="sm on-r" x="36" y="146">&#10007; 对方不支持 CORS 就调不通</text>
+  <text class="sm on-r" x="36" y="168">&#10007; 没法缓存，没法统一处理错误</text>
+  <text class="sm on-g" x="36" y="198">&#10003; 唯一合适的情况：地图 SDK 这类</text>
+  <text class="sm on-g" x="36" y="216">&nbsp;&nbsp;&nbsp;本来就为前端设计、Key 可域名限制的</text>
 
-  <path class="ln-d" d="M120 40 V270"/>
-  <path class="ln-d" d="M420 40 V270"/>
-  <text class="sm" x="60" y="56">时间 ↓</text>
-
-  <text class="ttl on-b" x="150" y="56">请求 A</text>
-  <text class="ttl on-p" x="450" y="56">请求 B</text>
-  <text class="ttl on-g" x="640" y="56">数据库</text>
-
-  <rect class="bx-b" x="140" y="70" width="200" height="30" rx="6"/>
-  <text class="sm" x="240" y="90" text-anchor="middle">① 读到 remaining = 1</text>
-  <text class="mono sm on-g" x="640" y="90" text-anchor="middle">remaining = 1</text>
-
-  <rect class="bx-p" x="440" y="108" width="200" height="30" rx="6"/>
-  <text class="sm" x="540" y="128" text-anchor="middle">① 读到 remaining = 1</text>
-  <text class="mono sm on-g" x="700" y="128" text-anchor="middle">1</text>
-
-  <rect class="bx-b" x="140" y="146" width="200" height="30" rx="6"/>
-  <text class="sm" x="240" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
-
-  <rect class="bx-p" x="440" y="146" width="200" height="30" rx="6"/>
-  <text class="sm" x="540" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
-
-  <rect class="bx-r" x="140" y="184" width="200" height="30" rx="6"/>
-  <text class="sm" x="240" y="204" text-anchor="middle">③ 写入 remaining = 0</text>
-  <text class="mono sm on-g" x="700" y="204" text-anchor="middle">0</text>
-
-  <rect class="bx-r" x="440" y="222" width="200" height="30" rx="6"/>
-  <text class="sm" x="540" y="242" text-anchor="middle">③ 写入 remaining = 0</text>
-  <text class="mono sm on-g" x="700" y="242" text-anchor="middle">0</text>
-
-  <rect class="bx-r" x="120" y="264" width="520" height="30" rx="6"/>
-  <text class="sm on-r" x="380" y="284" text-anchor="middle">结果：库存只有 1 份，却卖出了 2 单。而且库存数字看起来是「对」的</text>
+  <rect class="bx-g" x="395" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">后端代理（推荐）</text>
+  <text class="sm" x="411" y="72">浏览器 → 你的 Hono → api.weather.gov</text>
+  <text class="sm on-g" x="411" y="102">&#10003; Key 留在服务端，永不外泄</text>
+  <text class="sm on-g" x="411" y="124">&#10003; 一次调用可以服务成千上万用户</text>
+  <text class="sm on-g" x="411" y="146">&#10003; 没有 CORS 问题</text>
+  <text class="sm on-g" x="411" y="168">&#10003; 能缓存、能重试、能降级</text>
+  <text class="sm on-g" x="411" y="190">&#10003; 能把对方的数据格式转成你想要的</text>
+  <text class="sm" x="411" y="216">代价：多一跳延迟（缓存后可忽略）</text>
 </svg>
-<figcaption>图 20-1　「读 → 判断 → 写」这个模式只要不是原子的，就一定会出问题</figcaption>
+<figcaption>图 20-1　默认走后端代理，除非有明确理由</figcaption>
 </figure>
 
-<div class="box key">
-  <div class="t">&#9733; 记住这个模式的名字</div>
+<div class="box warn">
+  <div class="t">&#9888; API Key 放前端 = 公开你的信用卡</div>
   <p>
-    <strong>check-then-act</strong>（先检查再行动）—— 先读一个值，根据它做判断，然后基于判断去写。
-    只要「读」和「写」之间有任何间隙，另一个请求就可能挤进来，让你的判断在写入时已经过期了。
-  </p>
-  <p>
-    这个模式在代码里到处都是：检查库存再扣减、检查邮箱是否已注册再插入、
-    检查余额是否够再扣款、检查文件是否存在再创建。<strong>它们全都有同一个 bug。</strong>
+    「打包压缩之后看不出来」是错觉 —— 打开浏览器的 Network 面板，
+    Key 就明晃晃写在请求头或 URL 里。有人写过爬虫专门扫 GitHub 和网页找泄露的 Key。
+    <strong>能计费的 Key 一律不进前端。</strong>
   </p>
 </div>
 
-<h3>为什么开发时发现不了</h3>
-
-<div class="tw">
-<table>
-  <tr><th>本地开发</th><th>生产环境</th></tr>
-  <tr><td>你一个人手动点击</td><td>成百上千用户同时操作</td></tr>
-  <tr><td>请求间隔以秒计</td><td>请求间隔以毫秒计，甚至完全重叠</td></tr>
-  <tr><td>一个进程</td><td>多个实例 / 多个边缘节点</td></tr>
-  <tr><td>数据库在本机，延迟 0.1 ms</td><td>网络延迟 5–50 ms，「间隙」被放大几百倍</td></tr>
-  <tr><td>测试是串行跑的</td><td>—</td></tr>
-</table>
-</div>
+<h2 id="fetch">服务端的 fetch</h2>
 
 <p>
-  最后一行尤其关键：<strong>你写的单元测试和集成测试默认都是串行的</strong>，
-  它们永远不会触发竞态。除非你专门去写并发测试（本章最后会讲）。
-</p>
-
-<h2 id="scenarios">四种经典事故</h2>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128230;</span><h4>超卖</h4>
-    <p>库存 1 份卖出 2 单。上面刚演示过。同类：限量优惠券被多领、活动名额超出。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128184;</span><h4>重复扣款</h4>
-    <p>用户网络卡顿点了两次提交，或者客户端自动重试了一次。两笔订单，两次扣钱。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128260;</span><h4>丢失更新</h4>
-    <p>两个管理员同时编辑同一篇文章，后保存的人把前一个人的修改整个覆盖掉了，而且<strong>双方都没收到任何提示</strong>。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128100;</span><h4>重复注册</h4>
-    <p>同一邮箱同时提交两次，两条 <code>SELECT</code> 都说「没注册过」，于是插入了两个账号。</p>
-  </div>
-</div>
-
-<h2 id="transaction">事务</h2>
-
-<p>
-  事务把多个操作打包成一个「全成功或全失败」的单元。这是数据库给你的第一件武器。
+  Hono 的运行时都内置了 <code>fetch</code>，不用装 axios 之类的库。但直接裸用有几个问题：
 </p>
 
 <div class="code" data-lang="ts">
 <pre>
-import { drizzle } from 'drizzle-orm/d1'
-import { eq, sql } from 'drizzle-orm'
-
-await db.transaction(async (tx) =&gt; {
-  // 从 A 账户扣钱
-  await tx.update(accounts)
-    .set({ balance: sql`${accounts.balance} - ${amount}` })
-    .where(eq(accounts.id, fromId))
-
-  // 给 B 账户加钱
-  await tx.update(accounts)
-    .set({ balance: sql`${accounts.balance} + ${amount}` })
-    .where(eq(accounts.id, toId))
-
-  // 记一笔流水
-  await tx.insert(transfers).values({ fromId, toId, amount })
-
-  // 任何一步抛异常 → 整个事务回滚，前面的操作全部撤销
-})
+// ❌ 三个隐患
+const res = await fetch(url)      // ① 对方不响应就永远挂着
+const data = await res.json()     // ② 返回 500 时 res.ok 是 false，但这里不会抛错
 </pre>
 </div>
 
-<h3>ACID 是什么</h3>
+<p>写一个带超时、重试和错误检查的封装：</p>
 
-<div class="tw">
-<table>
-  <tr><th>字母</th><th>含义</th><th>白话</th></tr>
-  <tr><td><strong>A</strong>tomicity 原子性</td><td>要么全做，要么全不做</td><td>不会出现「钱扣了但没到账」</td></tr>
-  <tr><td><strong>C</strong>onsistency 一致性</td><td>事务前后数据都满足约束</td><td>余额不会变成负数（如果你定义了 CHECK 约束）</td></tr>
-  <tr><td><strong>I</strong>solation 隔离性</td><td>并发事务互不干扰</td><td><strong>本章的重点，也是最容易误解的一个</strong></td></tr>
-  <tr><td><strong>D</strong>urability 持久性</td><td>提交后即使断电也不丢</td><td>数据库替你保证</td></tr>
-</table>
+<div class="code" data-lang="ts" data-file="src/lib/http.ts">
+<pre>
+export class HttpError extends Error {
+  constructor(public status: number, public url: string, message: string) {
+    super(message)
+  }
+}
+
+type Options = RequestInit &amp; {
+  timeoutMs?: number
+  retries?: number
+}
+
+export async function fetchJson&lt;T&gt;(url: string, opts: Options = {}): Promise&lt;T&gt; {
+  const { timeoutMs = 5000, retries = 2, ...init } = opts
+
+  for (let attempt = 0; attempt &lt;= retries; attempt++) {
+    // AbortSignal.timeout 是标准 API，所有运行时都有
+    const signal = AbortSignal.timeout(timeoutMs)
+
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal,
+        headers: {
+          'User-Agent': 'MeadowlarkTravel/1.0 (contact@meadowlarktravel.com)',
+          Accept: 'application/json',
+          ...init.headers,
+        },
+      })
+
+      // 4xx 是我们的问题，重试没用，直接抛
+      if (res.status &gt;= 400 &amp;&amp; res.status &lt; 500) {
+        throw new HttpError(res.status, url, `客户端错误 ${res.status}`)
+      }
+
+      // 5xx 和 429 可以重试
+      if (!res.ok) {
+        throw new HttpError(res.status, url, `服务端错误 ${res.status}`)
+      }
+
+      return (await res.json()) as T
+    } catch (err) {
+      const isLast = attempt === retries
+      const notRetryable = err instanceof HttpError &amp;&amp; err.status &lt; 500 &amp;&amp; err.status !== 429
+
+      if (isLast || notRetryable) throw err
+
+      // 指数退避 + 随机抖动，避免所有实例同时重试
+      const delay = 2 ** attempt * 200 + Math.random() * 200
+      await new Promise((r) =&gt; setTimeout(r, delay))
+    }
+  }
+
+  throw new Error('unreachable')
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么要「指数退避 + 抖动」</div>
+  <p>
+    对方服务过载时，如果所有客户端都在固定 1 秒后重试，就会形成一波又一波的冲击，
+    让它永远缓不过来 —— 这叫<strong>惊群效应</strong>。<br>
+    每次等待时间翻倍（200ms、400ms、800ms）给对方喘息时间；
+    再加一点随机抖动，把重试时刻打散。
+  </p>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 事务 ≠ 解决了并发问题</div>
+  <div class="t">&#9888; 不是所有请求都能重试</div>
   <p>
-    这是最常见的误解。把上面那段超卖代码包进事务里，<strong>它照样超卖</strong>。<br>
-    因为默认的隔离级别下，两个事务可以同时读到 <code>remaining = 1</code>，
-    各自判断「够」，然后各自写入 0。事务保证的是「你这几步要么全成要么全败」，
-    <em>不保证「别人不会在中间插队」</em>。
+    <strong>幂等</strong>的操作（GET、PUT、DELETE）重试是安全的。<br>
+    <strong>非幂等</strong>的操作（POST 创建订单、发起支付）重试可能导致重复下单。
+    这类请求要么不重试，要么让对方支持「幂等键」（每次请求带一个唯一 ID，对方据此去重）。
+    反过来，<strong>你自己的接口也该支持幂等键</strong>，否则别人重试你时同样会出问题 —— 见第 21 章。
   </p>
 </div>
 
-<h3>隔离级别</h3>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="四种隔离级别与它们各自允许的异常现象">
-  <text class="ttl" x="20" y="22">隔离级别越高越安全，但并发性能越差</text>
-
-  <rect class="bx-r" x="20" y="36" width="175" height="120" rx="10"/>
-  <text class="ttl on-r" x="107" y="58" text-anchor="middle">读未提交</text>
-  <text class="sm" x="107" y="76" text-anchor="middle">Read Uncommitted</text>
-  <text class="sm on-r" x="34" y="102">✗ 脏读</text>
-  <text class="sm on-r" x="34" y="122">✗ 不可重复读</text>
-  <text class="sm on-r" x="34" y="142">✗ 幻读</text>
-
-  <rect class="bx-a" x="205" y="36" width="175" height="120" rx="10"/>
-  <text class="ttl on-a" x="292" y="58" text-anchor="middle">读已提交</text>
-  <text class="sm" x="292" y="76" text-anchor="middle">Read Committed</text>
-  <text class="sm on-g" x="219" y="102">✓ 无脏读</text>
-  <text class="sm on-r" x="219" y="122">✗ 不可重复读</text>
-  <text class="sm on-r" x="219" y="142">✗ 幻读</text>
-
-  <rect class="bx-b" x="390" y="36" width="175" height="120" rx="10"/>
-  <text class="ttl on-b" x="477" y="58" text-anchor="middle">可重复读</text>
-  <text class="sm" x="477" y="76" text-anchor="middle">Repeatable Read</text>
-  <text class="sm on-g" x="404" y="102">✓ 无脏读</text>
-  <text class="sm on-g" x="404" y="122">✓ 可重复读</text>
-  <text class="sm on-r" x="404" y="142">✗ 幻读（部分实现有）</text>
-
-  <rect class="bx-g" x="575" y="36" width="165" height="120" rx="10"/>
-  <text class="ttl on-g" x="657" y="58" text-anchor="middle">串行化</text>
-  <text class="sm" x="657" y="76" text-anchor="middle">Serializable</text>
-  <text class="sm on-g" x="589" y="102">✓ 全都没有</text>
-  <text class="sm on-r" x="589" y="128">代价：并发低，</text>
-  <text class="sm on-r" x="589" y="146">冲突时事务被中止</text>
-
-  <rect class="bx-d" x="20" y="172" width="720" height="98" rx="10"/>
-  <text class="ttl" x="36" y="194">三种异常现象</text>
-  <text class="sm" x="36" y="216">脏读：读到了别人还没提交的数据，而对方随后回滚了 —— 你读到的是从未存在过的值</text>
-  <text class="sm" x="36" y="238">不可重复读：同一个事务里读两次同一行，值不一样（中间被别人改了并提交）</text>
-  <text class="sm" x="36" y="260">幻读：同一个查询执行两次，第二次多出了几行（中间被别人插入了）</text>
-</svg>
-<figcaption>图 20-2　PostgreSQL 和 MySQL 的默认级别都挡不住丢失更新</figcaption>
-</figure>
-
-<div class="box note">
-  <div class="t">&#9432; 各数据库的默认级别</div>
-  <ul>
-    <li><strong>PostgreSQL</strong>：Read Committed</li>
-    <li><strong>MySQL (InnoDB)</strong>：Repeatable Read</li>
-    <li><strong>SQLite / Cloudflare D1</strong>：Serializable（因为它本质上串行执行写操作）</li>
-  </ul>
-  <p>
-    注意 D1 那一行 —— 如果你的应用只跑在 D1 上，很多并发问题会自动消失。
-    但这不是可以不理解它们的理由：一旦换成 Postgres，或者你的逻辑跨了数据库和 KV，问题立刻回来。
-  </p>
-</div>
-
-<h2 id="atomic">最好的办法：让数据库来判断</h2>
+<h2 id="weather">给天气组件接上真数据</h2>
 
 <p>
-  在讲锁之前，先说一个更简单也更该优先考虑的思路：
-  <strong>把「读—判断—写」压缩成一条 SQL，让判断发生在数据库内部。</strong>
+  第 7 章我们做了一个天气组件，用的是假数据。现在换成美国国家气象局的真实 API
+  （它免费、不需要 Key，正好用来演示）。
 </p>
 
-<div class="vs">
-  <div class="old">
-    <div class="h">&#10060; 在应用里判断</div>
-    <div class="code" data-lang="ts"><pre>
-const v = await repo.findBySku(sku)
-if (v.remaining &lt;= 0) {
-  return c.json({ error: '已售罄' }, 409)
-}
-await repo.update(sku, {
-  remaining: v.remaining - 1
-})
-</pre></div>
-  </div>
-  <div class="new">
-    <div class="h">&#9989; 让数据库判断</div>
-    <div class="code" data-lang="ts"><pre>
-const rows = await db
-  .update(vacations)
-  .set({
-    remaining: sql`${vacations.remaining} - 1`
-  })
-  .where(and(
-    eq(vacations.sku, sku),
-    gt(vacations.remaining, 0)   // ← 关键
-  ))
-  .returning({ left: vacations.remaining })
+<div class="code" data-lang="ts" data-file="src/lib/weather.ts">
+<pre>
+import { fetchJson } from './http'
 
-if (rows.length === 0) {
-  return c.json({ error: '已售罄' }, 409)
+export type Forecast = {
+  name: string
+  weather: string
+  temp: string
+  iconUrl: string
+  forecastUrl: string
 }
-</pre></div>
-  </div>
+
+const LOCATIONS = [
+  { name: '波特兰', lat: 45.5155, lng: -122.6793 },
+  { name: '本德',   lat: 44.0582, lng: -121.3153 },
+  { name: '曼扎尼塔', lat: 45.7184, lng: -123.9351 },
+]
+
+async function fetchOne(loc: (typeof LOCATIONS)[number]): Promise&lt;Forecast&gt; {
+  // 第一步：用经纬度换到预报接口地址
+  const points = await fetchJson&lt;{ properties: { forecast: string } }&gt;(
+    `https://api.weather.gov/points/${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
+  )
+
+  // 第二步：取预报
+  const data = await fetchJson&lt;{
+    properties: {
+      periods: {
+        shortForecast: string
+        temperature: number
+        temperatureUnit: string
+        icon: string
+      }[]
+    }
+  }&gt;(points.properties.forecast)
+
+  const now = data.properties.periods[0]
+
+  return {
+    name: loc.name,
+    weather: now.shortForecast,
+    temp: `${now.temperature} °${now.temperatureUnit}`,
+    iconUrl: now.icon,
+    forecastUrl: points.properties.forecast,
+  }
+}
+
+export async function getForecasts(): Promise&lt;Forecast[]&gt; {
+  // 并发请求，而不是一个接一个
+  const results = await Promise.allSettled(LOCATIONS.map(fetchOne))
+
+  // 部分失败不影响其他，只是少显示一个城市
+  return results
+    .filter((r): r is PromiseFulfilledResult&lt;Forecast&gt; =&gt; r.status === 'fulfilled')
+    .map((r) =&gt; r.value)
+}
+</pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 为什么这样就安全了</div>
+  <div class="t">&#9733; <code>Promise.allSettled</code> 还是 <code>Promise.all</code></div>
   <p>
-    单条 <code>UPDATE</code> 在数据库内部是<strong>原子</strong>的 ——
-    数据库会对这一行加锁，判断和写入之间没有任何间隙可以插队。<br>
-    <code>WHERE remaining &gt; 0</code> 不成立时，这条语句<strong>影响 0 行</strong>，
-    <code>returning</code> 返回空数组，你据此判断「抢完了」。<br>
-    两个请求同时执行，数据库会让它们排队：第一个把 1 改成 0，第二个的 <code>WHERE</code> 不成立，
-    影响 0 行。<strong>不会超卖。</strong>
+    <code>Promise.all</code>：任何一个失败，整个都失败。适合「缺一不可」的场景。<br>
+    <code>Promise.allSettled</code>：等所有的都结束，分别报告成败。<br>
+    天气组件里，一个城市取不到不该让整个组件消失 —— 所以用 <code>allSettled</code>。
   </p>
 </div>
 
-<h3>约束是最后一道防线</h3>
+<h2 id="cache">缓存：最重要的一步</h2>
 
-<div class="code" data-lang="sql">
+<p>
+  上面的代码每次页面渲染都会打 6 次外部请求。一千个用户访问首页就是 6000 次 ——
+  又慢、又可能被对方限流、还可能产生费用。天气数据 15 分钟更新一次就够了。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/cached.ts">
 <pre>
--- 库存不能为负，写进表定义里
-ALTER TABLE vacations ADD CONSTRAINT remaining_non_negative
-  CHECK (remaining &gt;= 0);
+type Entry&lt;T&gt; = { value: T; expiresAt: number }
 
--- 一个邮箱只能注册一次
-CREATE UNIQUE INDEX idx_users_email ON users (lower(email));
+/**
+ * 把一个异步函数包装成带缓存的版本。
+ * 关键特性：缓存过期后如果刷新失败，会继续返回旧数据（stale-while-error）
+ */
+export function withCache&lt;T&gt;(
+  fn: () =&gt; Promise&lt;T&gt;,
+  ttlMs: number
+): () =&gt; Promise&lt;T&gt; {
+  let entry: Entry&lt;T&gt; | null = null
+  let inflight: Promise&lt;T&gt; | null = null
 
--- 同一个用户对同一个套餐只能有一条「到季通知」
-CREATE UNIQUE INDEX idx_listener ON in_season_listeners (email, sku);
+  return async () =&gt; {
+    const now = Date.now()
+
+    // 缓存有效，直接返回
+    if (entry &amp;&amp; entry.expiresAt &gt; now) return entry.value
+
+    // 已经有一个请求在路上了，跟着它就行（避免并发时打出多个请求）
+    if (inflight) return inflight
+
+    inflight = fn()
+      .then((value) =&gt; {
+        entry = { value, expiresAt: Date.now() + ttlMs }
+        return value
+      })
+      .catch((err) =&gt; {
+        // 刷新失败：有旧数据就先用旧的，总比页面报错强
+        if (entry) {
+          console.warn('刷新失败，继续使用过期数据', err)
+          return entry.value
+        }
+        throw err
+      })
+      .finally(() =&gt; { inflight = null })
+
+    return inflight
+  }
+}
 </pre>
 </div>
-
-<p>有了唯一约束，「先查再插」的竞态就变成了一个可以捕获的错误：</p>
 
 <div class="code" data-lang="ts">
 <pre>
-// ❌ 有竞态：两个请求可能同时通过检查
-const existing = await db.select().from(users).where(eq(users.email, email))
-if (existing.length) return c.json({ error: '邮箱已注册' }, 409)
-await db.insert(users).values({ email, ... })
-
-// ✅ 直接插，让数据库拒绝重复
-try {
-  await db.insert(users).values({ email, ... })
-} catch (err) {
-  if (isUniqueViolation(err)) {
-    return c.json({ error: '邮箱已注册' }, 409)
-  }
-  throw err
-}
-
-// ✅ 或者用 upsert 语义，完全不需要判断
-await db.insert(inSeasonListeners)
-  .values({ email, sku })
-  .onConflictDoNothing()
+export const getCachedForecasts = withCache(getForecasts, 15 * 60 * 1000)
 </pre>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 这个思路叫「乐观执行」</div>
-  <p>
-    与其小心翼翼地先检查再动手（检查结果随时可能过期），不如<strong>直接动手，让数据库告诉你行不行</strong>。
-    代码更短，而且没有竞态窗口。<br>
-    应用层的检查仍然有价值 —— 用来给出友好的错误提示 —— 但它<strong>不能作为正确性的依据</strong>。
-    真正的保证必须在数据库层。
-  </p>
-</div>
-
-<h2 id="locks">两种锁</h2>
-
-<p>
-  原子更新解决不了所有问题。当一次操作要读出数据、在应用里做复杂计算、再写回去时，
-  就需要锁了。
-</p>
-
-<h3>乐观锁：假设不会冲突，冲突了就重试</h3>
-
 <figure>
-<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="乐观锁的版本号机制">
-  <text class="ttl on-g" x="20" y="22">乐观锁：每行带一个版本号，写入时检查版本没变过</text>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="缓存把外部请求量降下来">
+  <rect class="bx-r" x="20" y="20" width="345" height="80" rx="10"/>
+  <text class="ttl on-r" x="192" y="44" text-anchor="middle">没有缓存</text>
+  <text class="sm" x="36" y="68">1000 次页面访问 → 6000 次外部请求</text>
+  <text class="sm on-r" x="36" y="88">每次页面渲染都要等 300–800 ms</text>
 
-  <rect class="bx-b" x="20" y="40" width="220" height="90" rx="8"/>
-  <text class="ttl on-b" x="130" y="62" text-anchor="middle">编辑者 A</text>
-  <text class="sm" x="36" y="86">读出文章，version = 7</text>
-  <text class="sm" x="36" y="106">修改标题</text>
-  <text class="sm on-g" x="36" y="124">保存：WHERE version = 7 ✓</text>
+  <rect class="bx-g" x="395" y="20" width="345" height="80" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">15 分钟缓存</text>
+  <text class="sm" x="411" y="68">1000 次页面访问 → 最多 6 次外部请求</text>
+  <text class="sm on-g" x="411" y="88">除了第一次，之后都是 0 ms</text>
 
-  <rect class="bx-p" x="280" y="40" width="220" height="90" rx="8"/>
-  <text class="ttl on-p" x="390" y="62" text-anchor="middle">编辑者 B</text>
-  <text class="sm" x="296" y="86">读出文章，version = 7</text>
-  <text class="sm" x="296" y="106">修改正文</text>
-  <text class="sm on-r" x="296" y="124">保存：WHERE version = 7 ✗</text>
+  <text class="ttl" x="20" y="130">进程内缓存 vs 共享缓存</text>
+  <rect class="bx-b" x="20" y="142" width="345" height="70" rx="10"/>
+  <text class="sm on-b" x="36" y="164">进程内（上面的实现）</text>
+  <text class="sm" x="36" y="184">简单、零延迟，但每个实例一份</text>
+  <text class="sm" x="36" y="202">10 个实例 = 10 倍外部请求</text>
 
-  <rect class="bx-g" x="540" y="40" width="200" height="90" rx="8"/>
-  <text class="ttl on-g" x="640" y="62" text-anchor="middle">数据库</text>
-  <text class="mono sm" x="556" y="88">version: 7</text>
-  <path class="ln-g" d="M600 96 V108" marker-end="url(#ar)"/>
-  <text class="mono sm on-g" x="556" y="124">version: 8（A 写入后）</text>
-
-  <path class="ln-b" d="M130 132 V152 H600 V152" marker-end="url(#ar)"/>
-  <path class="ln-r" d="M390 132 V172 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
-
-  <rect class="bx-r" x="20" y="188" width="720" height="62" rx="10"/>
-  <text class="ttl on-r" x="380" y="210" text-anchor="middle">B 的更新影响 0 行 —— 数据库告诉他「你手上的版本已经旧了」</text>
-  <text class="sm" x="380" y="232" text-anchor="middle">此时可以：提示用户「内容已被他人修改，请刷新」，或者自动重新读取并重试</text>
+  <rect class="bx-p" x="395" y="142" width="345" height="70" rx="10"/>
+  <text class="sm on-p" x="411" y="164">共享缓存（KV / Redis）</text>
+  <text class="sm" x="411" y="184">所有实例共用一份，请求量真正降到最低</text>
+  <text class="sm" x="411" y="202">边缘环境必须用这种（实例极多且短命）</text>
 </svg>
-<figcaption>图 20-3　乐观锁把「静默覆盖」变成了「明确的冲突」</figcaption>
+<figcaption>图 20-2　实例越多，共享缓存越重要</figcaption>
 </figure>
 
 <div class="code" data-lang="ts">
 <pre>
-export const articles = sqliteTable('articles', {
-  id: text('id').primaryKey(),
-  title: text('title').notNull(),
-  body: text('body').notNull(),
-  version: integer('version').notNull().default(1),   // ← 版本号
-})
+// 边缘环境的版本：用 KV 做共享缓存
+export async function getForecastsFromKV(kv: KVNamespace): Promise&lt;Forecast[]&gt; {
+  const cached = await kv.get&lt;Forecast[]&gt;('weather:forecasts', 'json')
+  if (cached) return cached
 
-export async function updateArticle(
-  id: string,
-  patch: { title?: string; body?: string },
-  expectedVersion: number
-) {
-  const rows = await db
-    .update(articles)
-    .set({ ...patch, version: expectedVersion + 1 })
-    .where(and(
-      eq(articles.id, id),
-      eq(articles.version, expectedVersion)   // ← 版本必须没变
-    ))
-    .returning()
-
-  if (rows.length === 0) {
-    throw new HTTPException(409, {
-      message: '这篇文章已被他人修改，请刷新后重试',
-    })
-  }
-  return rows[0]
+  const fresh = await getForecasts()
+  await kv.put('weather:forecasts', JSON.stringify(fresh), { expirationTtl: 900 })
+  return fresh
 }
 </pre>
 </div>
-
-<p>表单里把版本号带上，提交时一起发回来：</p>
 
 <div class="code" data-lang="tsx">
 <pre>
-&lt;form method="POST" action={`/articles/${article.id}`}&gt;
-  &lt;input type="hidden" name="version" value={article.version} /&gt;
-  &lt;input name="title" value={article.title} /&gt;
-  &lt;textarea name="body"&gt;{article.body}&lt;/textarea&gt;
-  &lt;button type="submit"&gt;保存&lt;/button&gt;
-&lt;/form&gt;
-</pre>
-</div>
-
-<h3>悲观锁：先占住，别人等着</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-await db.transaction(async (tx) =&gt; {
-  // FOR UPDATE：锁住这一行，直到事务结束
-  const [account] = await tx
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id))
-    .for('update')
-
-  // 在应用里做复杂计算（这段时间别人读这一行会被阻塞）
-  const fee = calculateComplexFee(account, request)
-
-  if (account.balance &lt; fee) {
-    throw new HTTPException(400, { message: '余额不足' })
-  }
-
-  await tx.update(accounts)
-    .set({ balance: account.balance - fee })
-    .where(eq(accounts.id, id))
+// 在中间件里注入，让所有页面都能用（第 7 章的 partial 现在有真数据了）
+app.use('*', async (c, next) =&gt; {
+  c.set('forecasts', await getForecastsFromKV(c.env.CACHE))
+  await next()
 })
 </pre>
 </div>
 
-<div class="tw">
-<table>
-  <tr><th></th><th>乐观锁</th><th>悲观锁</th></tr>
-  <tr><td>假设</td><td>冲突很少见</td><td>冲突很常见</td></tr>
-  <tr><td>做法</td><td>写入时检查版本，冲突了报错/重试</td><td>读取时就加锁，别人排队等</td></tr>
-  <tr><td>适合</td><td>后台文章编辑、用户资料修改</td><td>秒杀、账户余额、票务座位</td></tr>
-  <tr><td>优点</td><td>不阻塞，吞吐高</td><td>不会失败，逻辑简单</td></tr>
-  <tr><td>缺点</td><td>冲突时用户要重做</td><td>并发低；<strong>有死锁风险</strong>；持锁期间不能干慢活</td></tr>
-  <tr><td>边缘环境</td><td>可用</td><td>需要真正的事务型数据库，KV 上做不了</td></tr>
-</table>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 持锁的时候绝不能做这三件事</div>
-  <ol>
-    <li><strong>调用外部 API。</strong>对方慢 5 秒，你就锁了 5 秒，所有等这一行的请求全部堆积。</li>
-    <li><strong>等待用户输入。</strong>「锁住座位等他填完表单」—— 用户去泡了杯咖啡，锁就一直在。</li>
-    <li><strong>按不同顺序锁多行。</strong>A 先锁 1 再锁 2，B 先锁 2 再锁 1 → <strong>死锁</strong>。
-        规则：<em>永远按同一个固定顺序加锁</em>（比如按主键升序）。</li>
-  </ol>
-</div>
-
-<h2 id="idempotency">幂等：重复请求不造成重复后果</h2>
+<h2 id="geocode">地理编码与地图</h2>
 
 <p>
-  上面讲的都是「多个不同用户同时操作」。还有另一类问题：<strong>同一个请求被发了两次</strong>。
+  <strong>地理编码</strong>就是把「俄勒冈州胡德河市」这样的地址转成经纬度。
+  这类接口通常按调用次数收费，所以更要缓存 —— 而且是<strong>永久缓存</strong>：
+  一个地址的坐标基本不会变。
 </p>
 
-<div class="tw">
-<table>
-  <tr><th>为什么会重复</th><th>说明</th></tr>
-  <tr><td>用户双击提交按钮</td><td>最常见，前端禁用按钮能挡住大部分但不是全部</td></tr>
-  <tr><td>用户网络卡了刷新页面</td><td>如果没用第 8 章的 303 重定向，浏览器会重新提交</td></tr>
-  <tr><td>客户端自动重试</td><td>第 19 章讲过：响应超时了，但服务器其实处理成功了</td></tr>
-  <tr><td>第三方 webhook 重投</td><td>支付平台没收到你的 200，就会一直重发</td></tr>
-  <tr><td>队列的重试</td><td>下一章会讲：至少一次投递意味着可能投递多次</td></tr>
-</table>
+<div class="code" data-lang="ts">
+<pre>
+export async function geocode(address: string, apiKey: string) {
+  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json')
+  url.searchParams.set('address', address)
+  url.searchParams.set('key', apiKey)
+
+  const data = await fetchJson&lt;{
+    status: string
+    results: { geometry: { location: { lat: number; lng: number } } }[]
+  }&gt;(url.toString())
+
+  if (data.status !== 'OK' || data.results.length === 0) return null
+
+  return data.results[0].geometry.location
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="scripts/geocode-vacations.ts">
+<pre>
+// 一次性脚本：把坐标写进数据库，之后再也不用调这个 API
+const rows = await db.select().from(vacations).where(isNull(vacations.lat))
+
+for (const v of rows) {
+  const loc = await geocode(v.locationSearch, process.env.GOOGLE_API_KEY!)
+  if (!loc) {
+    console.warn(`地理编码失败：${v.sku} · ${v.locationSearch}`)
+    continue
+  }
+
+  await db.update(vacations)
+    .set({ lat: loc.lat, lng: loc.lng })
+    .where(eq(vacations.sku, v.sku))
+
+  console.log(`${v.name} → ${loc.lat}, ${loc.lng}`)
+  await new Promise((r) =&gt; setTimeout(r, 200))   // 尊重对方的速率限制
+}
+</pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 幂等的定义</div>
+  <div class="t">&#9733; 分清「一次性」和「每次请求」</div>
   <p>
-    一个操作执行一次和执行 N 次，<strong>对系统状态的影响相同</strong>。<br>
-    <code>SET balance = 100</code> 是幂等的。<code>balance = balance - 10</code> <strong>不是</strong>。<br>
-    注意「幂等」说的是<em>结果</em>，不是<em>不执行</em>。重复请求可以照常返回成功，
-    只是不能产生第二笔订单。
+    地理编码属于<strong>数据准备</strong>，应该在录入数据时做一次，把结果存进数据库。<br>
+    绝对不要在渲染页面时实时调用 —— 那是把一个 O(1) 的操作变成了 O(访问量)。
+    <em>用户请求路径上的每一次外部调用，都是一个潜在的故障点和账单项。</em>
   </p>
 </div>
 
-<h3>幂等键</h3>
+<h3>显示地图</h3>
+
+<p>
+  地图 SDK 是少数应该在前端调用的场景（它本来就是画在浏览器里的）。
+  但仍然要保护好 Key：
+</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+export const VacationsMap: FC&lt;{ vacations: Vacation[]; mapKey: string }&gt; = ({
+  vacations, mapKey,
+}) =&gt; (
+  &lt;&gt;
+    &lt;div id="map" style="height:480px"&gt;&lt;/div&gt;
+    {/* 用 JSON 传数据给前端脚本，避免拼接字符串造成注入 */}
+    &lt;script
+      type="application/json"
+      id="map-data"
+      dangerouslySetInnerHTML={{
+        __html: JSON.stringify(
+          vacations
+            .filter((v) =&gt; v.lat &amp;&amp; v.lng)
+            .map((v) =&gt; ({ name: v.name, lat: v.lat, lng: v.lng, url: `/vacations/${v.slug}` }))
+        ),
+      }}
+    /&gt;
+    &lt;script src={`https://maps.googleapis.com/maps/api/js?key=${mapKey}&amp;callback=initMap`} async&gt;&lt;/script&gt;
+    &lt;script src="/js/map.js" defer&gt;&lt;/script&gt;
+  &lt;/&gt;
+)
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 前端 Key 要加限制</div>
+  <p>
+    地图这类必须暴露在前端的 Key，一定要在服务商控制台设置<strong>域名白名单</strong>
+    （只允许 <code>meadowlarktravel.com</code> 使用）和<strong>用量上限</strong>。
+    这样别人抄走了也用不了，而且万一被滥用，损失有上限。
+  </p>
+</div>
+
+<h2 id="resilience">别人挂了，我不能挂</h2>
+
+<p>
+  第三方服务一定会出问题 —— 超时、限流、返回格式变了、干脆下线。
+  你的应用要能撑住。三个层次：
+</p>
+
+<h3>① 降级</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+app.get('/', async (c) =&gt; {
+  let forecasts: Forecast[] = []
+  try {
+    forecasts = await getCachedForecasts()
+  } catch (err) {
+    console.error('天气数据不可用', err)
+    // 不抛出去。首页的主要内容和天气无关
+  }
+
+  return c.html(&lt;HomePage forecasts={forecasts} /&gt;)
+})
+</pre>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+// 视图要能处理「没有数据」
+export const WeatherWidget: FC&lt;{ forecasts: Forecast[] }&gt; = ({ forecasts }) =&gt; {
+  if (forecasts.length === 0) return null   // 干脆不显示，好过显示一个报错框
+  return &lt;div class="weather"&gt;{/* ... */}&lt;/div&gt;
+}
+</pre>
+</div>
+
+<h3>② 熔断</h3>
+
+<p>
+  如果对方已经连续失败了十次，第十一次大概率还是失败。
+  继续调用只会浪费时间、拖慢你自己的响应。<strong>熔断器</strong>会在失败到一定次数后
+  「跳闸」，一段时间内直接失败，不再发出请求。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+export function createBreaker&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;, opts = { threshold: 5, resetMs: 60_000 }) {
+  let failures = 0
+  let openUntil = 0
+
+  return async (): Promise&lt;T&gt; =&gt; {
+    if (Date.now() &lt; openUntil) {
+      throw new Error('熔断器已跳闸，暂时不调用该服务')
+    }
+
+    try {
+      const result = await fn()
+      failures = 0                       // 成功一次就重置
+      return result
+    } catch (err) {
+      failures++
+      if (failures &gt;= opts.threshold) {
+        openUntil = Date.now() + opts.resetMs
+        console.error(`熔断器跳闸，${opts.resetMs / 1000} 秒后重试`)
+      }
+      throw err
+    }
+  }
+}
+</pre>
+</div>
+
+<h3>③ 超时预算</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 你的超时必须比调用方的超时短</div>
+  <p>
+    如果浏览器等你 10 秒，而你等第三方 30 秒，那么第三方一慢，
+    用户看到的就是浏览器超时 —— 而你的服务器还在傻等，占着连接和内存。<br>
+    <strong>给每个外部调用设置明确的超时，并且加起来要小于你自己的响应目标。</strong>
+    比如：目标 2 秒响应，那么两个外部调用各给 800 ms。
+  </p>
+</div>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="幂等键的处理流程">
-  <rect class="bx-b" x="20" y="24" width="180" height="46" rx="8"/>
-  <text class="sm" x="110" y="44" text-anchor="middle">客户端生成唯一键</text>
-  <text class="mono sm" x="110" y="60" text-anchor="middle">Idempotency-Key: abc-123</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="超时预算的分配">
+  <text class="ttl" x="20" y="24">用户能接受的等待时间，要在整条链路上分配完</text>
 
-  <path class="ln-b" d="M204 47 H280" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="20" y="40" width="720" height="34" rx="6"/>
+  <text class="sm on-b" x="380" y="62" text-anchor="middle">浏览器愿意等：约 3 秒</text>
 
-  <rect class="bx-a" x="284" y="24" width="200" height="46" rx="8"/>
-  <text class="sm on-a" x="384" y="52" text-anchor="middle">查这个键处理过吗？</text>
+  <rect class="bx-a" x="60" y="86" width="640" height="34" rx="6"/>
+  <text class="sm on-a" x="380" y="108" text-anchor="middle">你给自己的目标：2 秒内返回</text>
 
-  <path class="ln-g" d="M384 74 V104" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="330" y="94">没有</text>
+  <rect class="bx-g" x="100" y="132" width="270" height="34" rx="6"/>
+  <text class="sm on-g" x="235" y="154" text-anchor="middle">天气 API：超时 800 ms</text>
 
-  <path class="ln-a" d="M488 47 H600" marker-end="url(#ar)"/>
-  <text class="sm on-a" x="544" y="40" text-anchor="middle">有</text>
-  <rect class="bx-p" x="604" y="24" width="136" height="46" rx="8"/>
-  <text class="sm on-p" x="672" y="44" text-anchor="middle">直接返回</text>
-  <text class="sm on-p" x="672" y="60" text-anchor="middle">上次的结果</text>
+  <rect class="bx-g" x="380" y="132" width="230" height="34" rx="6"/>
+  <text class="sm on-g" x="495" y="154" text-anchor="middle">数据库查询：超时 500 ms</text>
 
-  <rect class="bx-g" x="264" y="108" width="240" height="46" rx="8"/>
-  <text class="sm on-g" x="384" y="128" text-anchor="middle">在同一个事务里：</text>
-  <text class="sm on-g" x="384" y="146" text-anchor="middle">插入幂等键 + 执行业务</text>
+  <rect class="bx-d" x="620" y="132" width="80" height="34" rx="6"/>
+  <text class="sm" x="660" y="154" text-anchor="middle">渲染等</text>
 
-  <path class="ln-g" d="M384 158 V186" marker-end="url(#ar)"/>
-  <rect class="bx-g" x="264" y="190" width="240" height="40" rx="8"/>
-  <text class="sm" x="384" y="214" text-anchor="middle">保存结果，返回</text>
+  <path class="ln-d" d="M100 172 V190 H700 V172"/>
+  <text class="sm" x="400" y="208" text-anchor="middle">800 + 500 + 余量 &lt; 2000 ms　&#10003;</text>
 
-  <rect class="bx-d" x="60" y="244" width="640" height="30" rx="6"/>
-  <text class="sm" x="380" y="264" text-anchor="middle">关键：幂等键的插入和业务操作必须在同一个事务里，否则中间崩溃会留下不一致的状态</text>
+  <rect class="bx-r" x="120" y="216" width="520" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="236" text-anchor="middle">如果外部调用超时设成 30 秒：用户早就走了，你的服务器还在等</text>
 </svg>
-<figcaption>图 20-4　幂等键让「重试」变成一件安全的事</figcaption>
+<figcaption>图 20-3　超时是从外往里分配的预算，不是随手填的数字</figcaption>
 </figure>
 
-<div class="code" data-lang="ts">
-<pre>
-export const idempotencyKeys = sqliteTable('idempotency_keys', {
-  key: text('key').primaryKey(),
-  userId: text('user_id').notNull(),
-  responseBody: text('response_body', { mode: 'json' }).notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-})
-
-app.post('/api/v1/orders', async (c) =&gt; {
-  const key = c.req.header('Idempotency-Key')
-  if (!key) {
-    throw new HTTPException(400, { message: '缺少 Idempotency-Key 请求头' })
-  }
-
-  const userId = c.get('user').id
-
-  // 1. 这个键处理过吗？
-  const [seen] = await db.select().from(idempotencyKeys)
-    .where(and(eq(idempotencyKeys.key, key), eq(idempotencyKeys.userId, userId)))
-
-  if (seen) {
-    // 处理过了，原样返回上次的结果
-    return c.json(seen.responseBody as object, 200, { 'Idempotent-Replay': 'true' })
-  }
-
-  // 2. 没处理过：业务 + 记键，同一个事务
-  const body = await c.req.json()
-
-  try {
-    const result = await db.transaction(async (tx) =&gt; {
-      const order = await createOrderIn(tx, userId, body)
-      await tx.insert(idempotencyKeys).values({
-        key, userId,
-        responseBody: { orderId: order.id },
-        createdAt: new Date(),
-      })
-      return { orderId: order.id }
-    })
-    return c.json(result, 201)
-  } catch (err) {
-    // 两个请求同时到达时，慢的那个会在这里撞上主键冲突
-    if (isUniqueViolation(err)) {
-      const [now] = await db.select().from(idempotencyKeys)
-        .where(eq(idempotencyKeys.key, key))
-      return c.json(now.responseBody as object, 200)
-    }
-    throw err
-  }
-})
-</pre>
-</div>
-
 <div class="box tip">
-  <div class="t">&#128161; 键从哪来</div>
-  <p>
-    <strong>客户端生成</strong>，用 <code>crypto.randomUUID()</code>，并且在<strong>重试时使用同一个键</strong>
-    —— 这是关键。如果每次重试都换个新键，幂等就失效了。<br>
-    表单场景可以在渲染页面时生成一个键放进隐藏字段，这样用户刷新重复提交也能被识别。<br>
-    别忘了给这张表加过期清理（比如保留 24 小时），否则它会无限增长。
-  </p>
+  <div class="t">&#128161; 反过来的方向</div>
+  <p>这一章讲的是「你主动调别人」。如果对方要<strong>主动通知你</strong>（支付结果、审核完成），那是 Webhook —— 思维完全反过来，见<strong>第 23 章</strong>。</p>
 </div>
 
-<h2 id="distributed">多实例带来的额外麻烦</h2>
-
-<p>
-  上面的方案都依赖数据库来做仲裁。一旦状态跑到数据库之外，事情就变复杂了。
-</p>
+<h2 id="social">社交媒体嵌入</h2>
 
 <div class="box warn">
-  <div class="t">&#9888; 这些「优化」会悄悄破坏正确性</div>
+  <div class="t">&#9888; 一个分享按钮可能拖慢整个页面</div>
+  <p>
+    第三方的嵌入脚本（分享按钮、评论组件、客服挂件、统计代码）通常会：
+    加载几百 KB 的 JS、发起十几个额外请求、插入 iframe、拖慢首屏、
+    并且它们的可用性完全不受你控制。
+  </p>
+  <p><strong>更好的做法：</strong></p>
   <ul>
-    <li><strong>进程内缓存。</strong>「我把库存缓存在内存里减少查询」—— 三个实例三份缓存，
-        全都是过期的（第 12 章讲过）。</li>
-    <li><strong>进程内的锁。</strong>JavaScript 里用一个 <code>Map</code> 记「这个 sku 正在处理中」——
-        只对当前进程有效，另外两个实例根本不知道。</li>
-    <li><strong>KV 上做计数器。</strong>Cloudflare KV 是最终一致的，
-        <code>get</code> 到的值可能是几秒前的。用它做「限量 100 个」必然超发。</li>
-  </ul>
-</div>
-
-<div class="tw">
-<table>
-  <tr><th>需求</th><th>用什么</th></tr>
-  <tr><td>强一致的计数、余额、库存</td><td>关系型数据库的原子更新 / 事务</td></tr>
-  <tr><td>Cloudflare 上的强一致状态</td><td>Durable Objects（每个对象全球单实例，天然串行）</td></tr>
-  <tr><td>限流计数（可以差一点点）</td><td>Redis <code>INCR</code>，或 Cloudflare Rate Limiting</td></tr>
-  <tr><td>分布式锁</td><td>Redis 的 <code>SET key val NX EX 30</code>；<strong>但先想想能不能不用</strong></td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 分布式锁比你想的难</div>
-  <p>
-    自己实现的分布式锁几乎总是有 bug：持锁的进程崩了怎么办（要有超时）？
-    超时了但它其实还活着，两个进程同时以为自己持锁怎么办？释放锁时，
-    怎么保证你释放的是自己那把而不是别人的？<br>
-    <strong>结论：能用数据库的原子操作解决，就别上分布式锁。</strong>
-    单条 <code>UPDATE ... WHERE</code> 能解决的问题，不要用一百行锁代码去解决。
-  </p>
-</div>
-
-<h2 id="test">怎么把竞态测出来</h2>
-
-<p>
-  这是本章最实用的一节。竞态之所以难缠，是因为普通测试碰不到它。
-  但你可以<strong>主动制造并发</strong>：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/routes/booking.test.ts">
-<pre>
-import { describe, it, expect, beforeEach } from 'vitest'
-
-describe('库存扣减', () =&gt; {
-  beforeEach(async () =&gt; {
-    await resetDb()
-    await seedVacation({ sku: 'HR199', remaining: 1 })   // 只有 1 份
-  })
-
-  it('20 个并发请求只能成功 1 个', async () =&gt; {
-    // 关键：同时发出，而不是 for 循环里 await
-    const results = await Promise.all(
-      Array.from({ length: 20 }, () =&gt;
-        app.request('/vacations/HR199/book', { method: 'POST' })
-      )
-    )
-
-    const ok = results.filter((r) =&gt; r.status === 200).length
-    const soldOut = results.filter((r) =&gt; r.status === 409).length
-
-    expect(ok).toBe(1)          // ← 有竞态的实现会得到 2、3 甚至 20
-    expect(soldOut).toBe(19)
-
-    // 更重要：验证数据库最终状态
-    const v = await repo.findBySku('HR199')
-    expect(v.remaining).toBe(0)
-    expect(await countOrders('HR199')).toBe(1)
-  })
-
-  it('重复的幂等键只创建一个订单', async () =&gt; {
-    const key = crypto.randomUUID()
-    const send = () =&gt;
-      app.request('/api/v1/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
-        body: JSON.stringify({ sku: 'HR199' }),
-      })
-
-    const [a, b] = await Promise.all([send(), send()])
-
-    const bodyA = await a.json()
-    const bodyB = await b.json()
-    expect(bodyA.orderId).toBe(bodyB.orderId)     // 同一个订单
-    expect(await countOrders('HR199')).toBe(1)
-  })
-})
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 让竞态窗口变大，更容易复现</div>
-  <p>
-    如果并发测试偶尔通过偶尔失败，说明窗口太窄。在「读」和「写」之间人为插一个延迟，
-    可以让 bug 稳定复现：
-  </p>
-  <div class="code" data-lang="ts"><pre>
-const v = await repo.findBySku(sku)
-
-// 只在测试环境生效的「竞态放大器」
-if (process.env.RACE_DELAY) {
-  await new Promise((r) =&gt; setTimeout(r, Number(process.env.RACE_DELAY)))
-}
-
-await repo.update(sku, { remaining: v.remaining - 1 })
-</pre></div>
-  <p>
-    修好之后再跑一遍：<strong>正确的实现加了延迟也应该通过</strong>。
-    这是验证「你是真修好了」还是「只是把窗口变窄了」的好办法。
-  </p>
-</div>
-
-<h2 id="checklist">自查清单</h2>
-
-<div class="box key">
-  <div class="t">&#9733; 在代码里找这些模式</div>
-  <ul>
-    <li>☐ 有没有「先 <code>SELECT</code> 判断，再 <code>INSERT</code>/<code>UPDATE</code>」的地方？
-        → 改成原子更新或依赖唯一约束</li>
-    <li>☐ 有没有 <code>x = x + 1</code> 形式的读改写？
-        → 改成 <code>SET x = x + 1</code> 让数据库算</li>
-    <li>☐ 表单编辑有没有可能静默覆盖别人的修改？→ 加版本号</li>
-    <li>☐ 创建订单、扣款、发消息的接口，重复调用会怎样？→ 加幂等键</li>
-    <li>☐ 有没有状态存在进程内存里？→ 挪到数据库或共享存储</li>
-    <li>☐ 关键的业务约束（余额非负、唯一性）有没有写进数据库约束？</li>
-    <li>☐ 持有锁的代码块里有没有网络调用？</li>
-    <li>☐ 有没有至少一个并发测试？</li>
+    <li>分享按钮用纯链接实现（<code>https://twitter.com/intent/tweet?url=...</code>），零 JavaScript。</li>
+    <li>确实需要的嵌入，用<strong>惰性加载</strong>：先显示一个占位图，用户点击后才真正加载。</li>
+    <li>所有第三方脚本加 <code>defer</code> 或 <code>async</code>，绝不阻塞渲染。</li>
+    <li>用第 19 章的 CSP 限制第三方脚本能做什么。</li>
   </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li><strong>check-then-act</strong> 是所有竞态的根源：读和写之间的间隙会被别人插队。</li>
-  <li>事务保证「全成或全败」，<strong>不保证「别人不插队」</strong>—— 两者是不同的问题。</li>
-  <li>优先用<strong>原子更新</strong>（<code>UPDATE ... WHERE 条件</code>）把判断交给数据库。</li>
-  <li>数据库约束（UNIQUE、CHECK）是最后一道防线，应用层检查只负责友好提示。</li>
-  <li>乐观锁适合冲突少的编辑场景，悲观锁适合冲突多的抢占场景；持锁期间不做慢操作。</li>
-  <li>幂等键让重复请求安全；键必须由客户端生成并在重试时复用。</li>
-  <li>能用数据库原子操作就别上分布式锁。</li>
-  <li>用 <code>Promise.all</code> 写并发测试，用人为延迟放大竞态窗口。</li>
+  <li>默认在后端调第三方 API：保护 Key、能缓存、无 CORS、可统一处理错误。</li>
+  <li><code>fetch</code> 要包一层：超时、区分可重试与不可重试、指数退避加抖动。</li>
+  <li>缓存是最重要的优化，边缘环境要用共享缓存。</li>
+  <li>地理编码这类「结果不变」的调用，在数据录入时做一次并存库。</li>
+  <li>用降级、熔断、超时预算保证第三方故障不会传染给你。</li>
+  <li>第三方前端脚本要惰性加载，能用纯链接就别用脚本。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>给云雀旅行加一个「限量套餐」：<code>remaining</code> 字段初始为 1。先用有竞态的写法实现下单，然后写一个 20 并发的测试，看着它失败。</li>
-    <li>改成原子更新，让测试通过。再加上 <code>RACE_DELAY=50</code> 跑一次，确认仍然通过。</li>
-    <li>给文章编辑加乐观锁：两个浏览器窗口打开同一篇文章，都修改，先后保存。确认第二个人收到的是明确的冲突提示，而不是静默覆盖。</li>
-    <li>给下单接口加幂等键。用同一个键连发两次 <code>curl</code>，确认只创建了一个订单，且两次响应内容相同。</li>
-    <li>给 <code>vacations.remaining</code> 加上 <code>CHECK (remaining &gt;= 0)</code> 约束，然后故意写一段会扣成负数的代码，看数据库怎么拒绝你。</li>
-    <li>翻一遍你自己项目的代码，按上面的自查清单找一遍。找到几处？</li>
+    <li>实现 <code>fetchJson</code>，用它调用任意一个公开 API。把超时改成 1 毫秒，确认它正确抛出超时错误而不是永久挂起。</li>
+    <li>给天气组件接上真实数据并加上 15 分钟缓存。在日志里打印实际发出的外部请求，刷新页面十次，确认只发了一轮。</li>
+    <li>把天气 API 的地址故意改错，确认首页仍然正常显示，只是没有天气组件。</li>
+    <li>实现熔断器，用一个必定失败的 URL 测试：连续失败 5 次后，第 6 次应该立刻失败而不发请求。</li>
+    <li>检查你的项目：用户请求路径上有几个外部调用？每一个的超时是多少？加起来会不会超过你的响应目标？</li>
   </ol>
 </div>
 

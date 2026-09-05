@@ -89,7 +89,7 @@
   <tr><td><code>PUT</code></td><td>整体替换</td><td>有</td><td>可以（结果一样）</td></tr>
   <tr><td><code>PATCH</code></td><td>局部修改</td><td>有</td><td>通常可以</td></tr>
   <tr><td><code>DELETE</code></td><td>删除</td><td>通常没有</td><td>可以</td></tr>
-  <tr><td><code>OPTIONS</code></td><td>问「我能做什么」</td><td>没有</td><td>可以（CORS 预检用它，第 15 章讲）</td></tr>
+  <tr><td><code>OPTIONS</code></td><td>问「我能做什么」</td><td>没有</td><td>可以（CORS 预检用它，第 16 章讲）</td></tr>
 </table>
 </div>
 
@@ -138,7 +138,7 @@ app.get('/headers', (c) =&gt; {
   <tr><td><code>user-agent</code></td><td>我是什么浏览器、什么系统</td></tr>
   <tr><td><code>cookie</code></td><td>你上次给我存的东西（第 9 章）</td></tr>
   <tr><td><code>content-type</code></td><td>我的请求体是什么格式（第 8 章）</td></tr>
-  <tr><td><code>authorization</code></td><td>我的身份凭证（第 18 章）</td></tr>
+  <tr><td><code>authorization</code></td><td>我的身份凭证（第 19 章）</td></tr>
 </table>
 </div>
 
@@ -148,10 +148,10 @@ app.get('/headers', (c) =&gt; {
 <table>
   <tr><th>响应头</th><th>作用</th></tr>
   <tr><td><code>Content-Type</code></td><td>这是什么格式。<strong>最重要的一个</strong></td></tr>
-  <tr><td><code>Cache-Control</code></td><td>能缓存多久（第 17 章）</td></tr>
+  <tr><td><code>Cache-Control</code></td><td>能缓存多久（第 18 章）</td></tr>
   <tr><td><code>Set-Cookie</code></td><td>请存下这个值（第 9 章）</td></tr>
   <tr><td><code>Location</code></td><td>去这个地址（配合 3xx 状态码）</td></tr>
-  <tr><td><code>Content-Security-Policy</code></td><td>只许加载这些来源的脚本（第 18 章）</td></tr>
+  <tr><td><code>Content-Security-Policy</code></td><td>只许加载这些来源的脚本（第 19 章）</td></tr>
 </table>
 </div>
 
@@ -272,7 +272,7 @@ app.get('/old-page', (c) =&gt; c.redirect('/new-page', 301))  // 永久重定向
   <tr><td>301</td><td>Moved Permanently</td><td>永久搬家。<strong>浏览器会缓存，慎用</strong></td></tr>
   <tr><td>302</td><td>Found</td><td>临时跳转</td></tr>
   <tr><td>303</td><td>See Other</td><td><strong>表单提交后跳转的正确选择</strong>（第 8 章解释为什么）</td></tr>
-  <tr><td>304</td><td>Not Modified</td><td>内容没变，用你的缓存（第 17 章）</td></tr>
+  <tr><td>304</td><td>Not Modified</td><td>内容没变，用你的缓存（第 18 章）</td></tr>
   <tr><td>400</td><td>Bad Request</td><td>客户端参数有问题</td></tr>
   <tr><td>401</td><td>Unauthorized</td><td>没登录（其实是「未认证」，名字取错了）</td></tr>
   <tr><td>403</td><td>Forbidden</td><td>登录了但没权限</td></tr>
