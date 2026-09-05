@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 17 章 · 静态资源 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="17">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 17 章</span>
+<h1>静态资源</h1>
+<p class="lede">
+  一个典型页面里，HTML 只占几十 KB，剩下的几 MB 全是图片、CSS 和 JavaScript。
+  用户感受到的「快不快」，主要由这部分决定。这一章讲怎么把它们又快又省地送出去。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清静态资源和动态内容，知道各自的优化手段</li>
+    <li>在不同运行时上正确配置 <code>serveStatic</code></li>
+    <li>理解 CDN 的工作方式和它为什么能大幅提速</li>
+    <li>掌握缓存三件套：<code>Cache-Control</code>、<code>ETag</code>、内容指纹</li>
+    <li>解决「改了文件但用户看到的还是旧版」这个经典问题</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="what">什么算静态资源</h2>
+
+<div class="tw">
+<table>
+  <tr><th>类型</th><th>例子</th><th>特点</th></tr>
+  <tr><td>样式与脚本</td><td><code>main.css</code>、<code>app.js</code></td><td>构建产物，内容变了文件名就该变</td></tr>
+  <tr><td>图片</td><td>logo、照片、图标</td><td>体积最大的一块，优化收益最高</td></tr>
+  <tr><td>字体</td><td><code>.woff2</code></td><td>阻塞文字渲染，要小心处理</td></tr>
+  <tr><td>其他</td><td><code>favicon.ico</code>、<code>robots.txt</code>、下载文件</td><td>基本不变</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 一条分界线</div>
+  <p>
+    <strong>静态资源</strong>：给定 URL，返回的字节永远一样，和是谁在请求无关。可以放 CDN，可以缓存一年。<br>
+    <strong>动态内容</strong>：需要执行代码才能算出来，可能因用户而异。不能盲目缓存。<br>
+    <em>用这条线判断：「如果我把这个响应存下来发给另一个用户，会出问题吗？」</em>
+  </p>
+</div>
+
+<h2 id="perf">性能的三个维度</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="影响加载速度的三个因素">
+  <rect class="bx-b" x="20" y="20" width="230" height="130" rx="10"/>
+  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① 请求数量</text>
+  <text class="sm" x="36" y="70">每个请求都有固定开销</text>
+  <text class="sm" x="36" y="90">HTTP/2 之后不再需要</text>
+  <text class="sm" x="36" y="110">把文件合并成一个大包</text>
+  <text class="sm on-g" x="36" y="136">但小图标仍建议内联</text>
+
+  <rect class="bx-p" x="266" y="20" width="230" height="130" rx="10"/>
+  <text class="ttl on-p" x="381" y="44" text-anchor="middle">② 传输体积</text>
+  <text class="sm" x="282" y="70">压缩（gzip / brotli）</text>
+  <text class="sm" x="282" y="90">图片用 WebP / AVIF</text>
+  <text class="sm" x="282" y="110">删掉没用到的 CSS/JS</text>
+  <text class="sm on-g" x="282" y="136">收益通常最大</text>
+
+  <rect class="bx-g" x="512" y="20" width="228" height="130" rx="10"/>
+  <text class="ttl on-g" x="626" y="44" text-anchor="middle">③ 物理距离</text>
+  <text class="sm" x="528" y="70">北京到弗吉尼亚往返</text>
+  <text class="sm" x="528" y="90">约 200–300 ms</text>
+  <text class="sm" x="528" y="110">再快的服务器也没用</text>
+  <text class="sm on-g" x="528" y="136">这是 CDN 解决的</text>
+
+  <rect class="bx-a" x="20" y="170" width="720" height="66" rx="10"/>
+  <text class="ttl on-a" x="380" y="194" text-anchor="middle">最快的请求是不发生的请求</text>
+  <text class="sm" x="380" y="216" text-anchor="middle">缓存命中的资源，三个维度全部归零。所以本章后半部分几乎都在讲缓存。</text>
+</svg>
+<figcaption>图 17-1　优化顺序：先减体积，再上 CDN，最后调缓存</figcaption>
+</figure>
+
+<h2 id="serve">用 Hono 提供静态资源</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+// Node.js
+import { serveStatic } from '@hono/node-server/serve-static'
+app.use('/*', serveStatic({ root: './public' }))
+
+// Bun
+import { serveStatic } from 'hono/bun'
+app.use('/*', serveStatic({ root: './public' }))
+
+// Deno
+import { serveStatic } from 'hono/deno'
+app.use('/*', serveStatic({ root: './public' }))
+</pre>
+</div>
+
+<h3>常用选项</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(
+  '/static/*',
+  serveStatic({
+    root: './public',
+    // 去掉 URL 前缀再去找文件：/static/img/a.png → ./public/img/a.png
+    rewriteRequestPath: (path) =&gt; path.replace(/^\/static/, ''),
+
+    // 在响应上补充头
+    onFound: (path, c) =&gt; {
+      c.header('Cache-Control', 'public, max-age=31536000, immutable')
+    },
+
+    // 文件不存在时
+    onNotFound: (path, c) =&gt; {
+      console.warn(`静态文件缺失：${path}`)
+    },
+  })
+)
+</pre>
+</div>
+
+<h3>Cloudflare Workers 上不一样</h3>
+
+<p>
+  Workers 上不用 <code>serveStatic</code> —— 静态文件由平台直接托管，
+  <strong>根本不会进入你的代码</strong>，因此更快也更便宜：
+</p>
+
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+name = "meadowlark"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# 找不到对应文件时，才交给你的 Worker 代码处理
+not_found_handling = "single-page-application"
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这是边缘架构的一个优势</div>
+  <p>
+    传统服务器上，每个图片请求都要唤醒你的应用进程去读文件。
+    在 Workers 上，静态资源在边缘节点直接命中，你的代码只在真正需要动态逻辑时才执行。
+    <strong>省下的不只是延迟，还有账单</strong>（按请求计费的平台通常不对静态资源计费）。
+  </p>
+</div>
+
+<h2 id="cdn">CDN</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="有无 CDN 的请求路径对比">
+  <text class="ttl on-r" x="20" y="24">没有 CDN</text>
+  <rect class="bx" x="20" y="34" width="90" height="42" rx="8"/>
+  <text class="sm" x="65" y="60" text-anchor="middle">北京用户</text>
+  <path class="ln-r" d="M114 55 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="357" y="46" text-anchor="middle">每张图片都要跨越太平洋往返一次</text>
+  <text class="sm on-r" x="357" y="72" text-anchor="middle">约 250 ms · 有 30 个资源就是 30 次</text>
+  <rect class="bx" x="604" y="34" width="130" height="42" rx="8"/>
+  <text class="sm" x="669" y="60" text-anchor="middle">源站（美国）</text>
+
+  <path class="ln-d" d="M20 100 H740"/>
+
+  <text class="ttl on-g" x="20" y="130">有 CDN</text>
+  <rect class="bx" x="20" y="140" width="90" height="42" rx="8"/>
+  <text class="sm" x="65" y="166" text-anchor="middle">北京用户</text>
+
+  <path class="ln-g" d="M114 161 H236" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="175" y="152" text-anchor="middle">10 ms</text>
+
+  <rect class="bx-g" x="240" y="132" width="150" height="58" rx="8"/>
+  <text class="ttl on-g" x="315" y="154" text-anchor="middle">CDN 北京节点</text>
+  <text class="sm" x="315" y="172" text-anchor="middle">缓存命中，直接返回</text>
+
+  <path class="ln-d" d="M394 161 H600" marker-end="url(#ar)"/>
+  <text class="sm" x="497" y="152" text-anchor="middle">仅首次未命中时回源</text>
+
+  <rect class="bx" x="604" y="140" width="130" height="42" rx="8"/>
+  <text class="sm" x="669" y="166" text-anchor="middle">源站（美国）</text>
+
+  <rect class="bx-a" x="20" y="212" width="720" height="56" rx="10"/>
+  <text class="ttl on-a" x="380" y="234" text-anchor="middle">CDN 的两个作用</text>
+  <text class="sm" x="380" y="256" text-anchor="middle">① 缩短物理距离，降低延迟　② 挡掉绝大部分流量，源站压力骤减</text>
+</svg>
+<figcaption>图 17-2　CDN 就是「把文件的副本放到离用户近的地方」</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 部署在 Workers 上的话，你已经在用 CDN 了</div>
+  <p>
+    Cloudflare Workers、Vercel、Netlify 这些平台本身就跑在 CDN 网络上。
+    你不需要额外配置 —— <strong>静态资源和你的代码都已经分发到全球边缘节点了。</strong>
+    只有部署在单台服务器上时，才需要单独接一个 CDN。
+  </p>
+</div>
+
+<h2 id="cache">缓存</h2>
+
+<p>浏览器缓存有两种模式，理解这两者的区别是本章的核心：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="强缓存与协商缓存的流程对比">
+  <rect class="bx-g" x="20" y="20" width="700" height="118" rx="10"/>
+  <text class="ttl on-g" x="36" y="44">强缓存：连请求都不发</text>
+  <text class="sm" x="36" y="68">响应头：Cache-Control: public, max-age=31536000, immutable</text>
+  <text class="sm" x="36" y="92">浏览器：这个资源我本地有，而且没过期 → <tspan class="on-g">直接用，0 次网络请求</tspan></text>
+  <text class="sm" x="36" y="116">适合：带内容指纹的构建产物（app-a1b2c3.js）</text>
+
+  <rect class="bx-b" x="20" y="152" width="700" height="130" rx="10"/>
+  <text class="ttl on-b" x="36" y="176">协商缓存：发请求但可能不传内容</text>
+  <text class="sm" x="36" y="200">响应头：ETag: "abc123"　或　Last-Modified: ...</text>
+  <text class="sm" x="36" y="224">下次请求带上：If-None-Match: "abc123"</text>
+  <text class="sm" x="36" y="248">服务器比对后：内容没变 → <tspan class="on-b">返回 304，不带响应体</tspan>（省流量，但省不了往返时间）</text>
+  <text class="sm" x="36" y="272">适合：文件名固定但内容可能变的资源，比如 /logo.png</text>
+</svg>
+<figcaption>图 17-3　强缓存省掉整个请求，协商缓存只省掉传输</figcaption>
+</figure>
+
+<h3>Cache-Control 速查</h3>
+
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>含义</th><th>用在哪</th></tr>
+  <tr><td><code>public, max-age=31536000, immutable</code></td><td>缓存一年，且永不重新验证</td><td>带内容指纹的 JS/CSS</td></tr>
+  <tr><td><code>public, max-age=3600</code></td><td>缓存一小时</td><td>图片等不常变的资源</td></tr>
+  <tr><td><code>no-cache</code></td><td>可以缓存，但每次都要问服务器「变了吗」</td><td>HTML 页面</td></tr>
+  <tr><td><code>no-store</code></td><td>完全不缓存，一个字节都不留</td><td>含个人信息的页面、API 响应</td></tr>
+  <tr><td><code>private, max-age=0</code></td><td>只允许浏览器缓存，CDN 不许缓存</td><td>登录后的个性化页面</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>no-cache</code> 不是「不缓存」</div>
+  <p>
+    这是命名最坑的一对：<br>
+    <code>no-cache</code> = 「可以存，但用之前必须问我一下」（协商缓存）<br>
+    <code>no-store</code> = 「一个字节都别存」（真正的不缓存）<br>
+    想让敏感页面不被缓存，用 <code>no-store</code>。
+  </p>
+</div>
+
+<h3>ETag</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+import { etag } from 'hono/etag'
+
+app.use('/*', etag())
+</pre>
+</div>
+
+<p>
+  这个中间件会根据响应内容算一个哈希放进 <code>ETag</code> 头。
+  浏览器下次请求时带上 <code>If-None-Match</code>，内容没变就返回 304。
+</p>
+
+<div class="code" data-lang="http">
+<pre>
+# 第一次
+GET /logo.png
+← 200 OK
+  ETag: "a1b2c3d4"
+  Content-Length: 48213
+
+# 第二次
+GET /logo.png
+  If-None-Match: "a1b2c3d4"
+← 304 Not Modified          ← 没有响应体，只有几十字节的头
+</pre>
+</div>
+
+<h3>Cache API 中间件</h3>
+
+<p>在支持 Cache API 的运行时（Workers、Deno）上，可以把动态生成的响应也缓存起来：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { cache } from 'hono/cache'
+
+app.get(
+  '/api/v1/vacations',
+  cache({
+    cacheName: 'meadowlark-v1',
+    cacheControl: 'public, max-age=300',    // 缓存 5 分钟
+    // 按语言分别缓存，避免中文用户拿到英文版
+    vary: ['Accept-Language'],
+  }),
+  listVacations
+)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 千万别缓存带个人信息的响应</div>
+  <p>
+    如果 <code>/api/me</code> 被 CDN 缓存了，第二个用户就会拿到第一个用户的资料。
+    <strong>这是真实发生过的重大事故。</strong><br>
+    规则：任何依赖 Cookie、<code>Authorization</code> 头或会话的响应，
+    必须设 <code>Cache-Control: private, no-store</code>。
+  </p>
+</div>
+
+<h2 id="fingerprint">改了文件用户却看到旧版</h2>
+
+<p>这是缓存带来的经典问题，也是有标准解法的问题。</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 固定文件名 + 长缓存</div>
+    <div class="code" data-lang="html"><pre>
+&lt;script src="/js/app.js"&gt;&lt;/script&gt;
+
+Cache-Control: max-age=31536000
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      你改了 app.js 并发布，但用户浏览器里缓存的旧版还有 364 天才过期。
+      新 HTML 配旧 JS，页面直接坏掉。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 内容指纹 + 长缓存</div>
+    <div class="code" data-lang="html"><pre>
+&lt;script src="/js/app-a1b2c3.js"&gt;&lt;/script&gt;
+
+Cache-Control: max-age=31536000, immutable
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      内容一变，哈希就变，文件名就变，URL 就变 —— 浏览器认为这是个<strong>全新的资源</strong>，
+      必然重新下载。
+    </div>
+  </div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="内容指纹配合 HTML 不缓存的策略">
+  <rect class="bx-a" x="150" y="20" width="460" height="56" rx="10"/>
+  <text class="ttl on-a" x="380" y="42" text-anchor="middle">index.html</text>
+  <text class="mono sm" x="380" y="62" text-anchor="middle">Cache-Control: no-cache　← 每次都问服务器</text>
+
+  <path class="ln-a" d="M300 80 L180 118" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M460 80 L580 118" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="40" y="122" width="280" height="56" rx="10"/>
+  <text class="mono sm" x="180" y="144" text-anchor="middle">/assets/app-a1b2c3.js</text>
+  <text class="mono sm" x="180" y="164" text-anchor="middle">max-age=31536000, immutable</text>
+
+  <rect class="bx-g" x="440" y="122" width="280" height="56" rx="10"/>
+  <text class="mono sm" x="580" y="144" text-anchor="middle">/assets/main-d4e5f6.css</text>
+  <text class="mono sm" x="580" y="164" text-anchor="middle">max-age=31536000, immutable</text>
+</svg>
+<figcaption>图 17-4　HTML 短缓存做「索引」，指纹资源长缓存做「内容」</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 记住这个组合</div>
+  <p>
+    <strong>HTML 用 <code>no-cache</code>（很小，每次验证一下），
+    带指纹的资源用 <code>max-age=31536000, immutable</code>（很大，永久缓存）。</strong><br>
+    这样发布新版本时，用户只需重新下载几 KB 的 HTML，
+    HTML 里的新文件名会自动触发新资源的下载，旧资源静静躺在缓存里等着过期。
+  </p>
+</div>
+
+<p>Vite 默认就是这么做的，你不用手动改文件名：</p>
+
+<div class="code" data-lang="text">
+<pre>
+$ npm run build
+
+dist/index.html                    0.46 kB
+dist/assets/index-DiwrgTda.css     1.23 kB
+dist/assets/index-C2vZs9Xy.js    143.61 kB
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 配合上面的构建产物设置缓存头
+app.use('/assets/*', serveStatic({
+  root: './public',
+  onFound: (_path, c) =&gt; {
+    c.header('Cache-Control', 'public, max-age=31536000, immutable')
+  },
+}))
+
+app.use('/*', serveStatic({
+  root: './public',
+  onFound: (_path, c) =&gt; {
+    c.header('Cache-Control', 'no-cache')
+  },
+}))
+</pre>
+</div>
+
+<h2 id="images">图片</h2>
+
+<p>图片通常占页面体积的六到八成，优化收益最高：</p>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128444;</span><h4>选对格式</h4>
+    <p>照片用 AVIF / WebP，比 JPEG 小 30–50%。图标和插图用 SVG（矢量、可缩放、体积小）。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128207;</span><h4>不要超尺寸</h4>
+    <p>显示宽度 400px 的位置，不要放 4000px 的原图。用 <code>srcset</code> 按屏幕提供不同尺寸。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#9203;</span><h4>懒加载</h4>
+    <p>首屏之外的图片加 <code>loading="lazy"</code>，一个属性的事。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128207;</span><h4>写上宽高</h4>
+    <p>给 <code>&lt;img&gt;</code> 写 <code>width</code> 和 <code>height</code>，避免图片加载后页面跳动。</p>
+  </div>
+</div>
+
+<div class="code" data-lang="html">
+<pre>
+&lt;picture&gt;
+  &lt;source srcset="/img/hood-river.avif" type="image/avif"&gt;
+  &lt;source srcset="/img/hood-river.webp" type="image/webp"&gt;
+  &lt;img
+    src="/img/hood-river.jpg"
+    alt="胡德河上的帆船"
+    width="800" height="600"
+    loading="lazy"
+    decoding="async"
+  &gt;
+&lt;/picture&gt;
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>静态资源 = 「同一个 URL 永远返回同样字节」，这决定了它能被缓存和分发。</li>
+  <li>优化顺序：减体积 → 上 CDN → 调缓存。最快的请求是不发生的请求。</li>
+  <li>Workers 上静态资源由平台托管，不经过你的代码。</li>
+  <li><code>no-cache</code> 是「用前验证」，<code>no-store</code> 才是「不缓存」。</li>
+  <li>黄金组合：HTML 用 <code>no-cache</code>，带指纹的资源用 <code>immutable</code> 长缓存。</li>
+  <li>永远不要缓存含个人信息的响应。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>curl -I http://localhost:3000/img/logo.png</code> 看看当前的响应头。有 <code>Cache-Control</code> 吗？有 <code>ETag</code> 吗？</li>
+    <li>接上 <code>etag()</code> 中间件，用 <code>curl -H 'If-None-Match: "..."'</code> 验证第二次请求返回 304。</li>
+    <li>给 <code>/assets/*</code> 配上一年缓存，给其他静态文件配 <code>no-cache</code>。在浏览器 Network 面板里刷新页面，观察哪些资源显示「from disk cache」。</li>
+    <li>找一张页面上最大的图片，转成 WebP，对比体积。然后用 <code>&lt;picture&gt;</code> 做格式回退。</li>
+    <li>想一想你的应用里有哪些响应<strong>绝对不能</strong>被 CDN 缓存。给它们加上 <code>private, no-store</code>。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

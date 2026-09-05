@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 1 章 · 认识 Hono — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 1 章</span>
+<h1>认识 Hono</h1>
+<p class="lede">
+  在写第一行代码之前，先花十分钟搞清楚：Hono 到底是什么，它和 Express 有什么不同，
+  以及为什么「Web 标准」这四个字值得你重新学一个框架。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 JavaScript 服务端的两次转折：Node.js 与 Web 标准运行时</li>
+    <li>说清楚 Hono 的四个特点：小、快、通用、类型安全</li>
+    <li>分清「服务端渲染」和「单页应用」，知道 Hono 在两种架构里各扮演什么角色</li>
+    <li>对 Hono 生态有个整体印象，知道后面会用到哪些包</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="rev">JavaScript 的两次革命</h2>
+
+<p>
+  第一次革命发生在 2009 年。Ryan Dahl 把 Chrome 的 V8 引擎从浏览器里抠出来，配上一套 I/O 库，
+  做成了 <strong>Node.js</strong>。JavaScript 第一次能在服务器上跑。前端工程师不用再切换到 PHP、
+  Ruby 或 Java 的思维模式，一门语言可以从数据库写到按钮点击。
+</p>
+
+<p>
+  在 Node.js 上，<strong>Express</strong> 迅速成为事实标准。它非常成功 —— 成功到十几年过去，
+  大量教程、公司代码库、面试题仍然默认你会 Express。本教程的原书就是讲 Express 的。
+</p>
+
+<p>
+  第二次革命发生得更安静。大约从 2018 年起，JavaScript 的运行环境不再只有「浏览器」和「Node.js」两种了：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="JavaScript 运行环境的演进时间线">
+  <path class="ln" d="M40 120 H720" marker-end="url(#ar)"/>
+
+  <circle cx="90"  cy="120" r="6" fill="var(--line-2)"/>
+  <text class="sm"  x="90"  y="146" text-anchor="middle">1995</text>
+  <text class="lbl" x="90"  y="100" text-anchor="middle">浏览器</text>
+
+  <circle cx="230" cy="120" r="6" fill="var(--line-2)"/>
+  <text class="sm"  x="230" y="146" text-anchor="middle">2009</text>
+  <text class="lbl" x="230" y="100" text-anchor="middle">Node.js</text>
+  <text class="sm"  x="230" y="84"  text-anchor="middle">req / res 是自创的</text>
+
+  <circle cx="380" cy="120" r="6" fill="var(--line-2)"/>
+  <text class="sm"  x="380" y="146" text-anchor="middle">2010</text>
+  <text class="lbl" x="380" y="100" text-anchor="middle">Express</text>
+
+  <circle cx="520" cy="120" r="7" fill="var(--accent)"/>
+  <text class="sm"  x="520" y="146" text-anchor="middle">2017–2020</text>
+  <text class="lbl on-a" x="520" y="100" text-anchor="middle">Workers / Deno</text>
+  <text class="sm"  x="520" y="84"  text-anchor="middle">用浏览器的 Request/Response</text>
+
+  <circle cx="660" cy="120" r="7" fill="var(--accent)"/>
+  <text class="sm"  x="660" y="146" text-anchor="middle">2021+</text>
+  <text class="lbl on-a" x="660" y="100" text-anchor="middle">Hono / Bun</text>
+
+  <rect class="bx-d" x="60"  y="176" width="300" height="42" rx="8"/>
+  <text class="sm" x="210" y="194" text-anchor="middle">「JavaScript 能跑在服务器上了」</text>
+  <text class="sm" x="210" y="210" text-anchor="middle">每个平台都有自己的一套 API</text>
+
+  <rect class="bx-a" x="400" y="176" width="300" height="42" rx="8"/>
+  <text class="sm on-a" x="550" y="194" text-anchor="middle">「服务器不止一种了」</text>
+  <text class="sm" x="550" y="210" text-anchor="middle">大家统一用浏览器那套 Fetch API</text>
+</svg>
+<figcaption>图 1-1　从「一种服务器」到「很多种服务器」</figcaption>
+</figure>
+
+<p>
+  Cloudflare Workers、Deno Deploy、Vercel Edge、Bun、AWS Lambda@Edge……这些新环境有个共同点：
+  它们<strong>不实现 Node.js 的 API</strong>，而是实现浏览器早就有的 <code>fetch</code> 标准。
+  于是 Express 在这些平台上要么跑不起来，要么要靠厚厚的兼容层。
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 关键洞察</div>
+  <p>
+    Express 把 Node.js 的 <code>http.IncomingMessage</code> 和 <code>http.ServerResponse</code> 包装了一层。
+    这两个对象是 Node.js 私有的，浏览器里没有，Workers 里也没有。
+    Hono 换了个基座：它包装的是 <code>Request</code> 和 <code>Response</code> —— 这两个对象<strong>所有</strong>现代 JavaScript 环境都有。
+  </p>
+</div>
+
+<h2 id="what">Hono 是什么</h2>
+
+<p>
+  Hono（日语「炎」，读 <em>ho-no</em>）由 Yusuke Wada 在 2021 年创建，最初是为 Cloudflare Workers 写的小框架，
+  后来发展成一个跨运行时的通用 Web 框架。官网对它的描述是
+  「Fast, lightweight, built on Web Standards」。拆开看：
+</p>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#129513;</span><h4>小（Small）</h4>
+    <p>核心 <code>hono/tiny</code> 预设压缩后约 14 kB，零运行时依赖。在按冷启动计费的边缘平台上，体积直接等于钱。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#9889;</span><h4>快（Fast）</h4>
+    <p>内置多个路由器实现，启动时根据你注册的路由自动挑最合适的那个。路由匹配基本不占时间。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#127760;</span><h4>通用（Universal）</h4>
+    <p>基于 Web 标准，所以 Node、Bun、Deno、Workers、Lambda、Vercel 都能跑同一份业务代码。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128290;</span><h4>类型安全</h4>
+    <p>路由的路径参数、请求体、返回值都有类型。前端可以直接 import 后端的类型，接口改了当场编译报错。</p>
+  </div>
+</div>
+
+<p>最小的 Hono 应用长这样：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.ts">
+<pre>
+import { Hono } from 'hono'
+
+const app = new Hono()
+
+app.get('/', (c) =&gt; c.text('你好，云雀旅行！'))
+
+export default app
+</pre>
+</div>
+
+<p>
+  注意最后一行：<code>export default app</code>。我们没有调用 <code>listen()</code>，也没有指定端口。
+  因为「怎么监听端口」是运行时的事，不是框架的事。在 Cloudflare Workers 上，平台会拿走这个默认导出；
+  在 Node.js 上，我们会在第 2 章加一行 <code>serve()</code>。业务代码本身不用改。
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Express（Node.js 专属）</div>
+    <div class="code" data-lang="js"><pre>
+const express = require('express')
+const app = express()
+
+app.get('/', (req, res) =&gt; {
+  res.send('你好')
+})
+
+app.listen(3000)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono（跨运行时）</div>
+    <div class="code" data-lang="ts"><pre>
+import { Hono } from 'hono'
+const app = new Hono()
+
+app.get('/', (c) =&gt; {
+  return c.text('你好')
+})
+
+export default app
+</pre></div>
+  </div>
+</div>
+
+<p>
+  两个差别值得现在就记住：
+</p>
+<ol>
+  <li><strong>Hono 只有一个上下文参数 <code>c</code></strong>，不是 <code>req, res</code> 两个。请求信息在 <code>c.req</code> 里。</li>
+  <li><strong>Hono 的处理函数要 <code>return</code> 一个 Response</strong>，不是调用 <code>res.send()</code> 去「发送」。
+      这是纯函数式的思路：处理函数不产生副作用，它只是<em>算出</em>一个响应。</li>
+</ol>
+
+<h2 id="ssr-spa">服务端渲染与单页应用</h2>
+
+<p>
+  在决定用什么框架之前，先想清楚你要造哪种东西。今天的 Web 应用大致分两类：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="服务端渲染与单页应用的请求流程对比">
+  <text class="ttl on-b" x="20" y="24">服务端渲染（SSR）</text>
+  <rect class="bx-b" x="20" y="38" width="110" height="46" rx="8"/>
+  <text class="lbl" x="75" y="66" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="230" y="38" width="130" height="46" rx="8"/>
+  <text class="lbl" x="295" y="61" text-anchor="middle">Hono 服务器</text>
+  <text class="sm"  x="295" y="77" text-anchor="middle">拼好完整 HTML</text>
+  <rect class="bx" x="450" y="38" width="110" height="46" rx="8"/>
+  <text class="lbl" x="505" y="66" text-anchor="middle">数据库</text>
+
+  <path class="ln-b" d="M132 52 H226" marker-end="url(#ar)"/>
+  <text class="sm" x="179" y="46" text-anchor="middle">GET /vacations</text>
+  <path class="ln-b" d="M226 72 H134" marker-end="url(#ar)"/>
+  <text class="sm" x="179" y="88" text-anchor="middle">完整 HTML</text>
+  <path class="ln" d="M362 61 H446" marker-end="url(#ar)"/>
+
+  <text class="sm" x="600" y="52">每次点链接都</text>
+  <text class="sm" x="600" y="70">重新请求一整页</text>
+
+  <path class="ln-d" d="M20 108 H740"/>
+
+  <text class="ttl on-p" x="20" y="140">单页应用（SPA）</text>
+  <rect class="bx-p" x="20" y="154" width="110" height="60" rx="8"/>
+  <text class="lbl" x="75" y="178" text-anchor="middle">浏览器</text>
+  <text class="sm"  x="75" y="196" text-anchor="middle">React 在这里跑</text>
+  <rect class="bx" x="230" y="154" width="130" height="60" rx="8"/>
+  <text class="lbl" x="295" y="178" text-anchor="middle">Hono 服务器</text>
+  <text class="sm"  x="295" y="196" text-anchor="middle">只返回 JSON</text>
+  <rect class="bx" x="450" y="154" width="110" height="60" rx="8"/>
+  <text class="lbl" x="505" y="190" text-anchor="middle">数据库</text>
+
+  <path class="ln-p" d="M132 170 H226" marker-end="url(#ar)" style="stroke:var(--purple)"/>
+  <text class="sm" x="179" y="164" text-anchor="middle">GET /api/vacations</text>
+  <path class="ln-p" d="M226 198 H134" marker-end="url(#ar)" style="stroke:var(--purple)"/>
+  <text class="sm" x="179" y="212" text-anchor="middle">[{...}, {...}]</text>
+  <path class="ln" d="M362 184 H446" marker-end="url(#ar)"/>
+
+  <text class="sm" x="600" y="170">首次加载一个 JS 包，</text>
+  <text class="sm" x="600" y="188">之后只在浏览器里换页面，</text>
+  <text class="sm" x="600" y="206">服务器只负责给数据</text>
+
+  <rect class="bx-a" x="20" y="240" width="720" height="46" rx="8"/>
+  <text class="lbl on-a" x="380" y="260" text-anchor="middle">Hono 两种都能做，而且经常同时做：一部分路由返回 HTML，一部分路由返回 JSON</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">本教程第 3–14 章用 SSR，第 15–16 章切到 API + SPA</text>
+</svg>
+<figcaption>图 1-2　两种架构下服务器的职责不同</figcaption>
+</figure>
+
+<p>
+  很多人以为 SPA「赢了」，SSR 已经过时。实际情况更微妙：
+</p>
+<ul>
+  <li>需要 SEO、首屏要快、内容为主的站点（博客、文档、营销页、电商列表），SSR 仍然是更好的选择。</li>
+  <li>交互复杂、用户会长时间停留的应用（后台管理、编辑器、看板），SPA 更合适。</li>
+  <li>大部分真实产品是<strong>混合</strong>的：营销页 SSR，登录后的控制台 SPA，两者共用一个 Hono 后端。</li>
+</ul>
+
+<h2 id="runtimes">一份代码，处处运行</h2>
+
+<p>「跨运行时」听起来像营销话术，我们来看它具体意味着什么。下面这段业务代码，一个字都不用改：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.ts">
+<pre>
+import { Hono } from 'hono'
+
+export const app = new Hono()
+
+app.get('/health', (c) =&gt; c.json({ ok: true, at: new Date().toISOString() }))
+</pre>
+</div>
+
+<p>变的只是「怎么把它接到平台上」这一层：</p>
+
+<div class="tw">
+<table>
+  <tr><th>运行时</th><th>入口写法</th><th>典型场景</th></tr>
+  <tr>
+    <td>Node.js</td>
+    <td><code>serve({ fetch: app.fetch, port: 3000 })</code><br><span style="font-size:12px;color:var(--fg-faint)">来自 <code>@hono/node-server</code></span></td>
+    <td>传统服务器、Docker、内网系统</td>
+  </tr>
+  <tr>
+    <td>Bun</td>
+    <td><code>export default app</code></td>
+    <td>本地开发、追求启动速度</td>
+  </tr>
+  <tr>
+    <td>Deno</td>
+    <td><code>Deno.serve(app.fetch)</code></td>
+    <td>脚本化部署、Deno Deploy</td>
+  </tr>
+  <tr>
+    <td>Cloudflare Workers</td>
+    <td><code>export default app</code></td>
+    <td>全球边缘、按请求计费</td>
+  </tr>
+  <tr>
+    <td>AWS Lambda</td>
+    <td><code>export const handler = handle(app)</code></td>
+    <td>已有 AWS 基建</td>
+  </tr>
+  <tr>
+    <td>Vercel / Netlify</td>
+    <td><code>export default handle(app)</code></td>
+    <td>和前端一起部署</td>
+  </tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 什么是「边缘」</div>
+  <p>
+    传统部署把代码放在一台（或一组）机器上，比如新加坡的机房。北京用户的请求要跨海往返。
+    <strong>边缘计算</strong>把你的代码复制到全球几百个数据中心，用户请求就近落地。
+    代价是：这些边缘环境资源受限、没有文件系统、不能装原生扩展、执行时间有上限。
+    这正是它们不实现完整 Node.js API 的原因，也是 Hono 存在的原因。
+  </p>
+</div>
+
+<h2 id="eco">Hono 的生态</h2>
+
+<p>
+  Hono 核心刻意保持得很小。真正的能力来自三圈：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 700 320" role="img" aria-label="Hono 生态的三个同心圈">
+  <circle cx="350" cy="160" r="150" class="bx-d"/>
+  <circle cx="350" cy="160" r="102" class="bx-b"/>
+  <circle cx="350" cy="160" r="54"  class="bx-a"/>
+
+  <text class="ttl on-a" x="350" y="156" text-anchor="middle">hono</text>
+  <text class="sm"       x="350" y="174" text-anchor="middle">核心包</text>
+
+  <text class="ttl on-b" x="350" y="88" text-anchor="middle">内置子模块</text>
+  <text class="sm" x="350" y="106" text-anchor="middle">同一个包里的 hono/xxx，按需引入</text>
+  <text class="mono on-b" x="350" y="238" text-anchor="middle">hono/cors · hono/jwt · hono/jsx · hono/cookie</text>
+
+  <text class="ttl" x="350" y="42" text-anchor="middle">官方与社区扩展</text>
+  <text class="mono sm" x="350" y="290" text-anchor="middle">@hono/node-server · @hono/zod-validator · @hono/zod-openapi · HonoX</text>
+  <text class="sm" x="350" y="308" text-anchor="middle">以及 Drizzle、Zod、Vite、Vitest 这些和 Hono 无关但配合极好的工具</text>
+</svg>
+<figcaption>图 1-3　核心 → 内置子模块 → 外部扩展</figcaption>
+</figure>
+
+<p>
+  最里圈是 <code>hono</code> 包本身：<code>Hono</code> 类、路由器、Context。
+</p>
+<p>
+  中间圈仍然在 <code>hono</code> 这个 npm 包里，但通过子路径按需引入，比如 <code>import { cors } from 'hono/cors'</code>。
+  没用到的部分不会进你的构建产物。这是 Hono 保持「小」的秘诀 —— 它不是功能少，而是<strong>默认不加载</strong>。
+</p>
+<p>
+  最外圈是独立发布的包，命名空间是 <code>@hono/</code>。它们要么和特定运行时绑定（<code>@hono/node-server</code>），
+  要么依赖第三方库（<code>@hono/zod-validator</code> 依赖 Zod）。
+</p>
+
+<h2 id="license">许可证</h2>
+
+<p>
+  Hono 及其官方扩展都采用 <strong>MIT 许可证</strong> —— 最宽松的开源许可证之一：你可以在闭源商业项目里随便用，
+  只要保留版权声明。
+</p>
+<p>
+  但你的项目会依赖几十上百个包，它们的许可证不一定都是 MIT。特别要注意 <strong>GPL</strong>：
+  GPL 有「传染性」，用了 GPL 代码的项目通常也必须以 GPL 开源。商业项目里引入 GPL 依赖前一定要确认。
+  常见的宽松许可证还有 Apache 2.0（要求保留声明文件）和 BSD（类似 MIT）。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 实用建议</div>
+  <p>
+    在项目里跑一次 <code>npx license-checker --summary</code>（或 <code>npx licensee</code>），
+    看看依赖树里都有什么许可证。第一次跑的结果通常会让人有点惊讶。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Node.js 让 JavaScript 上了服务器；Web 标准让 JavaScript 上了<strong>各种</strong>服务器。</li>
+  <li>Express 绑定 Node.js 的 <code>req</code>/<code>res</code>；Hono 绑定标准的 <code>Request</code>/<code>Response</code>，因此跨运行时。</li>
+  <li>Hono 处理函数接收一个上下文 <code>c</code>，<strong>返回</strong>一个 Response，而不是「发送」响应。</li>
+  <li>Hono 核心很小，能力靠 <code>hono/xxx</code> 子模块和 <code>@hono/</code> 扩展按需加载。</li>
+  <li>SSR 和 SPA 各有适用场景，Hono 两种都能承担，还能混着来。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>打开 <a href="https://hono.dev">hono.dev</a>，在首页的在线编辑器里把 <code>c.text()</code> 改成 <code>c.json({ hello: 'world' })</code>，观察响应头 <code>Content-Type</code> 的变化。</li>
+    <li>在浏览器控制台执行 <code>new Request('https://a.com/x?q=1')</code>，看看这个标准对象有哪些属性。这就是 Hono 里 <code>c.req.raw</code> 的东西。</li>
+    <li>想一想你手上或想做的某个项目：它更接近 SSR 还是 SPA？如果两者都有，边界应该划在哪里？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 10 章 · 中间件 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 10 章</span>
+<h1>中间件</h1>
+<p class="lede">
+  前面几章我们已经用过好几个中间件了。现在把它讲透。
+  理解了洋葱模型，你就理解了 Hono 应用的运行机制 —— 因为一个 Hono 应用，本质上就是一堆中间件。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>彻底理解洋葱模型和 <code>await next()</code> 的含义</li>
+    <li>自己写中间件，包括「在响应返回前修改它」这种操作</li>
+    <li>掌握路径匹配和执行顺序规则</li>
+    <li>了解 Hono 内置的全部中间件，知道遇到问题该找哪个</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="onion">洋葱模型</h2>
+
+<p>
+  中间件就是一个函数：<code>(c, next) =&gt; ...</code>。
+  它在处理函数<strong>之前</strong>和<strong>之后</strong>都能插一脚。<code>await next()</code> 是分界线。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  console.log('① 进入')
+  await next()              // ← 把控制权交给下一层
+  console.log('② 出来')
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 380" role="img" aria-label="洋葱模型：请求由外向内，响应由内向外">
+  <rect class="bx-b" x="60"  y="60" width="640" height="260" rx="16"/>
+  <rect class="bx-p" x="130" y="100" width="500" height="180" rx="14"/>
+  <rect class="bx-g" x="200" y="140" width="360" height="100" rx="12"/>
+  <rect class="bx-a" x="280" y="170" width="200" height="40" rx="10"/>
+
+  <text class="ttl on-b" x="80" y="84">logger</text>
+  <text class="ttl on-p" x="150" y="124">session</text>
+  <text class="ttl on-g" x="220" y="164">auth</text>
+  <text class="ttl on-a" x="380" y="195" text-anchor="middle">处理函数</text>
+
+  <path class="ln-a" d="M20 190 H54" marker-end="url(#ar-a)"/>
+  <text class="sm" x="24" y="180">请求</text>
+
+  <text class="sm on-b" x="72"  y="190" style="font-size:10px">①</text>
+  <text class="sm on-p" x="142" y="190" style="font-size:10px">③</text>
+  <text class="sm on-g" x="212" y="190" style="font-size:10px">⑤</text>
+  <text class="sm on-g" x="540" y="190" style="font-size:10px">⑥</text>
+  <text class="sm on-p" x="610" y="190" style="font-size:10px">⑦</text>
+  <text class="sm on-b" x="680" y="190" style="font-size:10px">⑨</text>
+
+  <path class="ln-g" d="M706 190 H740" marker-end="url(#ar)"/>
+  <text class="sm" x="712" y="180">响应</text>
+
+  <text class="sm" x="90"  y="300">← await next() 之前（请求阶段）</text>
+  <text class="sm" x="470" y="300">await next() 之后（响应阶段）→</text>
+
+  <text class="ttl" x="20" y="348">向内（请求阶段）：记日志开始时间 → 载入会话 → 检查身份 → 干活</text>
+  <text class="ttl" x="20" y="370">向外（响应阶段）：加安全响应头 ← 保存会话 ← 记录耗时 ← 拿到响应</text>
+</svg>
+<figcaption>图 10-1　请求一层层往里穿，响应再一层层往外穿。这就是「洋葱」</figcaption>
+</figure>
+
+<p>动手验证一下。写三个中间件，看看输出顺序：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+const app = new Hono()
+
+app.use(async (c, next) =&gt; {
+  console.log('A 进')
+  await next()
+  console.log('A 出')
+})
+
+app.use(async (c, next) =&gt; {
+  console.log('B 进')
+  await next()
+  console.log('B 出')
+})
+
+app.get('/', (c) =&gt; {
+  console.log('  处理函数执行')
+  return c.text('ok')
+})
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+A 进
+B 进
+  处理函数执行
+B 出
+A 出
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 和 Express 的关键区别</div>
+  <p>
+    Express 的中间件是<strong>单向管道</strong>：调完 <code>next()</code> 就基本结束了，
+    想在响应发出前做点什么，得去 hack <code>res.end</code>。<br>
+    Hono 的 <code>next()</code> 是 <code>Promise</code>，<code>await</code> 它就能拿回控制权，
+    <strong>在响应真正返回之前</strong>再做处理。压缩、缓存、加响应头、记录耗时 —— 全靠这个。
+  </p>
+</div>
+
+<h3>不调用 next() 会怎样</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  if (!isLoggedIn(c)) {
+    return c.redirect('/login')   // 直接返回 → 后面的一律不执行
+  }
+  await next()
+})
+</pre>
+</div>
+
+<p>
+  <strong>不调 <code>next()</code> 就等于拦截。</strong>这正是认证、限流、维护模式中间件的工作方式：
+  条件不满足就直接返回响应，请求根本到不了处理函数。
+</p>
+
+<h2 id="write">写自己的中间件</h2>
+
+<p>最朴素的写法就是一个函数：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  const start = Date.now()
+  await next()
+  const ms = Date.now() - start
+  c.res.headers.set('X-Response-Time', `${ms}ms`)
+})
+</pre>
+</div>
+
+<p>
+  但推荐用 <code>createMiddleware</code>，它能带上类型信息（告诉 TypeScript 这个中间件往
+  <code>c</code> 里放了什么）：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/middleware/request-id.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+
+export const requestId = createMiddleware&lt;{
+  Variables: { requestId: string }
+}&gt;(async (c, next) =&gt; {
+  const id = c.req.header('X-Request-Id') ?? crypto.randomUUID()
+  c.set('requestId', id)
+
+  await next()
+
+  c.res.headers.set('X-Request-Id', id)
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(requestId)
+
+app.get('/', (c) =&gt; {
+  const id = c.get('requestId')   // ← TypeScript 知道这是 string
+  console.log(`[${id}] 处理首页`)
+  return c.text('ok')
+})
+</pre>
+</div>
+
+<h3>带参数的中间件</h3>
+
+<p>如果中间件需要配置，就写一个「返回中间件的函数」：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+export function requireRole(role: string) {
+  return createMiddleware(async (c, next) =&gt; {
+    const user = c.get('user')
+    if (!user) return c.redirect('/login', 303)
+    if (user.role !== role) return c.text('没有权限', 403)
+    await next()
+  })
+}
+
+// 使用
+app.use('/admin/*', requireRole('admin'))
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么内置中间件都要「调用一下」</div>
+  <p>
+    你会注意到写法是 <code>app.use(logger())</code> 而不是 <code>app.use(logger)</code> ——
+    多了一对括号。因为 <code>logger</code> 是个<strong>工厂函数</strong>，调用它才返回真正的中间件。
+    忘了括号是很常见的错误，症状是中间件完全不生效或者直接报错。
+  </p>
+</div>
+
+<h3>修改响应</h3>
+
+<p>在 <code>next()</code> 之后，<code>c.res</code> 就是即将返回的响应，你可以改它：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  await next()
+
+  // 加响应头
+  c.res.headers.set('X-Powered-By', 'Meadowlark')
+
+  // 甚至可以整个换掉
+  if (c.res.status === 404) {
+    c.res = new Response('自定义的 404', { status: 404 })
+  }
+})
+</pre>
+</div>
+
+<h3>捕获错误</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  try {
+    await next()
+  } catch (err) {
+    console.error('[中间件捕获]', err)
+    // 上报给监控系统
+    throw err          // 继续往上抛，交给 app.onError 统一处理响应
+  }
+})
+</pre>
+</div>
+
+<p>
+  异常会沿着洋葱<strong>往外</strong>冒泡，最终被 <code>app.onError()</code> 接住。
+  中间件里 <code>try/catch</code> 适合做「记录、上报、清理」，而不是「决定返回什么」——
+  返回什么应该统一在 <code>onError</code> 里决定。
+</p>
+
+<h2 id="order">顺序与路径匹配</h2>
+
+<p><code>app.use()</code> 的第一个参数可以是路径模式：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(logger())                          // 所有请求
+app.use('*', logger())                     // 同上，显式写法
+app.use('/admin/*', requireRole('admin'))  // 只有 /admin 下面的
+app.use('/api/*', cors())                  // 只有 API
+app.get('/x', mw1, mw2, handler)           // 只给这一个路由挂两个中间件
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 中间件必须在路由之前注册</div>
+  <p>
+    Hono 按注册顺序执行。写在 <code>app.get('/x', ...)</code> <strong>之后</strong>的
+    <code>app.use()</code> 对 <code>/x</code> 是无效的。
+    「我加了 CORS 怎么不生效」，十有八九是这个原因。
+  </p>
+</div>
+
+<h3>推荐的排列顺序</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 340" role="img" aria-label="中间件的推荐排列顺序">
+  <rect class="bx-b" x="150" y="16"  width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="38" text-anchor="middle">1. 日志 / 请求 ID —— 要记录所有请求，包括出错的</text>
+
+  <rect class="bx-b" x="150" y="56"  width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="78" text-anchor="middle">2. 安全响应头 secureHeaders —— 尽早设置，确保每个响应都有</text>
+
+  <rect class="bx-b" x="150" y="96"  width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="118" text-anchor="middle">3. CORS —— 要在任何可能返回响应的东西之前</text>
+
+  <rect class="bx-p" x="150" y="136" width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="158" text-anchor="middle">4. 静态资源 serveStatic —— 命中就直接返回，不用走后面的逻辑</text>
+
+  <rect class="bx-p" x="150" y="176" width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="198" text-anchor="middle">5. 会话 / 认证 —— 处理函数需要用到 c.get('user')</text>
+
+  <rect class="bx-g" x="150" y="216" width="460" height="34" rx="6"/>
+  <text class="sm" x="380" y="238" text-anchor="middle">6. 校验 zValidator —— 挂在具体路由上，不合法就不进处理函数</text>
+
+  <rect class="bx-a" x="150" y="256" width="460" height="34" rx="6"/>
+  <text class="sm on-a" x="380" y="278" text-anchor="middle">7. 路由与处理函数</text>
+
+  <rect class="bx-r" x="150" y="296" width="460" height="34" rx="6"/>
+  <text class="sm on-r" x="380" y="318" text-anchor="middle">8. app.notFound() / app.onError() —— 兜底</text>
+
+  <path class="ln-d" d="M120 24 V320" marker-end="url(#ar)"/>
+  <text class="sm" x="40" y="160">注册顺序</text>
+  <text class="sm" x="40" y="178">= 执行顺序</text>
+</svg>
+<figcaption>图 10-2　一个常见且合理的中间件排列</figcaption>
+</figure>
+
+<h2 id="builtin">内置中间件全表</h2>
+
+<p>
+  这些都在 <code>hono</code> 包里，按需引入即可，不会增加没用到的体积。
+</p>
+
+<h3>日志与可观测性</h3>
+<div class="tw">
+<table>
+  <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
+  <tr><td><code>logger</code></td><td><code>hono/logger</code></td><td>打印每个请求的方法、路径、状态码、耗时</td></tr>
+  <tr><td><code>requestId</code></td><td><code>hono/request-id</code></td><td>给每个请求生成唯一 ID，串联日志</td></tr>
+  <tr><td><code>timing</code></td><td><code>hono/timing</code></td><td>输出 Server-Timing 头，浏览器里能看到各阶段耗时</td></tr>
+</table>
+</div>
+
+<h3>安全</h3>
+<div class="tw">
+<table>
+  <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
+  <tr><td><code>cors</code></td><td><code>hono/cors</code></td><td>允许指定的其他域名调用你的 API（第 15 章）</td></tr>
+  <tr><td><code>csrf</code></td><td><code>hono/csrf</code></td><td>阻止跨站伪造请求（第 18 章）</td></tr>
+  <tr><td><code>secureHeaders</code></td><td><code>hono/secure-headers</code></td><td>一次性设置一整组安全响应头（第 18 章）</td></tr>
+  <tr><td><code>basicAuth</code></td><td><code>hono/basic-auth</code></td><td>浏览器弹框式的用户名密码认证</td></tr>
+  <tr><td><code>bearerAuth</code></td><td><code>hono/bearer-auth</code></td><td>检查 <code>Authorization: Bearer xxx</code></td></tr>
+  <tr><td><code>jwt</code></td><td><code>hono/jwt</code></td><td>验证 JWT 令牌并解析出载荷（第 18 章）</td></tr>
+  <tr><td><code>bodyLimit</code></td><td><code>hono/body-limit</code></td><td>限制请求体大小</td></tr>
+  <tr><td><code>ipRestriction</code></td><td><code>hono/ip-restriction</code></td><td>按 IP 白名单/黑名单放行</td></tr>
+</table>
+</div>
+
+<h3>性能</h3>
+<div class="tw">
+<table>
+  <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
+  <tr><td><code>compress</code></td><td><code>hono/compress</code></td><td>gzip / deflate 压缩响应</td></tr>
+  <tr><td><code>etag</code></td><td><code>hono/etag</code></td><td>内容没变时返回 304，省流量（第 17 章）</td></tr>
+  <tr><td><code>cache</code></td><td><code>hono/cache</code></td><td>用 Cache API 缓存响应（第 17 章）</td></tr>
+  <tr><td><code>timeout</code></td><td><code>hono/timeout</code></td><td>超时自动中断，避免请求挂死</td></tr>
+</table>
+</div>
+
+<h3>其他</h3>
+<div class="tw">
+<table>
+  <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
+  <tr><td><code>jsxRenderer</code></td><td><code>hono/jsx-renderer</code></td><td>统一布局（第 7 章）</td></tr>
+  <tr><td><code>prettyJSON</code></td><td><code>hono/pretty-json</code></td><td>加 <code>?pretty</code> 时格式化 JSON，调试友好</td></tr>
+  <tr><td><code>trimTrailingSlash</code></td><td><code>hono/trailing-slash</code></td><td>统一处理结尾斜杠</td></tr>
+  <tr><td><code>languageDetector</code></td><td><code>hono/language</code></td><td>从请求头/查询串/Cookie 判断用户语言</td></tr>
+  <tr><td><code>methodOverride</code></td><td><code>hono/method-override</code></td><td>让只能发 POST 的表单「假装」发 PUT/DELETE</td></tr>
+  <tr><td><code>combine</code></td><td><code>hono/combine</code></td><td>把多个中间件按 and/or/some 逻辑组合</td></tr>
+  <tr><td><code>contextStorage</code></td><td><code>hono/context-storage</code></td><td>不用层层传参就能在深处拿到 <code>c</code></td></tr>
+</table>
+</div>
+
+<h2 id="example">一个完整例子</h2>
+
+<div class="code" data-lang="tsx" data-file="src/app.tsx">
+<pre>
+import { Hono } from 'hono'
+import { logger } from 'hono/logger'
+import { requestId } from 'hono/request-id'
+import { secureHeaders } from 'hono/secure-headers'
+import { compress } from 'hono/compress'
+import { cors } from 'hono/cors'
+import { prettyJSON } from 'hono/pretty-json'
+import { serveStatic } from '@hono/node-server/serve-static'
+import { sessionMiddleware } from './middleware/session'
+import { flashMiddleware } from './middleware/flash'
+import * as handlers from './handlers'
+
+export const app = new Hono()
+
+// —— 全局：可观测性 ——
+app.use(requestId())
+app.use(logger())
+
+// —— 全局：安全与性能 ——
+app.use(secureHeaders())
+app.use(compress())
+
+// —— 只给 API 加 CORS 和格式化 ——
+app.use('/api/*', cors({ origin: ['https://meadowlarktravel.com'] }))
+app.use('/api/*', prettyJSON())
+
+// —— 静态资源（命中就直接返回） ——
+app.use('/*', serveStatic({ root: './public' }))
+
+// —— 会话（只有页面路由需要，API 用令牌） ——
+app.use('/', sessionMiddleware(store, secret))
+app.use('/vacations/*', sessionMiddleware(store, secret))
+app.use(flashMiddleware)
+
+// —— 路由 ——
+app.get('/', handlers.home)
+app.get('/about', handlers.about)
+app.get('/vacations', handlers.listVacations)
+app.get('/api/vacations', handlers.api.listVacations)
+
+// —— 兜底 ——
+app.notFound(handlers.notFound)
+app.onError(handlers.serverError)
+</pre>
+</div>
+
+<h2 id="pitfalls">常见坑</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 四个高频错误</div>
+  <ol>
+    <li><strong>忘了 <code>await</code>。</strong>写成 <code>next()</code> 而不是 <code>await next()</code>，
+        「响应阶段」的代码会在响应还没生成时就执行，行为诡异且难查。</li>
+    <li><strong>忘了调用工厂函数。</strong><code>app.use(logger)</code> 少了括号。</li>
+    <li><strong>中间件写在路由后面。</strong>不生效，而且没有任何报错。</li>
+    <li><strong>既返回响应又调 <code>next()</code>。</strong>要么拦截（return），要么放行（await next()），
+        不要都做。</li>
+  </ol>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 调试技巧</div>
+  <p>
+    分不清中间件有没有执行、执行顺序对不对时，临时插一个打印中间件：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+app.use(async (c, next) =&gt; {
+  console.log('&gt;&gt;&gt; 进入', c.req.method, c.req.path)
+  await next()
+  console.log('&lt;&lt;&lt; 离开', c.res.status)
+})
+</pre></div>
+  <p>另外 <code>import { showRoutes } from 'hono/dev'</code> 然后 <code>showRoutes(app)</code>
+     会把所有注册的路由和中间件打印成一张表，第 20 章会用到。</p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>中间件是 <code>(c, next) =&gt; ...</code>；<code>await next()</code> 之前是请求阶段，之后是响应阶段。</li>
+  <li>不调 <code>next()</code> 就是拦截，这是认证和限流的实现方式。</li>
+  <li><code>createMiddleware</code> 让中间件塞进 <code>c</code> 的东西带上类型。</li>
+  <li>注册顺序即执行顺序，中间件必须写在路由之前。</li>
+  <li>Hono 内置了二十多个中间件，遇到通用需求先查表，别自己造。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>写一个中间件，给所有响应加上 <code>X-Response-Time</code> 头。用 <code>curl -i</code> 验证。</li>
+    <li>写一个「维护模式」中间件：当环境变量 <code>MAINTENANCE=1</code> 时，除了 <code>/health</code> 之外的所有请求都返回 503 和一个维护页面。</li>
+    <li>用三个打印中间件验证洋葱顺序，然后<strong>故意去掉中间那个的 <code>await</code></strong>，观察输出顺序怎么乱掉的。</li>
+    <li>接上 <code>hono/logger</code> 和 <code>hono/request-id</code>，改造你的日志中间件，让每条日志都带上请求 ID。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

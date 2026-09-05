@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 18 章 · 安全 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="18">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 18 章</span>
+<h1>安全</h1>
+<p class="lede">
+  安全不是上线前加的一个功能，而是贯穿每一章的一条线。
+  这一章把散落在前面的安全知识收拢起来，再补上认证、授权和几种最常见的攻击。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>配好 HTTPS，理解反向代理背后的协议判断</li>
+    <li>一行接上安全响应头，理解 CSP 在防什么</li>
+    <li>搞懂 CSRF 的原理和两道防线</li>
+    <li>正确存储密码，实现会话认证和 JWT 认证</li>
+    <li>接入第三方登录，实现基于角色的授权</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="https">HTTPS</h2>
+
+<p>
+  没有 HTTPS，所有内容都是明文传输：同一个 WiFi 下的人能看到你的密码，
+  运营商能往页面里插广告，中间人能篡改你下载的 JavaScript。
+</p>
+
+<p>
+  今天没有理由不用 HTTPS：证书免费（Let's Encrypt），主流平台自动配置，
+  而且浏览器把很多能力（地理位置、摄像头、Service Worker）设成了 HTTPS 独占。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>部署方式</th><th>证书怎么来</th></tr>
+  <tr><td>Cloudflare Workers / Vercel / Netlify</td><td><strong>自动，什么都不用做</strong></td></tr>
+  <tr><td>自己的服务器 + Nginx/Caddy</td><td>Caddy 全自动；Nginx 配 certbot 自动续期</td></tr>
+  <tr><td>云厂商负载均衡</td><td>在控制台申请托管证书</td></tr>
+  <tr><td>本地开发</td><td><code>mkcert</code> 生成本地信任的证书，或者直接用 http</td></tr>
+</table>
+</div>
+
+<h3>代理背后的坑</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="反向代理后面的应用看到的是 HTTP">
+  <rect class="bx-b" x="20" y="60" width="120" height="56" rx="8"/>
+  <text class="sm" x="80" y="92" text-anchor="middle">浏览器</text>
+
+  <path class="ln-g" d="M144 88 H286" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="215" y="80" text-anchor="middle">HTTPS · 加密</text>
+
+  <rect class="bx-a" x="290" y="52" width="150" height="72" rx="10"/>
+  <text class="ttl on-a" x="365" y="76" text-anchor="middle">反向代理</text>
+  <text class="sm" x="365" y="94" text-anchor="middle">Nginx / 负载均衡</text>
+  <text class="sm" x="365" y="112" text-anchor="middle">在这里解密</text>
+
+  <path class="ln-r" d="M444 88 H586" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="515" y="80" text-anchor="middle">HTTP · 内网明文</text>
+
+  <rect class="bx" x="590" y="60" width="150" height="56" rx="8"/>
+  <text class="sm" x="665" y="86" text-anchor="middle">你的 Hono 应用</text>
+  <text class="sm" x="665" y="104" text-anchor="middle">以为自己在跑 HTTP</text>
+
+  <rect class="bx-d" x="140" y="146" width="480" height="44" rx="8"/>
+  <text class="sm" x="380" y="166" text-anchor="middle">代理会加一个头告诉你真相：X-Forwarded-Proto: https</text>
+  <text class="sm" x="380" y="184" text-anchor="middle">判断「用户是不是走的 HTTPS」要看它，不能看连接本身</text>
+</svg>
+<figcaption>图 18-1　在代理后面，应用看到的协议不是用户看到的协议</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+function isSecure(c: Context) {
+  const proto = c.req.header('x-forwarded-proto')
+  if (proto) return proto.split(',')[0].trim() === 'https'
+  return new URL(c.req.url).protocol === 'https:'
+}
+
+// 强制跳转 HTTPS
+app.use('*', async (c, next) =&gt; {
+  if (isProduction &amp;&amp; !isSecure(c)) {
+    const url = new URL(c.req.url)
+    url.protocol = 'https:'
+    return c.redirect(url.toString(), 301)
+  }
+  await next()
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 只信任你自己的代理发来的头</div>
+  <p>
+    <code>X-Forwarded-Proto</code> 是个普通请求头，<strong>任何人都能伪造</strong>。
+    只有当你确定请求一定经过自己的代理（且代理会覆盖这个头）时才能信任它。
+    如果应用可以被直接访问，攻击者就能伪造这个头绕过你的 HTTPS 检查。
+  </p>
+</div>
+
+<h2 id="headers">安全响应头</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+import { secureHeaders } from 'hono/secure-headers'
+
+app.use('*', secureHeaders())
+</pre>
+</div>
+
+<p>这一行会加上一整组头。逐个看看它们在防什么：</p>
+
+<div class="tw">
+<table>
+  <tr><th>响应头</th><th>防的是</th></tr>
+  <tr><td><code>Strict-Transport-Security</code></td><td>告诉浏览器「以后只用 HTTPS 访问我」，防降级攻击</td></tr>
+  <tr><td><code>X-Content-Type-Options: nosniff</code></td><td>禁止浏览器猜测内容类型。防止上传的「图片」被当成脚本执行</td></tr>
+  <tr><td><code>X-Frame-Options: SAMEORIGIN</code></td><td>禁止别人把你的页面嵌进 iframe，防点击劫持</td></tr>
+  <tr><td><code>Referrer-Policy</code></td><td>控制跳转时泄露多少来源 URL 信息</td></tr>
+  <tr><td><code>Content-Security-Policy</code></td><td><strong>最强的一道</strong>：限定只能从哪些来源加载脚本、样式、图片</td></tr>
+</table>
+</div>
+
+<h3>CSP：XSS 的最后一道防线</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use('*', secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],                          // 只允许自己域名下的脚本
+    styleSrc: ["'self'", "'unsafe-inline'"],
+    imgSrc: ["'self'", 'data:', 'https://cdn.meadowlarktravel.com'],
+    connectSrc: ["'self'", 'https://api.meadowlarktravel.com'],
+    frameAncestors: ["'none'"],                     // 谁都不能嵌我
+    objectSrc: ["'none'"],
+    upgradeInsecureRequests: [],
+  },
+}))
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; CSP 为什么重要</div>
+  <p>
+    假设你的模板某处漏掉了转义，攻击者成功注入了
+    <code>&lt;script src="https://evil.com/steal.js"&gt;</code>。<br>
+    有 CSP 的话，浏览器会<strong>拒绝加载</strong>这个脚本，因为 <code>evil.com</code> 不在
+    <code>scriptSrc</code> 白名单里。<br>
+    <strong>CSP 是「假设我的其他防护已经失败了」之后的兜底。</strong>纵深防御的典范。
+  </p>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 先用报告模式</div>
+  <p>
+    CSP 配紧了很容易把自己的功能搞坏（第三方统计脚本、内联样式）。
+    先用 <code>Content-Security-Policy-Report-Only</code> 上线，
+    观察浏览器控制台报告了哪些违规，调整好再切成强制模式。
+  </p>
+</div>
+
+<h2 id="csrf">CSRF</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="CSRF 攻击的原理">
+  <text class="ttl on-r" x="20" y="24">攻击是这样发生的</text>
+
+  <rect class="bx" x="20" y="36" width="200" height="60" rx="8"/>
+  <text class="sm" x="120" y="58" text-anchor="middle">① 你登录了 bank.com</text>
+  <text class="sm" x="120" y="78" text-anchor="middle">浏览器存了会话 Cookie</text>
+
+  <path class="ln" d="M224 66 H286" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="290" y="36" width="200" height="60" rx="8"/>
+  <text class="sm on-r" x="390" y="58" text-anchor="middle">② 你又打开了 evil.com</text>
+  <text class="sm" x="390" y="78" text-anchor="middle">（一封邮件里的链接）</text>
+
+  <path class="ln" d="M494 66 H556" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="560" y="26" width="180" height="80" rx="8"/>
+  <text class="sm on-r" x="650" y="48" text-anchor="middle">③ 页面里藏着</text>
+  <text class="mono sm" x="650" y="68" text-anchor="middle">&lt;form action=</text>
+  <text class="mono sm" x="650" y="84" text-anchor="middle">"bank.com/transfer"&gt;</text>
+  <text class="sm on-r" x="650" y="100" text-anchor="middle">自动提交</text>
+
+  <path class="ln-r" d="M650 110 V150 H200 V186" style="stroke:var(--red)" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="60" y="190" width="280" height="60" rx="8"/>
+  <text class="sm on-r" x="200" y="212" text-anchor="middle">④ 浏览器<tspan>自动带上</tspan> bank.com 的 Cookie</text>
+  <text class="sm on-r" x="200" y="234" text-anchor="middle">服务器认为是你本人操作 → 转账成功</text>
+
+  <rect class="bx-g" x="400" y="176" width="340" height="88" rx="10"/>
+  <text class="ttl on-g" x="570" y="198" text-anchor="middle">关键点</text>
+  <text class="sm" x="416" y="220">攻击者<tspan>读不到</tspan>响应（同源策略挡着）</text>
+  <text class="sm" x="416" y="240">但他不需要读 —— 请求已经生效了</text>
+  <text class="sm" x="416" y="258">所以危险的是「有副作用」的请求</text>
+</svg>
+<figcaption>图 18-2　CSRF 利用的是「浏览器会自动带上 Cookie」这个特性</figcaption>
+</figure>
+
+<h3>两道防线</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 第一道：SameSite Cookie（第 9 章讲过）
+setCookie(c, 'sid', id, {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'Lax',    // 跨站 POST 不会带上这个 Cookie
+})
+
+// 第二道：Hono 的 CSRF 中间件
+import { csrf } from 'hono/csrf'
+
+app.use('*', csrf({ origin: 'https://meadowlarktravel.com' }))
+</pre>
+</div>
+
+<p>
+  <code>csrf()</code> 中间件检查请求的 <code>Origin</code> 头是否属于你的站点，
+  不匹配就拒绝。对于表单提交场景，这已经足够。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 用令牌的做法</div>
+  <p>
+    更传统的方案是「双重提交令牌」：服务器给每个表单生成一个随机 token，
+    同时放在隐藏字段和 Cookie 里，提交时比对两者是否一致。
+    攻击者的页面读不到你的 Cookie，所以造不出正确的隐藏字段。
+    <br>
+    今天 <code>SameSite=Lax</code> + Origin 校验对绝大多数应用已经够用。
+    需要更严格时（比如支付），再叠加令牌。
+  </p>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 纯 API 通常不需要 CSRF 防护</div>
+  <p>
+    CSRF 依赖「浏览器自动带 Cookie」。如果你的 API 用
+    <code>Authorization: Bearer</code> 头做认证，浏览器<strong>不会</strong>自动带上这个头，
+    攻击者也造不出来 —— 天然免疫 CSRF。<br>
+    <strong>用 Cookie 认证就要防 CSRF，用 Bearer 令牌就不用。</strong>
+  </p>
+</div>
+
+<h2 id="passwords">密码</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 关于密码存储的三条铁律</div>
+  <ol>
+    <li><strong>永远不要存明文。</strong>数据库一旦泄露，所有用户在其他网站的账号也跟着完蛋
+        （因为很多人复用密码）。</li>
+    <li><strong>不要用 MD5 或 SHA-256。</strong>它们设计目标是「快」，
+        现代显卡每秒能试几十亿次，一个 8 位密码几分钟就能爆破出来。</li>
+    <li><strong>用专门的密码哈希算法</strong>：Argon2id（首选）、bcrypt、scrypt。
+        它们故意设计得慢且消耗内存，让爆破成本高到不可行。</li>
+  </ol>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// Node.js / Bun：用 Argon2
+import { hash, verify } from '@node-rs/argon2'
+
+const passwordHash = await hash(plainPassword)      // 注册时
+const ok = await verify(passwordHash, plainPassword) // 登录时
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 边缘运行时（Workers）：原生模块用不了，用 Web Crypto 的 PBKDF2
+async function hashPassword(password: string): Promise&lt;string&gt; {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  )
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: 210_000, hash: 'SHA-256' },
+    key, 256
+  )
+  return `pbkdf2$210000$${b64(salt)}$${b64(new Uint8Array(bits))}`
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 最好的密码方案是没有密码</div>
+  <p>
+    自己实现密码认证意味着你要负责：安全存储、重置流程、防撞库、防暴力破解、
+    可能还有双因素认证。<br>
+    <strong>能用第三方登录（Google / GitHub / 微信）就用</strong> —— 见下文。
+    或者用「魔法链接」：用户输入邮箱，你发一封带一次性链接的邮件，点击即登录。
+    没有密码，就没有密码泄露。
+  </p>
+</div>
+
+<h2 id="authn">认证与授权</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">认证 Authentication</div>
+    <div style="padding:12px 16px;font-size:14.5px">
+      <strong>你是谁？</strong><br>
+      验证身份。用户名密码、第三方登录、令牌。<br>
+      失败返回 <strong>401</strong>。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">授权 Authorization</div>
+    <div style="padding:12px 16px;font-size:14.5px">
+      <strong>你能做什么？</strong><br>
+      验证权限。角色、所有权、订阅等级。<br>
+      失败返回 <strong>403</strong>。
+    </div>
+  </div>
+</div>
+
+<h3>方案一：会话认证（适合网页）</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/login', zValidator('form', loginSchema), async (c) =&gt; {
+  const { email, password } = c.req.valid('form')
+
+  const user = await db.getUserByEmail(email)
+
+  // 注意：用户不存在和密码错误要返回同样的信息和同样的耗时
+  // 否则攻击者可以用它来枚举哪些邮箱注册过
+  if (!user || !(await verify(user.passwordHash, password))) {
+    return c.html(&lt;LoginPage error="邮箱或密码不正确" /&gt;, 401)
+  }
+
+  const session = c.get('session')
+  session.userId = user.id
+  session.createdAt = Date.now()
+
+  return c.redirect('/account', 303)
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/middleware/auth.ts">
+<pre>
+export const loadUser = createMiddleware&lt;{ Variables: { user?: User } }&gt;(
+  async (c, next) =&gt; {
+    const userId = c.get('session')?.userId
+    if (userId) {
+      const user = await db.getUserById(String(userId))
+      if (user) c.set('user', user)
+    }
+    await next()
+  }
+)
+
+export const requireLogin = createMiddleware(async (c, next) =&gt; {
+  if (!c.get('user')) {
+    // 记住原本想去的地方，登录后跳回来
+    c.get('session').returnTo = c.req.path
+    return c.redirect('/login', 303)
+  }
+  await next()
+})
+
+export function requireRole(...roles: string[]) {
+  return createMiddleware(async (c, next) =&gt; {
+    const user = c.get('user')
+    if (!user) return c.redirect('/login', 303)
+    if (!roles.includes(user.role)) {
+      return c.html(&lt;ForbiddenPage /&gt;, 403)
+    }
+    await next()
+  })
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use('*', loadUser)
+app.use('/account/*', requireLogin)
+app.use('/admin/*', requireRole('admin', 'staff'))
+</pre>
+</div>
+
+<h3>方案二：JWT（适合 API）</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="JWT 的三段结构与验证流程">
+  <rect class="bx-b" x="40" y="26" width="200" height="48" rx="8"/>
+  <text class="sm on-b" x="140" y="48" text-anchor="middle">Header</text>
+  <text class="mono sm" x="140" y="66" text-anchor="middle">{"alg":"HS256"}</text>
+
+  <rect class="bx-p" x="270" y="26" width="220" height="48" rx="8"/>
+  <text class="sm on-p" x="380" y="48" text-anchor="middle">Payload（载荷）</text>
+  <text class="mono sm" x="380" y="66" text-anchor="middle">{"sub":"u_1","role":"admin","exp":…}</text>
+
+  <rect class="bx-g" x="520" y="26" width="200" height="48" rx="8"/>
+  <text class="sm on-g" x="620" y="48" text-anchor="middle">Signature（签名）</text>
+  <text class="mono sm" x="620" y="66" text-anchor="middle">用密钥算出来的校验码</text>
+
+  <text class="mono sm" x="380" y="98" text-anchor="middle">eyJhbGciOi… . eyJzdWIiOi… . 4f3d2a1b…</text>
+
+  <rect class="bx-a" x="60" y="122" width="300" height="100" rx="10"/>
+  <text class="ttl on-a" x="210" y="146" text-anchor="middle">优点</text>
+  <text class="sm" x="76" y="170">服务器<tspan>不用存</tspan>任何东西</text>
+  <text class="sm" x="76" y="190">任何一台机器都能独立验证</text>
+  <text class="sm" x="76" y="210">天然适合无状态、多实例、边缘</text>
+
+  <rect class="bx-r" x="400" y="122" width="300" height="100" rx="10"/>
+  <text class="ttl on-r" x="550" y="146" text-anchor="middle">代价</text>
+  <text class="sm" x="416" y="170">签发之后<tspan class="on-r">无法主动作废</tspan></text>
+  <text class="sm" x="416" y="190">用户改密码/被封号，旧令牌仍有效</text>
+  <text class="sm" x="416" y="210">所以有效期要短（15 分钟）+ 刷新令牌</text>
+</svg>
+<figcaption>图 18-3　JWT 是「可验证的自包含凭证」，不是「加密的秘密」</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+import { jwt, sign } from 'hono/jwt'
+
+// 签发
+app.post('/api/v1/auth/login', zValidator('json', loginSchema), async (c) =&gt; {
+  const { email, password } = c.req.valid('json')
+  const user = await db.getUserByEmail(email)
+
+  if (!user || !(await verify(user.passwordHash, password))) {
+    throw new HTTPException(401, { message: '邮箱或密码不正确' })
+  }
+
+  const token = await sign(
+    {
+      sub: user.id,
+      role: user.role,
+      exp: Math.floor(Date.now() / 1000) + 60 * 15,   // 15 分钟
+    },
+    c.env.JWT_SECRET
+  )
+
+  return c.json({ token })
+})
+
+// 验证：中间件会自动检查 Authorization: Bearer xxx
+app.use('/api/v1/protected/*', (c, next) =&gt;
+  jwt({ secret: c.env.JWT_SECRET })(c, next)
+)
+
+app.get('/api/v1/protected/me', (c) =&gt; {
+  const payload = c.get('jwtPayload')
+  return c.json({ userId: payload.sub, role: payload.role })
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; JWT 的载荷是<strong>公开的</strong></div>
+  <p>
+    那三段只是 Base64 编码，不是加密。任何人复制粘贴到
+    <a href="https://jwt.io">jwt.io</a> 就能看到全部内容。<br>
+    <strong>不要往载荷里放密码、身份证号、任何敏感信息。</strong>
+    签名保证的是「这些内容没被改过」，不是「别人看不到」。
+  </p>
+</div>
+
+<h2 id="oauth">第三方登录</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="OAuth 授权码流程">
+  <rect class="bx-b" x="20" y="30" width="110" height="44" rx="8"/>
+  <text class="sm" x="75" y="57" text-anchor="middle">用户</text>
+
+  <rect class="bx-a" x="325" y="30" width="110" height="44" rx="8"/>
+  <text class="sm on-a" x="380" y="57" text-anchor="middle">你的应用</text>
+
+  <rect class="bx-g" x="630" y="30" width="110" height="44" rx="8"/>
+  <text class="sm on-g" x="685" y="57" text-anchor="middle">GitHub</text>
+
+  <path class="ln-b" d="M75 80 V104 H375" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="98" text-anchor="middle">① 点击「用 GitHub 登录」</text>
+
+  <path class="ln-a" d="M380 112 V128 H680 V80" marker-end="url(#ar-a)"/>
+  <text class="sm" x="540" y="126" text-anchor="middle">② 重定向到 GitHub 授权页</text>
+
+  <path class="ln-g" d="M685 80 V152 H80 V80" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="150" text-anchor="middle">③ 用户在 GitHub 上登录并同意授权</text>
+
+  <path class="ln-b" d="M75 160 V176 H375" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="172" text-anchor="middle">④ 带着授权码回到你的回调地址</text>
+
+  <path class="ln-a" d="M435 176 H630" marker-end="url(#ar-a)"/>
+  <text class="sm" x="530" y="170" text-anchor="middle">⑤ 用授权码换令牌</text>
+
+  <rect class="bx-d" x="120" y="196" width="520" height="38" rx="8"/>
+  <text class="sm" x="380" y="220" text-anchor="middle">⑥ 拿令牌读到用户信息 → 在自己库里建号或找到已有账号 → 建立你自己的会话</text>
+</svg>
+<figcaption>图 18-4　你从头到尾都接触不到用户的 GitHub 密码</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install @hono/oauth-providers
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+import { githubAuth } from '@hono/oauth-providers/github'
+
+app.use('/auth/github', (c, next) =&gt;
+  githubAuth({
+    client_id: c.env.GITHUB_CLIENT_ID,
+    client_secret: c.env.GITHUB_CLIENT_SECRET,
+    scope: ['read:user', 'user:email'],
+  })(c, next)
+)
+
+app.get('/auth/github', async (c) =&gt; {
+  const profile = c.get('user-github')
+  if (!profile) throw new HTTPException(401, { message: '授权失败' })
+
+  const authId = `github:${profile.id}`
+
+  // 已有账号就用，没有就建一个
+  let user = await db.getUserByAuthId(authId)
+  if (!user) {
+    user = await db.createUser({
+      authId,
+      name: profile.name ?? profile.login,
+      email: profile.email ?? null,
+      role: 'customer',
+    })
+  }
+
+  // 从这里开始，走的是我们自己的会话逻辑
+  c.get('session').userId = user.id
+  return c.redirect(c.get('session').returnTo ?? '/account', 303)
+})
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 数据库设计要点</div>
+  <p>
+    用 <code>authId</code> 这种带前缀的字段（<code>github:12345</code>、<code>google:67890</code>）
+    而不是把 GitHub ID 直接当主键。这样：<br>
+    ① 一个用户可以绑定多个登录方式；② 将来加新的登录渠道不用改表结构；<br>
+    ③ 不同平台的 ID 撞号了也不会出问题。
+  </p>
+</div>
+
+<h2 id="ratelimit">限流</h2>
+
+<p>没有限流的登录接口，等于邀请别人来撞库：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+
+export function rateLimit(opts: { limit: number; windowSec: number; kv: KVNamespace }) {
+  return createMiddleware(async (c, next) =&gt; {
+    const ip =
+      c.req.header('cf-connecting-ip') ??
+      c.req.header('x-forwarded-for')?.split(',')[0].trim() ??
+      'unknown'
+
+    const key = `rl:${c.req.path}:${ip}`
+    const count = Number((await opts.kv.get(key)) ?? 0)
+
+    if (count &gt;= opts.limit) {
+      c.header('Retry-After', String(opts.windowSec))
+      throw new HTTPException(429, { message: '请求太频繁，请稍后再试' })
+    }
+
+    await opts.kv.put(key, String(count + 1), { expirationTtl: opts.windowSec })
+    await next()
+  })
+}
+
+// 登录接口：一分钟最多 5 次
+app.use('/login', (c, next) =&gt;
+  rateLimit({ limit: 5, windowSec: 60, kv: c.env.RATE_LIMIT })(c, next)
+)
+</pre>
+</div>
+
+<h2 id="checklist">上线前安全清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 逐项确认</div>
+  <ul>
+    <li>☐ 全站 HTTPS，HTTP 自动跳转</li>
+    <li>☐ <code>secureHeaders()</code> 已启用，CSP 已调好</li>
+    <li>☐ 会话 Cookie 有 <code>httpOnly</code> + <code>secure</code> + <code>sameSite</code></li>
+    <li>☐ 表单类请求有 CSRF 防护</li>
+    <li>☐ 所有输入都用 Zod 校验过（第 8 章）</li>
+    <li>☐ 模板输出自动转义，<code>raw()</code> 只用于可信内容（第 7 章）</li>
+    <li>☐ 数据库查询用参数绑定，没有拼接 SQL 字符串</li>
+    <li>☐ 密码用 Argon2 / bcrypt / PBKDF2 哈希</li>
+    <li>☐ 登录、注册、重置密码接口有限流</li>
+    <li>☐ 错误响应不泄露堆栈和内部信息（第 15 章）</li>
+    <li>☐ 密钥都在环境变量里，没有提交到 Git（第 9 章）</li>
+    <li>☐ 上传文件限大小、限类型、改名（第 8 章）</li>
+    <li>☐ 依赖跑过 <code>npm audit</code>，高危漏洞已处理</li>
+    <li>☐ 日志里没有密码、令牌、个人隐私（第 12 章）</li>
+  </ul>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>HTTPS 是底线；在代理后面要用 <code>X-Forwarded-Proto</code> 判断，且只信任自己的代理。</li>
+  <li><code>secureHeaders()</code> 一行加上一组防护，CSP 是 XSS 的最后一道防线。</li>
+  <li>CSRF 靠 <code>SameSite</code> + Origin 校验；Bearer 令牌认证天然免疫。</li>
+  <li>密码用专门的慢哈希算法；能不自己管密码就不管。</li>
+  <li>认证问「你是谁」（401），授权问「你能做什么」（403）。</li>
+  <li>会话认证适合网页，JWT 适合 API；JWT 载荷是公开的，有效期要短。</li>
+  <li>登录类接口必须限流。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>接上 <code>secureHeaders()</code>，用 <code>curl -I</code> 看看多了哪些响应头。然后配一个 CSP，故意加载一个外部脚本，观察浏览器控制台的拦截报告。</li>
+    <li>实现完整的注册和登录流程，用 Argon2 或 PBKDF2 存密码。确认数据库里存的是哈希而不是明文。</li>
+    <li>实现 <code>requireLogin</code> 和 <code>requireRole</code>，保护 <code>/account</code> 和 <code>/admin</code>。用未登录状态访问，确认跳转到登录页并且登录后能跳回原页面。</li>
+    <li>做一个 JWT 版本的登录接口，用 <code>curl</code> 拿到令牌后访问受保护接口。把令牌粘到 jwt.io 上看看里面有什么。</li>
+    <li>给登录接口加限流，用循环发 10 次请求，确认第 6 次开始返回 429。</li>
+    <li>对照上面的清单，逐项检查你现在的项目。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

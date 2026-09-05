@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 8 章 · 表单处理 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 8 章</span>
+<h1>表单处理</h1>
+<p class="lede">
+  到目前为止数据都是从服务器流向浏览器。现在反过来：用户填的东西怎么回到服务器？
+  这一章讲三种编码格式、两种提交方式、一个必须做的校验，以及文件上传。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清 <code>urlencoded</code>、<code>json</code>、<code>multipart</code> 三种请求体格式</li>
+    <li>用 <code>c.req.parseBody()</code> 处理传统表单提交</li>
+    <li>知道为什么表单提交后要用 <strong>303</strong> 重定向</li>
+    <li>用 <code>fetch</code> 提交表单，不刷新页面</li>
+    <li>用 Zod 做服务端校验，并把错误友好地显示出来</li>
+    <li>接收文件上传并安全地保存</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="two-ways">数据回传的两条路</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="查询串与请求体两种传数据方式">
+  <rect class="bx-b" x="30" y="24" width="330" height="80" rx="10"/>
+  <text class="ttl on-b" x="195" y="48" text-anchor="middle">放在查询串里（GET）</text>
+  <text class="mono sm" x="195" y="70" text-anchor="middle">GET /search?q=海岸&amp;page=2</text>
+  <text class="sm" x="195" y="92" text-anchor="middle">显示在地址栏 · 能收藏 · 能分享 · 有长度限制</text>
+
+  <rect class="bx-p" x="400" y="24" width="330" height="80" rx="10"/>
+  <text class="ttl on-p" x="565" y="48" text-anchor="middle">放在请求体里（POST）</text>
+  <text class="mono sm" x="565" y="70" text-anchor="middle">POST /signup + 请求体</text>
+  <text class="sm" x="565" y="92" text-anchor="middle">不在地址栏 · 无长度限制 · 可以传文件</text>
+
+  <rect class="bx-a" x="30" y="126" width="700" height="70" rx="10"/>
+  <text class="ttl on-a" x="380" y="150" text-anchor="middle">选择原则</text>
+  <text class="sm" x="380" y="172" text-anchor="middle">「查询/筛选/分页」用 GET + 查询串 —— 用户应该能把这个结果页发给别人</text>
+  <text class="sm" x="380" y="190" text-anchor="middle">「提交/修改/删除」用 POST + 请求体 —— 刷新页面不应该重复执行</text>
+</svg>
+<figcaption>图 8-1　什么时候用哪一条路</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 常见误解：POST 比 GET 安全</div>
+  <p>
+    不对。两者都在同一个 HTTP 连接里传输。<strong>只有 HTTPS 才提供安全性</strong>；
+    没有 HTTPS 的话，POST 请求体和 GET 查询串一样是明文，中间人都能看到。
+    POST 的好处只是「不会出现在地址栏、浏览历史和服务器访问日志里」，这是隐私，不是加密。
+  </p>
+</div>
+
+<h2 id="html-form">HTML 表单</h2>
+
+<div class="code" data-lang="html">
+<pre>
+&lt;form action="/newsletter/signup" method="POST"&gt;
+  &lt;input type="hidden" name="source" value="homepage"&gt;
+
+  &lt;label for="f-name"&gt;姓名&lt;/label&gt;
+  &lt;input type="text" id="f-name" name="name" required&gt;
+
+  &lt;label for="f-email"&gt;邮箱&lt;/label&gt;
+  &lt;input type="email" id="f-email" name="email" required&gt;
+
+  &lt;button type="submit"&gt;订阅&lt;/button&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>属性</th><th>作用</th></tr>
+  <tr><td><code>action</code></td><td>提交到哪个 URL。省略则提交到当前地址</td></tr>
+  <tr><td><code>method</code></td><td><strong>默认是 GET</strong>，要 POST 必须显式写</td></tr>
+  <tr><td><code>name</code></td><td><strong>服务器靠它认字段</strong>。没有 name 的输入框不会被提交</td></tr>
+  <tr><td><code>id</code></td><td>只给 <code>&lt;label for&gt;</code> 和 CSS/JS 用，<strong>不会</strong>传给服务器</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; hidden 字段不是秘密</div>
+  <p>
+    <code>type="hidden"</code> 只是「不显示给用户」，任何人查看源代码或用开发者工具都能看到和修改它。
+    永远不要在里面放价格、用户角色、权限这类<strong>服务器需要信任的数据</strong>。
+    它适合放「这个表单来自哪个页面」这种无害的上下文信息。
+  </p>
+</div>
+
+<h2 id="encoding">三种编码格式</h2>
+
+<div class="tw">
+<table>
+  <tr><th>Content-Type</th><th>长什么样</th><th>什么时候用</th></tr>
+  <tr>
+    <td><code>application/x-www-form-urlencoded</code></td>
+    <td><code>name=%E5%BC%A0&amp;email=a%40b.com</code></td>
+    <td>普通表单的默认格式。和查询串一样的编码</td>
+  </tr>
+  <tr>
+    <td><code>multipart/form-data</code></td>
+    <td>用分隔符切开的多段数据，每段有自己的头</td>
+    <td>表单里有 <code>&lt;input type="file"&gt;</code> 时<strong>必须</strong>用</td>
+  </tr>
+  <tr>
+    <td><code>application/json</code></td>
+    <td><code>{"name":"张","email":"a@b.com"}</code></td>
+    <td>用 <code>fetch</code> 提交时最常用</td>
+  </tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="三种请求体格式的实际字节">
+  <rect class="bx-b" x="20" y="20" width="230" height="210" rx="10"/>
+  <text class="ttl on-b" x="135" y="44" text-anchor="middle">urlencoded</text>
+  <text class="mono sm" x="34" y="72">Content-Type:</text>
+  <text class="mono sm" x="34" y="88">application/x-www-</text>
+  <text class="mono sm" x="34" y="104">form-urlencoded</text>
+  <text class="mono sm" x="34" y="134">name=%E5%BC%A0&amp;</text>
+  <text class="mono sm" x="34" y="150">email=a%40b.com</text>
+  <text class="sm" x="34" y="184">· 体积小</text>
+  <text class="sm" x="34" y="202">· 只能传文本</text>
+  <text class="sm" x="34" y="220">· 中文被百分号编码</text>
+
+  <rect class="bx-p" x="266" y="20" width="230" height="210" rx="10"/>
+  <text class="ttl on-p" x="381" y="44" text-anchor="middle">multipart</text>
+  <text class="mono sm" x="280" y="72">Content-Type:</text>
+  <text class="mono sm" x="280" y="88">multipart/form-data;</text>
+  <text class="mono sm" x="280" y="104">boundary=----abc</text>
+  <text class="mono sm" x="280" y="128">------abc</text>
+  <text class="mono sm" x="280" y="144">name="photo";</text>
+  <text class="mono sm" x="280" y="160">filename="a.jpg"</text>
+  <text class="mono sm" x="280" y="176">&lt;二进制数据&gt;</text>
+  <text class="sm" x="280" y="204">· 唯一能传文件的</text>
+  <text class="sm" x="280" y="222">· 开销大，解析复杂</text>
+
+  <rect class="bx-g" x="512" y="20" width="228" height="210" rx="10"/>
+  <text class="ttl on-g" x="626" y="44" text-anchor="middle">json</text>
+  <text class="mono sm" x="526" y="72">Content-Type:</text>
+  <text class="mono sm" x="526" y="88">application/json</text>
+  <text class="mono sm" x="526" y="126">{</text>
+  <text class="mono sm" x="526" y="142">&nbsp;&nbsp;"name": "张",</text>
+  <text class="mono sm" x="526" y="158">&nbsp;&nbsp;"email": "a@b.com"</text>
+  <text class="mono sm" x="526" y="174">}</text>
+  <text class="sm" x="526" y="204">· 支持嵌套结构</text>
+  <text class="sm" x="526" y="222">· 表单默认发不出，要用 JS</text>
+</svg>
+<figcaption>图 8-2　同样的两个字段，三种编码的实际样子</figcaption>
+</figure>
+
+<h2 id="parse">在 Hono 里接收表单</h2>
+
+<div class="code" data-lang="tsx" data-file="src/handlers/newsletter.tsx">
+<pre>
+export const signupProcess = async (c: Context) =&gt; {
+  // parseBody 同时支持 urlencoded 和 multipart
+  const body = await c.req.parseBody()
+
+  const name = String(body.name ?? '')
+  const email = String(body.email ?? '')
+
+  console.log(`新订阅：${name} &lt;${email}&gt;`)
+
+  return c.redirect('/newsletter/thank-you', 303)
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+app.get('/newsletter', handlers.signupForm)
+app.post('/newsletter/signup', handlers.signupProcess)
+app.get('/newsletter/thank-you', handlers.signupThankYou)
+</pre>
+</div>
+
+<h3><code>parseBody</code> 的几个选项</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 默认：同名字段只保留最后一个
+const body = await c.req.parseBody()
+
+// all: true —— 同名字段收集成数组（多选框、多文件）
+const body = await c.req.parseBody({ all: true })
+// &lt;input name="tag" value="海岸"&gt; &lt;input name="tag" value="帆船"&gt;
+// =&gt; body.tag 是 ['海岸', '帆船']
+
+// dot: true —— 把 a.b 形式的字段名还原成嵌套对象
+const body = await c.req.parseBody({ dot: true })
+// &lt;input name="contact.email"&gt;
+// =&gt; body.contact.email
+</pre>
+</div>
+
+<p>如果客户端发的是 JSON，用 <code>c.req.json()</code>：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+const data = await c.req.json&lt;{ name: string; email: string }&gt;()
+</pre>
+</div>
+
+<h2 id="redirect">为什么必须是 303</h2>
+
+<p>
+  表单提交成功后，<strong>一定要重定向</strong>，不要直接返回 HTML。原因看图：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="直接返回 HTML 与 303 重定向的区别">
+  <rect class="bx-r" x="20" y="20" width="340" height="120" rx="10"/>
+  <text class="ttl on-r" x="190" y="44" text-anchor="middle">&#10060; 直接返回 HTML</text>
+  <text class="sm" x="36" y="70">POST /newsletter/signup → 200 「感谢订阅」</text>
+  <text class="sm" x="36" y="92">地址栏停在 /newsletter/signup</text>
+  <text class="sm on-r" x="36" y="114">用户按 F5 → 浏览器问「要重新提交表单吗」</text>
+  <text class="sm on-r" x="36" y="132">按确定 → <tspan>又订阅了一次</tspan></text>
+
+  <rect class="bx-g" x="400" y="20" width="340" height="120" rx="10"/>
+  <text class="ttl on-g" x="570" y="44" text-anchor="middle">&#9989; 303 重定向</text>
+  <text class="sm" x="416" y="70">POST /newsletter/signup → 303 Location: /thank-you</text>
+  <text class="sm" x="416" y="92">浏览器自动 GET /thank-you → 200</text>
+  <text class="sm on-g" x="416" y="114">地址栏停在 /thank-you</text>
+  <text class="sm on-g" x="416" y="132">用户按 F5 → 只是重新 GET 一次感谢页，无副作用</text>
+
+  <rect class="bx-b" x="20" y="160" width="720" height="118" rx="10"/>
+  <text class="ttl on-b" x="380" y="184" text-anchor="middle">302 和 303 有什么区别？</text>
+  <text class="sm" x="40" y="208">302 Found：规范没说清楚跟随时该用什么方法。历史上浏览器实现不一致，有的会用 POST 再请求一次目标地址。</text>
+  <text class="sm" x="40" y="230">303 See Other：规范<tspan>明确要求</tspan>用 GET 跟随，不管原请求是什么方法。这正是表单提交后想要的行为。</text>
+  <text class="sm" x="40" y="252">301 Moved Permanently：<tspan class="on-r">千万别用在这里</tspan>。浏览器会永久缓存这个跳转，</text>
+  <text class="sm" x="40" y="270">下次用户提交表单时可能<tspan class="on-r">直接跳到感谢页，根本不发 POST</tspan>，数据就丢了。</text>
+</svg>
+<figcaption>图 8-3　这个模式叫 POST/Redirect/GET，是 Web 开发的经典套路</figcaption>
+</figure>
+
+<h2 id="fetch">用 fetch 提交：不刷新页面</h2>
+
+<p>现代做法是拦截表单提交，自己用 <code>fetch</code> 发请求：</p>
+
+<div class="code" data-lang="tsx" data-file="src/views/newsletter.tsx">
+<pre>
+export const NewsletterPage: FC = () =&gt; (
+  &lt;Layout title="订阅通讯"&gt;
+    &lt;div id="signup-container"&gt;
+      &lt;form id="signup-form"&gt;
+        &lt;label for="f-name"&gt;姓名&lt;/label&gt;
+        &lt;input type="text" id="f-name" name="name" required /&gt;
+
+        &lt;label for="f-email"&gt;邮箱&lt;/label&gt;
+        &lt;input type="email" id="f-email" name="email" required /&gt;
+
+        &lt;button type="submit"&gt;订阅&lt;/button&gt;
+      &lt;/form&gt;
+    &lt;/div&gt;
+
+    &lt;script src="/js/newsletter.js" defer&gt;&lt;/script&gt;
+  &lt;/Layout&gt;
+)
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="public/js/newsletter.js">
+<pre>
+document.getElementById('signup-form').addEventListener('submit', async (evt) =&gt; {
+  evt.preventDefault()   // 阻止浏览器自己提交
+
+  const form = evt.target
+  const container = document.getElementById('signup-container')
+
+  try {
+    const res = await fetch('/api/newsletter/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: form.elements.name.value,
+        email: form.elements.email.value,
+      }),
+    })
+
+    if (!res.ok) throw new Error(`请求失败，状态码 ${res.status}`)
+
+    await res.json()
+    container.innerHTML = '&lt;p&gt;&lt;b&gt;订阅成功，感谢！&lt;/b&gt;&lt;/p&gt;'
+  } catch (err) {
+    container.innerHTML =
+      '&lt;p&gt;抱歉，订阅时出了点问题，请&lt;a href="/newsletter"&gt;重试&lt;/a&gt;。&lt;/p&gt;'
+  }
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/api/newsletter/signup', async (c) =&gt; {
+  const { name, email } = await c.req.json&lt;{ name: string; email: string }&gt;()
+  console.log(`新订阅：${name} &lt;${email}&gt;`)
+  return c.json({ ok: true })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 用 <code>/api/</code> 前缀区分两类端点</div>
+  <p>
+    给浏览器直接访问的路由返回 HTML 或重定向；给 <code>fetch</code> 调用的路由返回 JSON。
+    用路径前缀把它们分开，将来加 CORS、限流、鉴权时可以整组处理（<code>app.use('/api/*', ...)</code>）。
+  </p>
+</div>
+
+<h2 id="validate">校验：绝对不能省</h2>
+
+<p>
+  HTML 的 <code>required</code> 和 <code>type="email"</code> 只是<strong>用户体验</strong>，不是安全措施。
+  攻击者用 <code>curl</code> 直接发请求，完全绕过浏览器。<strong>服务端必须重新校验一遍。</strong>
+</p>
+
+<p>手写 <code>if</code> 很快会失控。用 <a href="https://zod.dev">Zod</a> 描述「合法数据长什么样」：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install zod @hono/zod-validator
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+import { z } from 'zod'
+import { zValidator } from '@hono/zod-validator'
+
+const signupSchema = z.object({
+  name: z.string().min(1, '请填写姓名').max(50, '姓名太长了'),
+  email: z.string().email('邮箱格式不正确'),
+  source: z.string().optional(),
+})
+
+app.post(
+  '/api/newsletter/signup',
+  zValidator('json', signupSchema),   // ← 校验中间件
+  async (c) =&gt; {
+    // 能走到这里，说明数据一定合法，而且类型是推导出来的
+    const { name, email } = c.req.valid('json')
+    await db.addSubscriber({ name, email })
+    return c.json({ ok: true })
+  }
+)
+</pre>
+</div>
+
+<p>
+  <code>zValidator</code> 的第一个参数是数据来源，可以是 <code>'json'</code>、<code>'form'</code>、
+  <code>'query'</code>、<code>'param'</code>、<code>'header'</code>、<code>'cookie'</code>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="校验中间件作为守门人">
+  <rect class="bx-b" x="20" y="70" width="120" height="56" rx="8"/>
+  <text class="lbl" x="80" y="94" text-anchor="middle">请求</text>
+  <text class="sm"  x="80" y="112" text-anchor="middle">任意数据</text>
+
+  <path class="ln-b" d="M144 98 H210" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="214" y="56" width="170" height="84" rx="10"/>
+  <text class="ttl on-a" x="299" y="82" text-anchor="middle">zValidator</text>
+  <text class="sm" x="299" y="102" text-anchor="middle">按 schema 检查</text>
+  <text class="sm" x="299" y="122" text-anchor="middle">顺便做类型转换</text>
+
+  <path class="ln-g" d="M388 82 H460" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="424" y="74" text-anchor="middle">通过</text>
+  <rect class="bx-g" x="464" y="52" width="270" height="56" rx="8"/>
+  <text class="lbl on-g" x="599" y="76" text-anchor="middle">处理函数</text>
+  <text class="mono sm" x="599" y="94" text-anchor="middle">c.req.valid('json') 有完整类型</text>
+
+  <path class="ln-r" d="M388 120 H460" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="424" y="140" text-anchor="middle">不通过</text>
+  <rect class="bx-r" x="464" y="120" width="270" height="52" rx="8"/>
+  <text class="lbl on-r" x="599" y="142" text-anchor="middle">400 + 错误详情</text>
+  <text class="sm" x="599" y="160" text-anchor="middle">处理函数根本不会被调用</text>
+</svg>
+<figcaption>图 8-4　校验器是守门人，让处理函数只需要关心正常情况</figcaption>
+</figure>
+
+<h3>自定义错误响应</h3>
+
+<p>默认的 400 JSON 对 API 够用，但传统表单需要把错误显示回页面上：</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+app.post(
+  '/newsletter/signup',
+  zValidator('form', signupSchema, (result, c) =&gt; {
+    if (!result.success) {
+      // 把 Zod 的错误整理成 { 字段名: 错误信息 }
+      const errors: Record&lt;string, string&gt; = {}
+      for (const issue of result.error.issues) {
+        errors[String(issue.path[0])] = issue.message
+      }
+      // 重新渲染表单，带上错误和用户已填的内容
+      return c.html(&lt;NewsletterForm errors={errors} values={result.data} /&gt;, 422)
+    }
+  }),
+  async (c) =&gt; {
+    const { name, email } = c.req.valid('form')
+    await db.addSubscriber({ name, email })
+    return c.redirect('/newsletter/thank-you', 303)
+  }
+)
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 出错时一定要回填用户填过的内容</div>
+  <p>
+    最让人恼火的表单体验是：填了十个字段，因为邮箱格式错了，回来发现全空了。
+    把 <code>values</code> 传回视图，用 <code>value={values.name}</code> 回填。
+    这是几行代码的事，但用户会记住。
+  </p>
+</div>
+
+<h2 id="upload">文件上传</h2>
+
+<p>表单必须加 <code>enctype</code>：</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+&lt;form
+  method="POST"
+  action="/contest/vacation-photo"
+  enctype="multipart/form-data"
+&gt;
+  &lt;label for="f-email"&gt;邮箱&lt;/label&gt;
+  &lt;input type="email" id="f-email" name="email" required /&gt;
+
+  &lt;label for="f-photo"&gt;度假照片&lt;/label&gt;
+  &lt;input type="file" id="f-photo" name="photo" accept="image/*" required /&gt;
+
+  &lt;button type="submit"&gt;提交&lt;/button&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<p>
+  服务端 <code>parseBody()</code> 会把文件字段解析成标准的 <code>File</code> 对象：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/handlers/contest.ts">
+<pre>
+import { writeFile, mkdir } from 'node:fs/promises'
+import { join, extname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+
+const UPLOAD_DIR = './data/vacation-photos'
+const MAX_SIZE = 5 * 1024 * 1024                      // 5 MB
+const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp'])
+
+export const photoContest = async (c: Context) =&gt; {
+  const body = await c.req.parseBody()
+  const email = String(body.email ?? '')
+  const photo = body.photo
+
+  // ① 确认它真的是个文件
+  if (!(photo instanceof File)) {
+    return c.json({ error: '请选择一张照片' }, 400)
+  }
+
+  // ② 限制大小
+  if (photo.size &gt; MAX_SIZE) {
+    return c.json({ error: '照片不能超过 5 MB' }, 413)
+  }
+
+  // ③ 限制类型
+  if (!ALLOWED.has(photo.type)) {
+    return c.json({ error: '只接受 JPEG / PNG / WebP 格式' }, 415)
+  }
+
+  // ④ 自己生成文件名，绝不使用用户提供的名字
+  const ext = extname(photo.name).toLowerCase().slice(0, 6)
+  const safeName = `${randomUUID()}${/^\.[a-z0-9]+$/.test(ext) ? ext : '.bin'}`
+
+  await mkdir(UPLOAD_DIR, { recursive: true })
+  const buffer = Buffer.from(await photo.arrayBuffer())
+  await writeFile(join(UPLOAD_DIR, safeName), buffer)
+
+  await db.saveContestEntry({ email, photoPath: safeName })
+
+  return c.redirect('/contest/thank-you', 303)
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 上传是攻击面最大的功能之一</div>
+  <ul>
+    <li><strong>永远不要用用户给的文件名。</strong>它可能是 <code>../../etc/passwd</code>，也可能是
+        <code>shell.php</code>。自己生成随机名，只保留经过白名单校验的扩展名。</li>
+    <li><strong>限制大小</strong>，否则一个几 GB 的上传就能撑爆你的磁盘或内存。</li>
+    <li><strong>不要相信 <code>photo.type</code>。</strong>它来自客户端，可以伪造。真正严格的做法是读文件头几个字节
+        判断真实类型（叫 magic number 检测）。</li>
+    <li><strong>上传目录不要放在能被当作代码执行的地方</strong>，也不要直接用 <code>serveStatic</code> 暴露出去。</li>
+  </ul>
+</div>
+
+<p>Hono 还提供了一个中间件，在解析请求体之前就把超大请求挡掉：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { bodyLimit } from 'hono/body-limit'
+
+app.post(
+  '/contest/vacation-photo',
+  bodyLimit({
+    maxSize: 5 * 1024 * 1024,
+    onError: (c) =&gt; c.text('文件太大了', 413),
+  }),
+  handlers.photoContest
+)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 边缘环境没有文件系统</div>
+  <p>
+    上面的 <code>writeFile</code> 在 Cloudflare Workers 上是跑不通的 —— 那里没有可写磁盘，
+    而且就算有，多个边缘节点之间也不共享。正确做法是传到对象存储（R2 / S3）。
+    第 13 章会讲这个。写代码时最好一开始就把「存文件」抽成一个函数，将来换实现只改一处。
+  </p>
+</div>
+
+<h3>用 fetch 上传文件</h3>
+
+<p>好消息：几乎不用改服务端代码，因为编码格式完全一样。</p>
+
+<div class="code" data-lang="js">
+<pre>
+document.getElementById('photo-form').addEventListener('submit', async (evt) =&gt; {
+  evt.preventDefault()
+
+  // FormData 直接从 form 元素构造，浏览器自动设置正确的 Content-Type 和 boundary
+  const body = new FormData(evt.target)
+
+  const res = await fetch('/api/contest/vacation-photo', { method: 'POST', body })
+  const json = await res.json()
+  // ...更新界面
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 别手动设 Content-Type</div>
+  <p>
+    用 <code>FormData</code> 时<strong>不要</strong>自己写 <code>headers: { 'Content-Type': 'multipart/form-data' }</code>。
+    multipart 需要一个随机 boundary 分隔符，只有浏览器知道它是什么。你手动设了反而会破坏请求。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>查询 用 GET + 查询串；提交 用 POST + 请求体。POST 不等于安全，HTTPS 才是。</li>
+  <li>三种编码：<code>urlencoded</code>（普通表单）、<code>multipart</code>（带文件）、<code>json</code>（fetch）。</li>
+  <li><code>c.req.parseBody()</code> 处理前两种，<code>c.req.json()</code> 处理第三种。</li>
+  <li>表单提交后用 <strong>303</strong> 重定向，避免刷新重复提交。</li>
+  <li>前端校验是体验，<strong>服务端校验是必须</strong>。用 Zod + <code>zValidator</code>。</li>
+  <li>文件上传要限大小、限类型、自己生成文件名，永远不信任客户端。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>做一个 <code>/contact</code> 联系表单，用 Zod 校验姓名、邮箱和留言（留言至少 10 个字）。校验失败时重新渲染表单，显示错误并回填已填内容。</li>
+    <li>用 <code>curl -X POST -d "name=&amp;email=notanemail" http://localhost:3000/newsletter/signup -i</code> 绕过浏览器提交，确认服务端拦住了它。</li>
+    <li>给上传接口加上大小和类型限制，然后试着上传一个 <code>.txt</code> 文件（把它改名成 <code>.jpg</code>），看看你的校验有没有被骗过去。</li>
+    <li>把「保存文件」抽成 <code>saveUpload(name, bytes): Promise&lt;string&gt;</code> 这样一个函数，让处理函数不知道文件到底存在哪。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

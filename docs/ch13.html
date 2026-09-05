@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 13 章 · 持久化 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="13">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 13 章</span>
+<h1>持久化</h1>
+<p class="lede">
+  到现在为止，我们的数据都存在内存里，重启就没。这一章给云雀旅行接上真正的存储：
+  数据库存结构化数据，对象存储放文件，KV 存会话。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道四种存储各自适合装什么</li>
+    <li>用一个抽象层把数据库细节挡在业务代码之外</li>
+    <li>用 Drizzle ORM 定义表结构、写迁移、做增删改查</li>
+    <li>把会话存储换成真正能用于生产的实现</li>
+    <li>避开 N+1 查询、缺索引这些经典性能陷阱</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="options">四种存储</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="四种存储类型的对比">
+  <rect class="bx-b" x="20" y="20" width="350" height="128" rx="10"/>
+  <text class="ttl on-b" x="36" y="44">关系型数据库</text>
+  <text class="sm" x="36" y="66">PostgreSQL · MySQL · SQLite · Cloudflare D1</text>
+  <text class="sm" x="36" y="88">表格 + 外键 + 事务 + SQL</text>
+  <text class="sm on-g" x="36" y="112">装：用户、订单、商品 —— 任何有关系的数据</text>
+  <text class="sm" x="36" y="134">默认从这个开始，除非有明确理由不用</text>
+
+  <rect class="bx-p" x="390" y="20" width="350" height="128" rx="10"/>
+  <text class="ttl on-p" x="406" y="44">文档数据库</text>
+  <text class="sm" x="406" y="66">MongoDB · Firestore · DynamoDB</text>
+  <text class="sm" x="406" y="88">存 JSON 文档，schema 灵活</text>
+  <text class="sm on-g" x="406" y="112">装：结构多变的内容、日志、事件</text>
+  <text class="sm on-r" x="406" y="134">跨文档的关联查询会很痛苦</text>
+
+  <rect class="bx-g" x="20" y="160" width="350" height="128" rx="10"/>
+  <text class="ttl on-g" x="36" y="184">键值存储</text>
+  <text class="sm" x="36" y="206">Redis · Cloudflare KV · Upstash</text>
+  <text class="sm" x="36" y="228">只能按 key 取值，但极快</text>
+  <text class="sm on-g" x="36" y="252">装：会话、缓存、限流计数、临时令牌</text>
+  <text class="sm on-r" x="36" y="274">不能按内容查询</text>
+
+  <rect class="bx-a" x="390" y="160" width="350" height="128" rx="10"/>
+  <text class="ttl on-a" x="406" y="184">对象存储</text>
+  <text class="sm" x="406" y="206">S3 · Cloudflare R2 · 各家 OSS</text>
+  <text class="sm" x="406" y="228">按 GB 计价，存大块二进制</text>
+  <text class="sm on-g" x="406" y="252">装：用户上传的图片、视频、PDF、备份</text>
+  <text class="sm" x="406" y="274">元信息（谁传的、什么时候）还是放数据库</text>
+</svg>
+<figcaption>图 13-1　一个真实项目通常同时用到其中两到三种</figcaption>
+</figure>
+
+<h3>为什么不能用文件系统</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 第 8 章我们这样存了上传的照片
+await writeFile(join('./data/photos', name), buffer)
+</pre>
+</div>
+
+<p>这在本地能用，上线后有三个问题：</p>
+<ul>
+  <li><strong>扩不了容。</strong>两个实例各自有一份磁盘，A 存的文件 B 读不到（第 12 章讲过）。</li>
+  <li><strong>会丢。</strong>容器重启、实例替换，本地磁盘上的东西就没了。</li>
+  <li><strong>边缘环境根本没有可写磁盘。</strong>Workers 上这行代码直接报错。</li>
+</ul>
+
+<p>正确做法是对象存储。以 Cloudflare R2 为例（S3 兼容，用法几乎一样）：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+type Bindings = { BUCKET: R2Bucket }
+
+app.post('/upload', async (c) =&gt; {
+  const body = await c.req.parseBody()
+  const photo = body.photo
+  if (!(photo instanceof File)) return c.json({ error: '缺少文件' }, 400)
+
+  const key = `photos/${crypto.randomUUID()}.jpg`
+
+  await c.env.BUCKET.put(key, await photo.arrayBuffer(), {
+    httpMetadata: { contentType: photo.type },
+  })
+
+  // 文件本身进对象存储，元信息进数据库
+  await db.saveContestEntry({ email: String(body.email), photoKey: key })
+
+  return c.json({ ok: true, key })
+})
+</pre>
+</div>
+
+<h2 id="abstract">先建抽象层</h2>
+
+<p>
+  在写任何数据库代码之前，先定义「业务需要什么操作」。
+  业务代码只认这个接口，不认数据库：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/db/types.ts">
+<pre>
+export type Vacation = {
+  sku: string
+  name: string
+  slug: string
+  description: string
+  price: number
+  tags: string[]
+  inSeason: boolean
+  available: boolean
+  maximumGuests: number
+}
+
+export interface VacationRepo {
+  list(opts?: { available?: boolean }): Promise&lt;Vacation[]&gt;
+  findBySku(sku: string): Promise&lt;Vacation | null&gt;
+  addInSeasonListener(email: string, sku: string): Promise&lt;void&gt;
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="数据访问抽象层的作用">
+  <rect class="bx-a" x="240" y="20" width="280" height="44" rx="8"/>
+  <text class="ttl on-a" x="380" y="48" text-anchor="middle">处理函数（业务代码）</text>
+
+  <path class="ln" d="M380 68 V92" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="200" y="96" width="360" height="44" rx="8"/>
+  <text class="ttl on-b" x="380" y="118" text-anchor="middle">VacationRepo 接口</text>
+  <text class="sm" x="380" y="134" text-anchor="middle">list() · findBySku() · addInSeasonListener()</text>
+
+  <path class="ln-d" d="M300 144 L180 174" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M380 144 V174" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M460 144 L580 174" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="60"  y="178" width="180" height="34" rx="6"/>
+  <text class="sm" x="150" y="200" text-anchor="middle">内存实现（测试用）</text>
+  <rect class="bx-g" x="290" y="178" width="180" height="34" rx="6"/>
+  <text class="sm" x="380" y="200" text-anchor="middle">Drizzle + SQLite/D1</text>
+  <rect class="bx-g" x="520" y="178" width="180" height="34" rx="6"/>
+  <text class="sm" x="610" y="200" text-anchor="middle">Postgres</text>
+</svg>
+<figcaption>图 13-2　业务代码只认接口，换数据库时只换下面那一层</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 抽象层的两个真实收益</div>
+  <p>
+    ① <strong>测试变简单。</strong>写一个基于数组的内存实现，测处理函数时完全不需要数据库。<br>
+    ② <strong>数据库能换。</strong>本教程会先用 SQLite 再展示 Postgres —— 业务代码一行不改。<br>
+    代价是多写一层。但这层很薄，值得。
+  </p>
+</div>
+
+<h2 id="drizzle">用 Drizzle 定义表</h2>
+
+<p>
+  <a href="https://orm.drizzle.team">Drizzle</a> 是目前对 Hono 最友好的 ORM：
+  轻量、类型推导极强、支持 SQLite / D1 / Postgres / MySQL，而且能在边缘环境跑。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install drizzle-orm
+npm install -D drizzle-kit
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+import { sqliteTable, text, integer, real, index } from 'drizzle-orm/sqlite-core'
+
+export const vacations = sqliteTable(
+  'vacations',
+  {
+    sku: text('sku').primaryKey(),
+    slug: text('slug').notNull().unique(),
+    name: text('name').notNull(),
+    category: text('category'),
+    description: text('description').notNull().default(''),
+    price: real('price').notNull(),
+    // SQLite 没有数组类型，用 JSON 文本存
+    tags: text('tags', { mode: 'json' }).$type&lt;string[]&gt;().notNull().default([]),
+    inSeason: integer('in_season', { mode: 'boolean' }).notNull().default(false),
+    available: integer('available', { mode: 'boolean' }).notNull().default(true),
+    maximumGuests: integer('maximum_guests').notNull().default(10),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  },
+  (t) =&gt; ({
+    // 经常按 available 过滤，加个索引
+    availableIdx: index('idx_vacations_available').on(t.available),
+  })
+)
+
+export const inSeasonListeners = sqliteTable('in_season_listeners', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  email: text('email').notNull(),
+  sku: text('sku').notNull().references(() =&gt; vacations.sku),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
+
+// 类型可以从表定义自动推导出来，不用手写
+export type VacationRow = typeof vacations.$inferSelect
+export type NewVacation = typeof vacations.$inferInsert
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 命名风格：数据库用蛇形，代码用驼峰</div>
+  <p>
+    SQL 世界的惯例是 <code>in_season</code>，JavaScript 的惯例是 <code>inSeason</code>。
+    Drizzle 让你在一处同时声明两者：<code>inSeason: integer('in_season')</code>。
+    左边给代码用，右边是真实列名。两边都保持地道，不用做转换。
+  </p>
+</div>
+
+<h3>迁移</h3>
+
+<p>
+  <strong>不要手动改生产数据库的表结构。</strong>用迁移文件 ——
+  它是「数据库结构的版本控制」，能被提交、被 review、被自动执行。
+</p>
+
+<div class="code" data-lang="ts" data-file="drizzle.config.ts">
+<pre>
+import { defineConfig } from 'drizzle-kit'
+
+export default defineConfig({
+  schema: './src/db/schema.ts',
+  out: './drizzle',
+  dialect: 'sqlite',
+})
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 改完 schema.ts 之后，生成迁移 SQL
+npx drizzle-kit generate
+
+# 本地应用
+npx wrangler d1 migrations apply meadowlark --local
+# 线上应用
+npx wrangler d1 migrations apply meadowlark --remote
+</pre>
+</div>
+
+<div class="code" data-lang="sql" data-file="drizzle/0000_initial.sql">
+<pre>
+CREATE TABLE `vacations` (
+  `sku` text PRIMARY KEY NOT NULL,
+  `slug` text NOT NULL,
+  `name` text NOT NULL,
+  ...
+);
+CREATE UNIQUE INDEX `vacations_slug_unique` ON `vacations` (`slug`);
+CREATE INDEX `idx_vacations_available` ON `vacations` (`available`);
+</pre>
+</div>
+
+<h2 id="crud">增删改查</h2>
+
+<div class="code" data-lang="ts" data-file="src/db/vacation-repo.ts">
+<pre>
+import { drizzle } from 'drizzle-orm/d1'
+import { eq, and, desc } from 'drizzle-orm'
+import { vacations, inSeasonListeners } from './schema'
+import type { VacationRepo, Vacation } from './types'
+
+export function createVacationRepo(d1: D1Database): VacationRepo {
+  const db = drizzle(d1)
+
+  return {
+    async list(opts = {}) {
+      const conditions = []
+      if (opts.available !== undefined) {
+        conditions.push(eq(vacations.available, opts.available))
+      }
+
+      const rows = await db
+        .select()
+        .from(vacations)
+        .where(conditions.length ? and(...conditions) : undefined)
+        .orderBy(desc(vacations.createdAt))
+
+      return rows.map(toVacation)
+    },
+
+    async findBySku(sku) {
+      const rows = await db
+        .select()
+        .from(vacations)
+        .where(eq(vacations.sku, sku))
+        .limit(1)
+
+      return rows[0] ? toVacation(rows[0]) : null
+    },
+
+    async addInSeasonListener(email, sku) {
+      await db.insert(inSeasonListeners)
+        .values({ email, sku, createdAt: new Date() })
+        .onConflictDoNothing()          // 重复订阅不报错
+    },
+  }
+}
+
+function toVacation(row: typeof vacations.$inferSelect): Vacation {
+  return {
+    sku: row.sku,
+    slug: row.slug,
+    name: row.name,
+    description: row.description,
+    price: row.price,
+    tags: row.tags,
+    inSeason: row.inSeason,
+    available: row.available,
+    maximumGuests: row.maximumGuests,
+  }
+}
+</pre>
+</div>
+
+<p>在应用里接上去：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+type Bindings = { DB: D1Database; BUCKET: R2Bucket }
+type Variables = { repo: VacationRepo }
+
+const app = new Hono&lt;{ Bindings: Bindings; Variables: Variables }&gt;()
+
+// 每个请求构造一次仓库（Workers 上不能在模块顶层拿 c.env）
+app.use('*', async (c, next) =&gt; {
+  c.set('repo', createVacationRepo(c.env.DB))
+  await next()
+})
+
+app.get('/vacations', async (c) =&gt; {
+  const vacations = await c.get('repo').list({ available: true })
+  return c.html(&lt;VacationsPage vacations={vacations} /&gt;)
+})
+</pre>
+</div>
+
+<h2 id="postgres">换成 PostgreSQL</h2>
+
+<p>
+  如果你要用 Postgres，Drizzle 的写法几乎一样，只是驱动和列类型不同：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// schema：改用 pg-core
+import { pgTable, text, boolean, doublePrecision, jsonb, timestamp } from 'drizzle-orm/pg-core'
+
+export const vacations = pgTable('vacations', {
+  sku: text('sku').primaryKey(),
+  name: text('name').notNull(),
+  price: doublePrecision('price').notNull(),
+  tags: jsonb('tags').$type&lt;string[]&gt;().notNull().default([]),
+  inSeason: boolean('in_season').notNull().default(false),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 驱动：边缘环境要用基于 HTTP 的驱动
+import { drizzle } from 'drizzle-orm/neon-http'
+import { neon } from '@neondatabase/serverless'
+
+const sql = neon(c.env.DATABASE_URL)
+const db = drizzle(sql)
+
+// 查询代码完全一样
+const rows = await db.select().from(vacations).where(eq(vacations.available, true))
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 边缘环境不能用传统数据库驱动</div>
+  <p>
+    <code>pg</code>、<code>mysql2</code> 这些经典驱动依赖 TCP socket 和连接池 ——
+    Workers 上没有。而且边缘节点是短暂的，「连接池」这个概念本身就不成立。<br>
+    解决方案是 <strong>HTTP 驱动</strong>：Neon、Supabase、PlanetScale 都提供了
+    把 SQL 包在 HTTP 请求里发送的驱动。延迟略高，但能用，而且不需要管连接数。
+  </p>
+</div>
+
+<h2 id="session-store">把会话存储换掉</h2>
+
+<p>第 9 章我们用了 <code>MemoryStore</code>，并说过它不能上生产。现在换成 KV：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/kv-session-store.ts">
+<pre>
+import type { SessionStore, SessionData } from './session-store'
+
+export function createKVSessionStore(kv: KVNamespace): SessionStore {
+  const key = (id: string) =&gt; `sess:${id}`
+
+  return {
+    async get(id) {
+      return await kv.get&lt;SessionData&gt;(key(id), 'json')
+    },
+    async set(id, data, ttlSeconds) {
+      // KV 自带过期，不用自己清理
+      await kv.put(key(id), JSON.stringify(data), { expirationTtl: ttlSeconds })
+    },
+    async destroy(id) {
+      await kv.delete(key(id))
+    },
+  }
+}
+</pre>
+</div>
+
+<p>用 Redis 的版本同样简单：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { Redis } from '@upstash/redis'
+
+export function createRedisSessionStore(url: string, token: string): SessionStore {
+  const redis = new Redis({ url, token })    // 基于 HTTP，边缘可用
+  return {
+    async get(id) { return await redis.get(`sess:${id}`) },
+    async set(id, data, ttl) { await redis.set(`sess:${id}`, data, { ex: ttl }) },
+    async destroy(id) { await redis.del(`sess:${id}`) },
+  }
+}
+</pre>
+</div>
+
+<p>
+  应用代码一个字都不用改 —— 这就是第 9 章定义 <code>SessionStore</code> 接口的回报。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; KV 是最终一致的</div>
+  <p>
+    Cloudflare KV 为了全球快速读取，牺牲了强一致性：你写入后，
+    其他地区的节点可能要几秒才能读到新值。<br>
+    这对会话来说通常没问题（同一个用户大概率打到同一个区域）。
+    但对「余额」「库存」这种数据绝对不行 —— 那些要用 D1、Durable Objects 或传统数据库。
+  </p>
+</div>
+
+<h2 id="perf">三个性能陷阱</h2>
+
+<h3>① N+1 查询</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 101 次查询</div>
+    <div class="code" data-lang="ts"><pre>
+const vacations = await repo.list()   // 1 次
+
+for (const v of vacations) {          // 100 次
+  v.reviews = await repo.getReviews(v.sku)
+}
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 2 次查询</div>
+    <div class="code" data-lang="ts"><pre>
+const vacations = await repo.list()   // 1 次
+const skus = vacations.map(v =&gt; v.sku)
+
+// 一次取回所有评论
+const all = await repo.getReviewsBySkus(skus)  // 1 次
+
+const grouped = Map.groupBy(all, r =&gt; r.sku)
+for (const v of vacations) {
+  v.reviews = grouped.get(v.sku) ?? []
+}
+</pre></div>
+  </div>
+</div>
+
+<p>
+  这是最常见的性能杀手，而且<strong>在测试数据少的时候完全看不出来</strong>。
+  本地 10 条数据时两种写法都是几毫秒，线上 1000 条时一个 20 ms 一个 4 秒。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="N+1 查询与批量查询的对比">
+  <text class="ttl on-r" x="20" y="22">N+1：1 次查列表 + 100 次查详情</text>
+  <rect class="bx" x="20" y="32" width="70" height="30" rx="6"/>
+  <text class="sm" x="55" y="52" text-anchor="middle">列表</text>
+  <path class="ln-r" d="M94 47 H124" style="stroke:var(--red)"/>
+  <rect class="bx-r" x="128" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="160" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="192" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="224" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="256" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="288" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="320" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="352" y="32" width="26" height="30" rx="4"/>
+  <rect class="bx-r" x="384" y="32" width="26" height="30" rx="4"/>
+  <text class="sm on-r" x="424" y="52">…还有 91 次</text>
+  <text class="sm" x="560" y="52">每次都是一个网络往返</text>
+  <text class="sm on-r" x="20" y="86">1000 条数据时：约 4 秒，而且数据库连接被占满</text>
+
+  <path class="ln-d" d="M20 104 H740"/>
+
+  <text class="ttl on-g" x="20" y="134">批量：1 次查列表 + 1 次查全部详情</text>
+  <rect class="bx" x="20" y="144" width="70" height="30" rx="6"/>
+  <text class="sm" x="55" y="164" text-anchor="middle">列表</text>
+  <path class="ln-g" d="M94 159 H124" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="128" y="144" width="280" height="30" rx="6"/>
+  <text class="mono sm" x="268" y="164" text-anchor="middle">WHERE sku IN (...)　一次全取回</text>
+  <path class="ln-g" d="M412 159 H442" marker-end="url(#ar)"/>
+  <rect class="bx" x="446" y="144" width="200" height="30" rx="6"/>
+  <text class="sm" x="546" y="164" text-anchor="middle">在内存里按 sku 分组</text>
+  <text class="sm on-g" x="20" y="198">1000 条数据时：约 20 毫秒</text>
+
+  <rect class="bx-a" x="20" y="212" width="720" height="34" rx="8"/>
+  <text class="sm on-a" x="380" y="234" text-anchor="middle">危险之处：本地只有 10 条测试数据时，两种写法都是「瞬间完成」</text>
+</svg>
+<figcaption>图 13-3　N+1 是最容易写出、最难在本地发现的性能问题</figcaption>
+</figure>
+
+<h3>② 缺索引</h3>
+
+<div class="code" data-lang="sql">
+<pre>
+-- 没有索引：数据库要扫描整张表
+SELECT * FROM vacations WHERE slug = 'hood-river-day-trip';
+
+-- 加上索引后：直接定位
+CREATE INDEX idx_vacations_slug ON vacations(slug);
+</pre>
+</div>
+
+<p>
+  <strong>规则：出现在 <code>WHERE</code>、<code>JOIN</code>、<code>ORDER BY</code> 里的列，
+  多半需要索引。</strong>但索引会拖慢写入并占空间，别无脑给所有列都加。
+  用 <code>EXPLAIN QUERY PLAN</code>（SQLite）或 <code>EXPLAIN ANALYZE</code>（Postgres）看真实执行计划。
+</p>
+
+<h3>③ 查了不需要的数据</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// ❌ 列表页只需要名字和价格，却把长描述和 JSON 都拉回来了
+const rows = await db.select().from(vacations)
+
+// ✅ 只取需要的列
+const rows = await db
+  .select({ sku: vacations.sku, name: vacations.name, price: vacations.price })
+  .from(vacations)
+  .limit(20)                      // 而且一定要分页
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 永远要分页</div>
+  <p>
+    「查出所有记录」这种接口在数据只有 50 条时工作良好，在有 50 万条时会拖垮数据库和应用。
+    <strong>列表接口从第一天就加 <code>limit</code>。</strong>
+  </p>
+</div>
+
+<h2 id="seed">种子数据</h2>
+
+<p>开发时需要一些初始数据。写个可重复执行的脚本：</p>
+
+<div class="code" data-lang="ts" data-file="scripts/seed.ts">
+<pre>
+const SEED = [
+  {
+    sku: 'HR199', slug: 'hood-river-day-trip', name: '胡德河一日游',
+    description: '在哥伦比亚河上扬帆，然后在胡德河品尝精酿啤酒。',
+    price: 99.95, tags: ['一日游', '帆船', '啤酒'],
+    inSeason: true, available: true, maximumGuests: 16,
+  },
+  {
+    sku: 'OC39', slug: 'oregon-coast-getaway', name: '俄勒冈海岸周末游',
+    description: '享受海风和沿岸的古朴小镇。',
+    price: 269.95, tags: ['周末游', '海岸'],
+    inSeason: false, available: true, maximumGuests: 8,
+  },
+]
+
+for (const v of SEED) {
+  await db.insert(vacations)
+    .values({ ...v, createdAt: new Date() })
+    .onConflictDoUpdate({ target: vacations.sku, set: { name: v.name, price: v.price } })
+}
+console.log(`已写入 ${SEED.length} 条度假套餐`)
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 种子脚本要能重复跑</div>
+  <p>
+    用 <code>onConflictDoUpdate</code>（也叫 upsert）而不是 <code>insert</code>。
+    这样你随时可以重新执行它来重置或更新开发数据，不会因为主键冲突报错。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>文件不要存本地磁盘，存对象存储；元信息存数据库。</li>
+  <li>先定义数据访问接口，业务代码只认接口。测试写内存实现，生产写真实实现。</li>
+  <li>Drizzle 在一处定义表结构，同时得到 SQL 和 TypeScript 类型。</li>
+  <li>表结构变更一律走迁移文件，不要手改生产库。</li>
+  <li>边缘环境要用基于 HTTP 的数据库驱动。</li>
+  <li>三个性能陷阱：N+1 查询、缺索引、查了不需要的数据。列表接口永远要分页。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 Drizzle 定义 <code>vacations</code> 表，生成迁移并应用到本地 SQLite，跑通种子脚本。</li>
+    <li>把 <code>/vacations</code> 页面改成从数据库读数据。</li>
+    <li>写一个 <code>InMemoryVacationRepo</code>（数据存数组里），用它给页面处理函数写单元测试，全程不碰数据库。</li>
+    <li>往表里塞 1 万条假数据，对比「有 slug 索引」和「没有」时按 slug 查询的耗时。用 <code>EXPLAIN QUERY PLAN</code> 看看数据库到底做了什么。</li>
+    <li>把第 9 章的会话存储换成 KV 或 Redis 实现，确认重启服务器后登录状态还在。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

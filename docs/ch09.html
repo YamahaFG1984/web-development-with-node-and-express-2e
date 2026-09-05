@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 9 章 · Cookie 与会话 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 9 章</span>
+<h1>Cookie 与会话</h1>
+<p class="lede">
+  HTTP 是无状态的：服务器处理完一个请求就把你忘干净了。
+  可我们需要「记住用户已登录」「记住购物车里有什么」。这一章讲这个记忆是怎么造出来的。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解无状态协议为什么需要 Cookie</li>
+    <li>用 Hono 的 cookie 辅助函数读写、删除 Cookie</li>
+    <li>搞懂 <code>httpOnly</code>、<code>secure</code>、<code>sameSite</code> 这几个关键选项</li>
+    <li>用签名 Cookie 防篡改，并把密钥安全地放在代码之外</li>
+    <li>实现服务端会话与 Flash 消息</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="stateless">无状态是什么意思</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="无状态协议下服务器记不住用户">
+  <rect class="bx-r" x="20" y="20" width="700" height="94" rx="10"/>
+  <text class="ttl on-r" x="40" y="44">没有 Cookie 的世界</text>
+  <text class="sm" x="40" y="68">请求 1：POST /login  用户名密码正确 → 「欢迎，小李」</text>
+  <text class="sm" x="40" y="88">请求 2：GET /account → 「你是谁？请先登录」</text>
+  <text class="sm on-r" x="40" y="106">服务器完全不知道请求 2 和请求 1 是同一个人</text>
+
+  <rect class="bx-g" x="20" y="128" width="700" height="100" rx="10"/>
+  <text class="ttl on-g" x="40" y="152">有 Cookie 之后</text>
+  <text class="sm" x="40" y="176">请求 1：POST /login → 200 + 响应头 Set-Cookie: sid=abc123</text>
+  <text class="sm" x="40" y="196">浏览器把 sid=abc123 存起来，之后每个请求自动带上 Cookie: sid=abc123</text>
+  <text class="sm on-g" x="40" y="216">请求 2：GET /account + Cookie: sid=abc123 → 服务器查到「abc123 是小李」→ 「欢迎回来」</text>
+</svg>
+<figcaption>图 9-1　Cookie 就是浏览器替服务器保管的一张小纸条</figcaption>
+</figure>
+
+<p>
+  机制非常朴素：服务器在响应头里写 <code>Set-Cookie: 名字=值</code>，
+  浏览器存下来，之后对同一个站点的每个请求都在 <code>Cookie</code> 请求头里带回去。
+  没有魔法。
+</p>
+
+<h3>关于 Cookie 你必须知道的五件事</h3>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128065;</span><h4>用户能看见</h4>
+    <p>打开开发者工具就能看到所有 Cookie 的内容。<strong>不要往里面放秘密。</strong></p>
+  </div>
+  <div class="card">
+    <span class="ic">&#9999;</span><h4>用户能改</h4>
+    <p>可以随手把 <code>role=user</code> 改成 <code>role=admin</code>。<strong>不要信任未签名的 Cookie。</strong></p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128465;</span><h4>用户能删</h4>
+    <p>可以清空或禁用 Cookie。你的应用要在没有 Cookie 时也能给出合理的行为。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128203;</span><h4>每次请求都带</h4>
+    <p>包括图片和 CSS 的请求。Cookie 越大，每个请求就越慢。控制在几百字节以内。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#9878;</span><h4>受法规约束</h4>
+    <p>非必要 Cookie（分析、广告）在很多地区需要用户同意。功能性 Cookie 通常豁免。</p>
+  </div>
+</div>
+
+<h2 id="hono-cookie">在 Hono 里操作 Cookie</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
+
+app.get('/cookie-demo', (c) =&gt; {
+  // 读
+  const theme = getCookie(c, 'theme')          // string | undefined
+  const all = getCookie(c)                     // 所有 cookie 组成的对象
+
+  // 写
+  setCookie(c, 'theme', 'dark', {
+    path: '/',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    maxAge: 60 * 60 * 24 * 30,                 // 30 天，单位是秒
+  })
+
+  // 删
+  deleteCookie(c, 'old-cookie', { path: '/' })
+
+  return c.text(`当前主题：${theme ?? '未设置'}`)
+})
+</pre>
+</div>
+
+<h3>选项详解</h3>
+
+<div class="tw">
+<table>
+  <tr><th>选项</th><th>作用</th><th>建议</th></tr>
+  <tr>
+    <td><code>httpOnly</code></td>
+    <td>设为 <code>true</code> 后，浏览器里的 JavaScript <strong>读不到</strong>这个 Cookie</td>
+    <td><strong>会话类 Cookie 一律开启。</strong>这样即使页面被注入了恶意脚本，也偷不走会话 ID</td>
+  </tr>
+  <tr>
+    <td><code>secure</code></td>
+    <td>只在 HTTPS 连接上发送</td>
+    <td>生产环境一律开启。本地 <code>http://localhost</code> 开发时要关掉</td>
+  </tr>
+  <tr>
+    <td><code>sameSite</code></td>
+    <td>控制跨站请求要不要带上这个 Cookie</td>
+    <td><code>'Lax'</code> 是好默认值，能挡掉大部分 CSRF 攻击（第 18 章详述）</td>
+  </tr>
+  <tr>
+    <td><code>maxAge</code></td>
+    <td>存活秒数。不设的话关闭浏览器就消失（叫会话 Cookie）</td>
+    <td>按需要设。「记住我」通常是 30 天</td>
+  </tr>
+  <tr>
+    <td><code>path</code></td>
+    <td>只在哪些路径下发送。有隐含的通配符：<code>/foo</code> 也匹配 <code>/foo/bar</code></td>
+    <td>通常写 <code>'/'</code></td>
+  </tr>
+  <tr>
+    <td><code>domain</code></td>
+    <td>可以让子域名共享。不能设成别人的域名</td>
+    <td>不需要跨子域就别设</td>
+  </tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="sameSite 三种取值的行为差异">
+  <text class="ttl" x="20" y="24">用户在 evil.com 上，页面里有指向 yoursite.com 的请求。Cookie 会带上吗？</text>
+
+  <rect class="bx-r" x="20" y="42" width="230" height="120" rx="10"/>
+  <text class="ttl on-r" x="135" y="66" text-anchor="middle">None</text>
+  <text class="sm" x="36" y="90">任何跨站请求都带</text>
+  <text class="sm" x="36" y="110">包括 evil.com 上的</text>
+  <text class="sm" x="36" y="130">隐藏表单自动提交</text>
+  <text class="sm on-r" x="36" y="152">CSRF 门户大开</text>
+
+  <rect class="bx-a" x="266" y="42" width="230" height="120" rx="10"/>
+  <text class="ttl on-a" x="381" y="66" text-anchor="middle">Lax（推荐）</text>
+  <text class="sm" x="282" y="90">用户<tspan class="on-g">点链接</tspan>跳过来：带</text>
+  <text class="sm" x="282" y="110">跨站 <tspan class="on-r">POST</tspan> 表单：不带</text>
+  <text class="sm" x="282" y="130">图片/iframe 请求：不带</text>
+  <text class="sm on-g" x="282" y="152">既能挡 CSRF，又不影响正常跳转</text>
+
+  <rect class="bx-b" x="512" y="42" width="228" height="120" rx="10"/>
+  <text class="ttl on-b" x="626" y="66" text-anchor="middle">Strict</text>
+  <text class="sm" x="528" y="90">任何跨站请求都不带</text>
+  <text class="sm" x="528" y="110">连用户主动点链接</text>
+  <text class="sm" x="528" y="130">跳过来也不带</text>
+  <text class="sm on-b" x="528" y="152">最安全，但体验有损</text>
+
+  <rect class="bx-d" x="20" y="176" width="720" height="44" rx="8"/>
+  <text class="sm" x="380" y="196" text-anchor="middle">用 Strict 时，用户从邮件里点链接进你的网站会显示成「未登录」，要再刷新一次才对。</text>
+  <text class="sm" x="380" y="212" text-anchor="middle">所以除非是银行级别的场景，一般用 Lax。</text>
+</svg>
+<figcaption>图 9-2　sameSite 是防 CSRF 最省事的一道防线</figcaption>
+</figure>
+
+<h2 id="secrets">把密钥放到代码之外</h2>
+
+<p>
+  下面要用到签名密钥。在写之前，先把「密钥怎么管」这件事做对，因为它一旦做错就很难补救。
+</p>
+
+<p><strong>规则：密钥永远不写进源代码，永远不提交到 Git。</strong>用环境变量。</p>
+
+<div class="code" data-lang="bash" data-file=".env">
+<pre>
+# 本地开发用，这个文件在 .gitignore 里
+COOKIE_SECRET=dGhpcy1pcy1hLXJhbmRvbS1zZWNyZXQtc3RyaW5n
+DATABASE_URL=postgres://localhost:5432/meadowlark
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".env.example">
+<pre>
+# 这个文件要提交，告诉队友需要哪些变量（但不含真实值）
+COOKIE_SECRET=
+DATABASE_URL=
+</pre>
+</div>
+
+<p>生成一个随机密钥：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+</pre>
+</div>
+
+<p>写一个统一的读取入口，顺便做启动时校验：</p>
+
+<div class="code" data-lang="ts" data-file="src/config.ts">
+<pre>
+import { z } from 'zod'
+
+const schema = z.object({
+  COOKIE_SECRET: z.string().min(32, 'COOKIE_SECRET 至少 32 个字符'),
+  DATABASE_URL: z.string().url(),
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+})
+
+const parsed = schema.safeParse(process.env)
+
+if (!parsed.success) {
+  console.error('环境变量配置有误：')
+  console.error(parsed.error.flatten().fieldErrors)
+  process.exit(1)     // 宁可启动不了，也不要带着错配置跑起来
+}
+
+export const config = parsed.data
+export const isProduction = config.NODE_ENV === 'production'
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 快速失败胜过慢慢出错</div>
+  <p>
+    没有这段校验的话，忘了配 <code>COOKIE_SECRET</code> 的后果是：应用正常启动，
+    用 <code>undefined</code> 当密钥去签名，一切看起来都好，直到某天有人发现签名可以伪造。
+    启动时崩溃是件好事 —— 它把一个隐蔽的安全漏洞变成了一条明显的报错。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不同运行时读环境变量的方式</div>
+  <p>
+    Node 用 <code>process.env</code>，Cloudflare Workers 用 <code>c.env</code>，Deno 用 <code>Deno.env</code>。
+    Hono 提供了统一入口：<code>import { env } from 'hono/adapter'</code>，然后 <code>const { KEY } = env(c)</code>。
+    需要跨运行时的代码用它。第 12 章会详细讲。
+  </p>
+</div>
+
+<h2 id="signed">签名 Cookie</h2>
+
+<p>
+  签名不是加密 —— 内容依然是可读的。它做的是<strong>防篡改</strong>：
+  服务器在 Cookie 值后面附一个用密钥算出的校验码，读的时候重新算一遍对比。
+  用户改了值但算不出正确的校验码，服务器就知道这是伪造的。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { getSignedCookie, setSignedCookie } from 'hono/cookie'
+import { config } from './config'
+
+app.get('/set', async (c) =&gt; {
+  await setSignedCookie(c, 'user_id', 'u_12345', config.COOKIE_SECRET, {
+    path: '/',
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'Lax',
+    maxAge: 60 * 60 * 24 * 7,
+  })
+  return c.text('已设置')
+})
+
+app.get('/read', async (c) =&gt; {
+  const userId = await getSignedCookie(c, config.COOKIE_SECRET, 'user_id')
+
+  // 三种可能的返回值，一定要分清
+  if (userId === undefined) return c.text('没有这个 cookie')
+  if (userId === false)     return c.text('cookie 被篡改过！', 400)
+
+  return c.text(`用户 ID：${userId}`)
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>false</code> 和 <code>undefined</code> 是两回事</div>
+  <p>
+    <code>undefined</code> 表示「没这个 Cookie」，很正常。
+    <code>false</code> 表示「有这个 Cookie 但签名对不上」—— 这几乎一定是有人在动手脚，
+    应该记日志、清掉这个 Cookie，必要时告警。
+    用 <code>if (!userId)</code> 会把两种情况混为一谈，看不出攻击。
+  </p>
+</div>
+
+<h2 id="sessions">会话</h2>
+
+<p>
+  Cookie 只能存一小段文本。要记住「购物车里有三件商品，用户偏好人民币，上次浏览到第二页」
+  这种复杂状态，就需要<strong>会话（session）</strong>。
+</p>
+
+<p>两种做法：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Cookie 会话与服务端会话的对比">
+  <rect class="bx-b" x="20" y="20" width="345" height="215" rx="10"/>
+  <text class="ttl on-b" x="192" y="44" text-anchor="middle">① 全部塞进 Cookie</text>
+  <text class="mono sm" x="36" y="70">Cookie: session={"cart":[...],"cur":"CNY"}</text>
+  <text class="sm on-g" x="36" y="100">&#10003; 服务器完全无状态，随便扩容</text>
+  <text class="sm on-g" x="36" y="120">&#10003; 不需要额外的数据库</text>
+  <text class="sm on-r" x="36" y="146">&#10007; 每个请求都要传输全部数据</text>
+  <text class="sm on-r" x="36" y="166">&#10007; 大小上限约 4 KB</text>
+  <text class="sm on-r" x="36" y="186">&#10007; 用户能看到全部内容</text>
+  <text class="sm on-r" x="36" y="206">&#10007; 没法从服务端「踢下线」</text>
+  <text class="sm" x="36" y="228">适合：主题偏好、语言这类小而无害的数据</text>
+
+  <rect class="bx-g" x="395" y="20" width="345" height="215" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">② Cookie 只存 ID（推荐）</text>
+  <text class="mono sm" x="411" y="70">Cookie: sid=a1b2c3（签名过）</text>
+  <text class="mono sm" x="411" y="88">服务端：a1b2c3 → { cart: [...], cur: 'CNY' }</text>
+  <text class="sm on-g" x="411" y="118">&#10003; Cookie 极小</text>
+  <text class="sm on-g" x="411" y="138">&#10003; 数据量不受限，用户看不到</text>
+  <text class="sm on-g" x="411" y="158">&#10003; 可以随时让会话失效（登出、封号）</text>
+  <text class="sm on-r" x="411" y="184">&#10007; 需要一个共享存储（KV / Redis）</text>
+  <text class="sm on-r" x="411" y="204">&#10007; 多一次读取的延迟</text>
+  <text class="sm" x="411" y="228">适合：登录状态、购物车 —— 也就是绝大多数场景</text>
+</svg>
+<figcaption>图 9-3　除非数据很小且无关紧要，否则选第二种</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 不要用「内存里的对象」存会话</div>
+  <p>
+    很多教程会写 <code>const sessions = new Map()</code>。开发时能用，上线必炸：
+    重启进程会话全没，跑两个实例的话用户一半请求是登录状态一半不是。
+    会话存储必须是<strong>进程外的、多实例共享的</strong>。
+  </p>
+</div>
+
+<h3>写一个会话中间件</h3>
+
+<p>
+  Hono 核心没有内置会话（因为存储方式差别太大）。我们自己写一个，这也正好是理解中间件的好练习。
+  先定义存储接口，实现可以随时替换：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/session-store.ts">
+<pre>
+export type SessionData = Record&lt;string, unknown&gt;
+
+export interface SessionStore {
+  get(id: string): Promise&lt;SessionData | null&gt;
+  set(id: string, data: SessionData, ttlSeconds: number): Promise&lt;void&gt;
+  destroy(id: string): Promise&lt;void&gt;
+}
+
+/** 开发用：进程内存。上线务必换掉 */
+export class MemoryStore implements SessionStore {
+  #map = new Map&lt;string, { data: SessionData; expiresAt: number }&gt;()
+
+  async get(id: string) {
+    const entry = this.#map.get(id)
+    if (!entry) return null
+    if (entry.expiresAt &lt; Date.now()) {
+      this.#map.delete(id)
+      return null
+    }
+    return entry.data
+  }
+
+  async set(id: string, data: SessionData, ttl: number) {
+    this.#map.set(id, { data, expiresAt: Date.now() + ttl * 1000 })
+  }
+
+  async destroy(id: string) {
+    this.#map.delete(id)
+  }
+}
+</pre>
+</div>
+
+<p>然后是中间件本身：</p>
+
+<div class="code" data-lang="ts" data-file="src/middleware/session.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+import { getSignedCookie, setSignedCookie } from 'hono/cookie'
+import type { SessionStore, SessionData } from '../lib/session-store'
+
+const COOKIE_NAME = 'sid'
+const TTL = 60 * 60 * 24 * 7      // 7 天
+
+export type SessionVariables = {
+  session: SessionData
+  destroySession: () =&gt; Promise&lt;void&gt;
+}
+
+export function sessionMiddleware(store: SessionStore, secret: string) {
+  return createMiddleware&lt;{ Variables: SessionVariables }&gt;(async (c, next) =&gt; {
+    // 1. 从 cookie 里拿会话 ID
+    const raw = await getSignedCookie(c, secret, COOKIE_NAME)
+    let id = typeof raw === 'string' ? raw : undefined
+
+    // 2. 载入会话数据（没有就是空对象）
+    let data: SessionData = (id &amp;&amp; (await store.get(id))) || {}
+
+    c.set('session', data)
+    c.set('destroySession', async () =&gt; {
+      if (id) await store.destroy(id)
+      id = undefined
+      data = {}
+      c.set('session', data)
+    })
+
+    // 3. 交给后面的处理函数
+    await next()
+
+    // 4. 请求处理完之后，把（可能被改过的）数据写回去
+    const current = c.get('session')
+    if (Object.keys(current).length &gt; 0) {
+      if (!id) {
+        id = crypto.randomUUID()
+        await setSignedCookie(c, COOKIE_NAME, id, secret, {
+          path: '/',
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'Lax',
+          maxAge: TTL,
+        })
+      }
+      await store.set(id, current, TTL)
+    }
+  })
+}
+</pre>
+</div>
+
+<p>接上去：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+import { sessionMiddleware } from './middleware/session'
+import { MemoryStore } from './lib/session-store'
+import { config } from './config'
+
+const app = new Hono&lt;{ Variables: SessionVariables }&gt;()
+
+app.use('*', sessionMiddleware(new MemoryStore(), config.COOKIE_SECRET))
+
+app.get('/set-currency/:currency', (c) =&gt; {
+  const session = c.get('session')
+  session.currency = c.req.param('currency')
+  return c.redirect('/vacations', 303)
+})
+
+app.get('/vacations', async (c) =&gt; {
+  const currency = (c.get('session').currency as string) ?? 'CNY'
+  // ...按 currency 换算价格
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 注意 <code>await next()</code> 前后的分工</div>
+  <p>
+    <code>next()</code> <strong>之前</strong>：准备工作（读 Cookie、载入数据）。<br>
+    <code>next()</code> <strong>之后</strong>：收尾工作（保存数据、设置 Cookie）。<br>
+    这就是「洋葱模型」，第 10 章会把它讲透。
+  </p>
+</div>
+
+<h2 id="flash">Flash 消息</h2>
+
+<p>
+  Flash 消息是「显示一次就消失」的提示，比如提交表单后跳转到新页面时的那句「保存成功」。
+  它需要跨越一次重定向，正好用会话实现：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/middleware/flash.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+
+export type Flash = {
+  type: 'success' | 'danger' | 'info'
+  intro: string
+  message: string
+}
+
+export const flashMiddleware = createMiddleware(async (c, next) =&gt; {
+  const session = c.get('session')
+
+  // 把会话里的 flash 取出来，放到本次请求的变量里
+  c.set('flash', session.flash as Flash | undefined)
+  // 然后立刻从会话里删掉 —— 它只显示这一次
+  delete session.flash
+
+  await next()
+})
+</pre>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+// 设置：在重定向之前写入会话
+app.post('/newsletter/signup', zValidator('form', schema, (result, c) =&gt; {
+  if (!result.success) {
+    c.get('session').flash = {
+      type: 'danger',
+      intro: '填写有误',
+      message: '请检查你输入的邮箱地址。',
+    }
+    return c.redirect('/newsletter', 303)
+  }
+}), async (c) =&gt; {
+  await db.addSubscriber(c.req.valid('form'))
+  c.get('session').flash = {
+    type: 'success',
+    intro: '订阅成功！',
+    message: '我们会把最新行程发到你的邮箱。',
+  }
+  return c.redirect('/newsletter/archive', 303)
+})
+
+// 显示：在布局里统一渲染
+export const Layout: FC&lt;{ flash?: Flash }&gt; = ({ flash, children }) =&gt; (
+  &lt;body&gt;
+    {flash &amp;&amp; (
+      &lt;div class={`alert alert-${flash.type}`} role="alert"&gt;
+        &lt;strong&gt;{flash.intro}&lt;/strong&gt; {flash.message}
+      &lt;/div&gt;
+    )}
+    &lt;main&gt;{children}&lt;/main&gt;
+  &lt;/body&gt;
+)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Flash 消息跨越重定向的生命周期">
+  <rect class="bx-b" x="20" y="30" width="160" height="56" rx="8"/>
+  <text class="sm" x="100" y="52" text-anchor="middle">POST /signup</text>
+  <text class="sm" x="100" y="70" text-anchor="middle">写入 session.flash</text>
+
+  <path class="ln-b" d="M184 58 H244" marker-end="url(#ar)"/>
+  <text class="sm" x="214" y="48" text-anchor="middle">303</text>
+
+  <rect class="bx" x="248" y="30" width="160" height="56" rx="8"/>
+  <text class="sm" x="328" y="52" text-anchor="middle">浏览器跳转</text>
+  <text class="sm" x="328" y="70" text-anchor="middle">GET /archive</text>
+
+  <path class="ln" d="M412 58 H472" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="476" y="30" width="180" height="56" rx="8"/>
+  <text class="sm on-a" x="566" y="46" text-anchor="middle">中间件取出 flash</text>
+  <text class="sm on-a" x="566" y="62" text-anchor="middle">并从会话中删除</text>
+  <text class="sm on-a" x="566" y="78" text-anchor="middle">页面显示提示</text>
+
+  <path class="ln-d" d="M566 92 V128 H328 V128"/>
+  <rect class="bx-d" x="200" y="128" width="256" height="46" rx="8"/>
+  <text class="sm" x="328" y="150" text-anchor="middle">用户再刷新 /archive</text>
+  <text class="sm" x="328" y="166" text-anchor="middle">提示不再出现 &#10003;</text>
+</svg>
+<figcaption>图 9-4　Flash = 写入会话 → 重定向 → 读出并删除</figcaption>
+</figure>
+
+<h2 id="when">会话适合装什么</h2>
+
+<div class="tw">
+<table>
+  <tr><th>适合放在会话里</th><th>不适合</th></tr>
+  <tr>
+    <td>登录用户的 ID</td>
+    <td>用户的完整资料（会过期，直接查库）</td>
+  </tr>
+  <tr>
+    <td>购物车（下单前）</td>
+    <td>订单（必须落库）</td>
+  </tr>
+  <tr>
+    <td>界面偏好：货币、语言、排序方式</td>
+    <td>权限判断的结果（可能已变，每次重新判断）</td>
+  </tr>
+  <tr>
+    <td>Flash 消息</td>
+    <td>大块数据、缓存（用专门的缓存层）</td>
+  </tr>
+  <tr>
+    <td>多步表单的中间状态</td>
+    <td>任何丢了就出大事的东西</td>
+  </tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; API 通常不用会话</div>
+  <p>
+    会话依赖 Cookie，Cookie 依赖浏览器。手机 App、第三方服务调你的 API 时没有 Cookie。
+    那种场景用 <strong>JWT 或 API Key</strong>（第 18 章）。
+    简单判断：给浏览器用的用会话，给程序用的用令牌。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Cookie 是浏览器替服务器保管的小纸条，用户可读、可改、可删。</li>
+  <li>会话 Cookie 必须 <code>httpOnly</code>；生产环境必须 <code>secure</code>；<code>sameSite: 'Lax'</code> 是好默认。</li>
+  <li>签名 Cookie 防篡改不防偷看；密钥必须放在环境变量里，启动时校验。</li>
+  <li>会话优先选「Cookie 存 ID + 服务端存数据」，存储必须是进程外共享的。</li>
+  <li>Flash 消息 = 写会话 + 重定向 + 读后即删。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>做一个货币切换功能：<code>/set-currency/:cur</code> 存到会话，行程页按会话里的货币显示价格。重启服务器后确认偏好丢失（因为用的是 MemoryStore）—— 这正是第 13 章要解决的问题。</li>
+    <li>在浏览器开发者工具里找到你的 <code>sid</code> Cookie，手动改掉一个字符，刷新页面。确认服务器识别出了篡改（<code>getSignedCookie</code> 返回 <code>false</code>）。</li>
+    <li>把 <code>httpOnly</code> 临时关掉，在控制台执行 <code>document.cookie</code>，看看能读到什么。然后打开它再试一次，体会这个选项的价值。</li>
+    <li>给会话中间件加上「登出」路由 <code>/logout</code>，调用 <code>destroySession()</code> 并清掉 Cookie。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

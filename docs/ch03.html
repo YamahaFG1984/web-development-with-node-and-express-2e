@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 3 章 · 用 Hono 节省时间 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 3 章</span>
+<h1>用 Hono 节省时间</h1>
+<p class="lede">
+  把第 2 章那个手写服务器用 Hono 重写一遍。同样的功能，代码会短一半，
+  而且加新页面时不用再动老代码。云雀旅行网站从这一章开始正式动工。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>npm create hono</code> 或手工方式建立项目</li>
+    <li>写出第一批路由，并配好 404 与错误处理</li>
+    <li>用 JSX 写页面和布局，理解「视图」和「静态资源」的区别</li>
+    <li>用 <code>serveStatic</code> 一行搞定静态文件</li>
+    <li>在页面里塞进动态内容</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scaffold">脚手架</h2>
+
+<p>
+  Hono 提供了一个交互式脚手架，一条命令就能生成配好的项目：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm create hono@latest meadowlark
+</pre>
+</div>
+
+<p>
+  它会问你目标运行时（选 <code>nodejs</code>）和包管理器，然后生成一个能直接跑的骨架。
+  这是真实项目里最省事的做法。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 但本章我们手工搭</div>
+  <p>
+    脚手架会替你做很多决定，而你现在需要知道<em>每个文件为什么在那里</em>。
+    等你读完第 4 章，再回头用脚手架，你会明白它生成的每一行。
+  </p>
+</div>
+
+<p>接着第 2 章的目录继续，装上 Hono：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install hono
+</pre>
+</div>
+
+<h2 id="first-app">第一个 Hono 应用</h2>
+
+<p>把 <code>src/server.ts</code> 整个换成：</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { Hono } from 'hono'
+
+const app = new Hono()
+
+// 404：没有任何路由匹配上时调用
+app.notFound((c) =&gt; c.text('404 - 页面不存在', 404))
+
+// 500：任何路由里抛出异常时调用
+app.onError((err, c) =&gt; {
+  console.error(err)
+  return c.text('500 - 服务器错误', 500)
+})
+
+const port = Number(process.env.PORT) || 3000
+serve({ fetch: app.fetch, port })
+console.log(`服务器已启动：http://localhost:${port}`)
+</pre>
+</div>
+
+<p>
+  跑起来（<code>npx tsx src/server.ts</code>）访问首页，你会看到「404 - 页面不存在」。
+  这是对的 —— 我们一个路由都还没注册。
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 记住 <code>app.fetch</code></div>
+  <p>
+    <code>app.fetch</code> 就是我们在第 2 章手写的那个 <code>(request) =&gt; Response</code> 函数。
+    Hono 应用的本质，就是把你注册的所有路由和中间件<strong>编译成这一个函数</strong>。
+    所以它能被塞进任何接受标准 fetch 处理器的平台。
+  </p>
+</div>
+
+<h3>加上路由</h3>
+
+<p>在 <code>app.notFound</code> <strong>之前</strong>加两个路由：</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+app.get('/', (c) =&gt; c.text('云雀旅行'))
+
+app.get('/about', (c) =&gt; c.text('关于云雀旅行'))
+</pre>
+</div>
+
+<p>
+  <code>app.get(path, handler)</code> 注册一个只响应 GET 请求的路由。
+  同理还有 <code>app.post</code>、<code>app.put</code>、<code>app.delete</code>、<code>app.patch</code>，
+  以及匹配所有方法的 <code>app.all</code>。
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">第 2 章：手写</div>
+    <div class="code" data-lang="ts"><pre>
+const url = new URL(request.url)
+const path = url.pathname
+  .replace(/\/+$/, '')
+  .toLowerCase()
+
+switch (path) {
+  case '':
+    return new Response('云雀旅行', {
+      headers: {
+        'Content-Type':
+          'text/plain; charset=utf-8'
+      }
+    })
+  // ...
+}
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">第 3 章：Hono</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/', (c) =&gt; c.text('云雀旅行'))
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      URL 解析、方法匹配、字符集、Content-Type —— 全都替你处理了。
+    </div>
+  </div>
+</div>
+
+<h3>顺序很重要</h3>
+
+<p>
+  Hono 按<strong>注册顺序</strong>匹配路由。<code>app.notFound()</code> 是个例外（它总是最后兜底），
+  但普通路由和中间件严格按你写的顺序执行。这一点在第 10 章会详细讲，现在只要记住一条规则：
+  <strong>具体的路由写在前面，笼统的写在后面。</strong>
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// ❌ 错误：/about/contact 永远走不到
+app.get('/about/*', (c) =&gt; c.text('关于'))
+app.get('/about/contact', (c) =&gt; c.text('联系我们'))
+
+// ✅ 正确
+app.get('/about/contact', (c) =&gt; c.text('联系我们'))
+app.get('/about/*', (c) =&gt; c.text('关于'))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="一个请求在 Hono 内部的处理流程">
+  <rect class="bx-b" x="20" y="90" width="90" height="50" rx="8"/>
+  <text class="lbl" x="65" y="120" text-anchor="middle">浏览器</text>
+
+  <path class="ln-b" d="M112 115 H160" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="164" y="40" width="560" height="150" rx="12"/>
+  <text class="sm" x="176" y="60">app.fetch</text>
+
+  <rect class="bx" x="184" y="76" width="110" height="46" rx="8"/>
+  <text class="lbl" x="239" y="96" text-anchor="middle">中间件</text>
+  <text class="sm"  x="239" y="112" text-anchor="middle">日志、CORS…</text>
+
+  <rect class="bx-a" x="320" y="76" width="120" height="46" rx="8"/>
+  <text class="lbl on-a" x="380" y="96" text-anchor="middle">路由匹配</text>
+  <text class="sm" x="380" y="112" text-anchor="middle">方法 + 路径</text>
+
+  <rect class="bx" x="466" y="76" width="120" height="46" rx="8"/>
+  <text class="lbl" x="526" y="96" text-anchor="middle">处理函数</text>
+  <text class="sm"  x="526" y="112" text-anchor="middle">return c.text(…)</text>
+
+  <rect class="bx-r" x="612" y="76" width="96" height="46" rx="8"/>
+  <text class="sm on-r" x="660" y="94" text-anchor="middle">onError</text>
+  <text class="sm on-r" x="660" y="110" text-anchor="middle">notFound</text>
+
+  <path class="ln" d="M296 99 H316" marker-end="url(#ar)"/>
+  <path class="ln" d="M442 99 H462" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M380 124 V150 H660 V124" marker-end="url(#ar)"/>
+  <text class="sm" x="520" y="166" text-anchor="middle">没匹配到 / 抛异常时走这里</text>
+
+  <path class="ln-g" d="M726 115 H745 V210 H60 V145" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="400" y="205" text-anchor="middle">Response 原路返回</text>
+</svg>
+<figcaption>图 3-1　一个请求在 Hono 里的旅程</figcaption>
+</figure>
+
+<h2 id="views">视图与布局</h2>
+
+<p>
+  纯文本网站没人看。我们需要返回 HTML —— 但不是把 HTML 字符串拼在 JavaScript 里（那样很快会失控）。
+  我们需要<strong>视图（view）</strong>：一个能塞进动态数据的 HTML 模板。
+</p>
+
+<p>
+  Hono 内置了 JSX 支持。如果你写过 React，语法完全一样；如果没写过，把它理解成
+  「可以在 JavaScript 里直接写 HTML 标签，并且用 <code>{}</code> 插值」就行。
+</p>
+
+<h3>配置 TypeScript</h3>
+
+<p>在项目根目录建 <code>tsconfig.json</code>：</p>
+
+<div class="code" data-lang="json" data-file="tsconfig.json">
+<pre>
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx"
+  }
+}
+</pre>
+</div>
+
+<p>
+  关键是最后两行：告诉 TypeScript「遇到 JSX 语法时，用 <code>hono/jsx</code> 而不是 React 来编译」。
+  还要在 <code>package.json</code> 里加 <code>"type": "module"</code>，我们用的是 ES 模块语法。
+</p>
+
+<h3>布局</h3>
+
+<p>
+  网站每个页面的 <code>&lt;head&gt;</code>、页头、页脚都差不多。把这些公共部分抽出来，就是<strong>布局（layout）</strong>。
+  新建 <code>src/views/layout.tsx</code>：
+</p>
+
+<div class="code" data-lang="tsx" data-file="src/views/layout.tsx">
+<pre>
+import type { FC, PropsWithChildren } from 'hono/jsx'
+
+export const Layout: FC&lt;PropsWithChildren&lt;{ title?: string }&gt;&gt; = (props) =&gt; (
+  &lt;html lang="zh-CN"&gt;
+    &lt;head&gt;
+      &lt;meta charset="utf-8" /&gt;
+      &lt;meta name="viewport" content="width=device-width,initial-scale=1" /&gt;
+      &lt;title&gt;{props.title ?? '云雀旅行'}&lt;/title&gt;
+      &lt;link rel="stylesheet" href="/css/main.css" /&gt;
+    &lt;/head&gt;
+    &lt;body&gt;
+      &lt;header&gt;
+        &lt;img src="/img/logo.png" alt="云雀旅行" width="120" /&gt;
+      &lt;/header&gt;
+      &lt;main&gt;{props.children}&lt;/main&gt;
+      &lt;footer&gt;&amp;copy; 2026 云雀旅行&lt;/footer&gt;
+    &lt;/body&gt;
+  &lt;/html&gt;
+)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; JSX 的三个语法要点</div>
+  <ul>
+    <li><code>class</code> 要写成 <code>class</code>（Hono 的 JSX 里两种都支持，但推荐 <code>class</code>）。</li>
+    <li>标签必须闭合：<code>&lt;br /&gt;</code>、<code>&lt;img ... /&gt;</code>。</li>
+    <li><code>{props.children}</code> 是「把外面包着的内容放这里」的占位符。</li>
+  </ul>
+</div>
+
+<h3>页面</h3>
+
+<p>新建 <code>src/views/pages.tsx</code>：</p>
+
+<div class="code" data-lang="tsx" data-file="src/views/pages.tsx">
+<pre>
+import type { FC } from 'hono/jsx'
+import { Layout } from './layout'
+
+export const Home: FC = () =&gt; (
+  &lt;Layout title="云雀旅行 · 首页"&gt;
+    &lt;h1&gt;欢迎来到云雀旅行&lt;/h1&gt;
+    &lt;p&gt;有疑问？看看我们的 &lt;a href="/about"&gt;关于页面&lt;/a&gt;。&lt;/p&gt;
+  &lt;/Layout&gt;
+)
+
+export const About: FC&lt;{ fortune: string }&gt; = ({ fortune }) =&gt; (
+  &lt;Layout title="关于云雀旅行"&gt;
+    &lt;h1&gt;关于云雀旅行&lt;/h1&gt;
+    {fortune &amp;&amp; (
+      &lt;&gt;
+        &lt;p&gt;今日签语：&lt;/p&gt;
+        &lt;blockquote&gt;{fortune}&lt;/blockquote&gt;
+      &lt;/&gt;
+    )}
+  &lt;/Layout&gt;
+)
+
+export const NotFound: FC = () =&gt; (
+  &lt;Layout title="404"&gt;&lt;h1&gt;404 - 页面不存在&lt;/h1&gt;&lt;/Layout&gt;
+)
+
+export const ServerError: FC = () =&gt; (
+  &lt;Layout title="500"&gt;&lt;h1&gt;500 - 服务器错误&lt;/h1&gt;&lt;/Layout&gt;
+)
+</pre>
+</div>
+
+<h3>渲染</h3>
+
+<p>把路由改成返回 JSX：</p>
+
+<div class="code" data-lang="tsx" data-file="src/server.tsx">
+<pre>
+import { Home, About, NotFound, ServerError } from './views/pages'
+
+app.get('/', (c) =&gt; c.html(&lt;Home /&gt;))
+
+app.get('/about', (c) =&gt; c.html(&lt;About fortune="山高路远，坑深。" /&gt;))
+
+app.notFound((c) =&gt; c.html(&lt;NotFound /&gt;, 404))
+
+app.onError((err, c) =&gt; {
+  console.error(err)
+  return c.html(&lt;ServerError /&gt;, 500)
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 文件后缀要改</div>
+  <p>
+    含有 JSX 语法的文件后缀必须是 <code>.tsx</code>（或 <code>.jsx</code>），不能是 <code>.ts</code>。
+    把 <code>src/server.ts</code> 改名为 <code>src/server.tsx</code>，运行命令也相应改成
+    <code>npx tsx src/server.tsx</code>。
+  </p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="视图、布局与数据合成 HTML 的过程">
+  <rect class="bx-b" x="30" y="26" width="180" height="52" rx="8"/>
+  <text class="ttl on-b" x="120" y="48" text-anchor="middle">数据（props）</text>
+  <text class="mono sm" x="120" y="66" text-anchor="middle">{ fortune: "山高路远" }</text>
+
+  <rect class="bx-p" x="30" y="98" width="180" height="52" rx="8"/>
+  <text class="ttl on-p" x="120" y="120" text-anchor="middle">页面组件</text>
+  <text class="mono sm" x="120" y="138" text-anchor="middle">&lt;About /&gt;</text>
+
+  <rect class="bx-p" x="30" y="170" width="180" height="40" rx="8"/>
+  <text class="ttl on-p" x="120" y="195" text-anchor="middle">布局组件 &lt;Layout /&gt;</text>
+
+  <path class="ln-b" d="M214 52 L300 96" marker-end="url(#ar)"/>
+  <path class="ln" d="M214 124 H300"/>
+  <path class="ln" d="M214 190 L300 150" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="304" y="94" width="150" height="60" rx="10"/>
+  <text class="ttl on-a" x="379" y="118" text-anchor="middle">c.html()</text>
+  <text class="sm" x="379" y="136" text-anchor="middle">渲染成字符串</text>
+
+  <path class="ln-a" d="M458 124 H520" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="524" y="70" width="210" height="108" rx="10"/>
+  <text class="mono sm" x="540" y="94">&lt;!doctype html&gt;</text>
+  <text class="mono sm" x="540" y="112">&lt;html lang="zh-CN"&gt;…</text>
+  <text class="mono sm" x="540" y="130">&nbsp;&nbsp;&lt;h1&gt;关于云雀旅行&lt;/h1&gt;</text>
+  <text class="mono sm" x="540" y="148">&nbsp;&nbsp;&lt;blockquote&gt;山高路远…</text>
+  <text class="sm on-g" x="629" y="170" text-anchor="middle">带 Content-Type: text/html 的 Response</text>
+</svg>
+<figcaption>图 3-2　组件 + 数据 → HTML 字符串 → Response</figcaption>
+</figure>
+
+<h2 id="static">静态文件</h2>
+
+<p>
+  第 2 章我们为每个文件写了一个 <code>case</code>。Hono 用一行中间件解决：
+</p>
+
+<div class="code" data-lang="tsx" data-file="src/server.tsx">
+<pre>
+import { serveStatic } from '@hono/node-server/serve-static'
+
+// 放在所有路由之前
+app.use('/*', serveStatic({ root: './public' }))
+</pre>
+</div>
+
+<p>
+  现在 <code>public/img/logo.png</code> 可以通过 <code>/img/logo.png</code> 访问，
+  <code>public/css/main.css</code> 通过 <code>/css/main.css</code> 访问。MIME 类型自动判断，
+  路径穿越自动拦截。注意 URL 里<strong>没有</strong> <code>public</code> —— 这个目录名对客户端是不可见的。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 静态中间件会抢路由</div>
+  <p>
+    如果你在 <code>public/</code> 里放一个 <code>index.html</code>，访问 <code>/</code> 时返回的会是它，
+    而不是你的 <code>app.get('/')</code> 路由 —— 因为静态中间件先执行。遇到「我明明写了路由却不生效」，
+    先看看 <code>public/</code> 里有没有同名文件。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不同运行时的 serveStatic</div>
+  <div class="tw"><table>
+    <tr><th>运行时</th><th>引入路径</th></tr>
+    <tr><td>Node.js</td><td><code>@hono/node-server/serve-static</code></td></tr>
+    <tr><td>Bun</td><td><code>hono/bun</code></td></tr>
+    <tr><td>Deno</td><td><code>hono/deno</code></td></tr>
+    <tr><td>Cloudflare Workers</td><td>用平台的静态资源绑定（第 17 章讲）</td></tr>
+  </table></div>
+</div>
+
+<h2 id="dynamic">视图里的动态内容</h2>
+
+<p>
+  上面的签语是写死的。让它每次刷新都变 —— 这才叫「动态内容」。
+  先建个模块 <code>src/lib/fortune.ts</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/fortune.ts">
+<pre>
+const fortunes = [
+  '征服你的恐惧，否则它们会征服你。',
+  '河流需要源头。',
+  '不要害怕你不了解的事物。',
+  '你将迎来一个愉快的惊喜。',
+  '只要可能，就把事情做简单。',
+]
+
+export function getFortune(): string {
+  return fortunes[Math.floor(Math.random() * fortunes.length)]
+}
+</pre>
+</div>
+
+<p>然后在路由里用它：</p>
+
+<div class="code" data-lang="tsx" data-file="src/server.tsx">
+<pre>
+import { getFortune } from './lib/fortune'
+
+app.get('/about', (c) =&gt; c.html(&lt;About fortune={getFortune()} /&gt;))
+</pre>
+</div>
+
+<p>刷新几次 <code>/about</code>，签语会变。</p>
+
+<div class="box key">
+  <div class="t">&#9733; 静态 vs 动态，界限在哪</div>
+  <p>
+    <code>/img/logo.png</code> 是<strong>静态资源</strong>：每次请求返回的字节完全一样，可以放 CDN，可以长期缓存。<br>
+    <code>/about</code> 是<strong>视图</strong>：每次请求都要执行代码才能算出结果。哪怕结果碰巧一样，它也不能被无脑缓存。<br>
+    这个区分会在第 17 章（静态资源与 CDN）变得非常重要。
+  </p>
+</div>
+
+<h2 id="full">完整代码</h2>
+
+<div class="code" data-lang="tsx" data-file="src/server.tsx">
+<pre>
+import { serve } from '@hono/node-server'
+import { serveStatic } from '@hono/node-server/serve-static'
+import { Hono } from 'hono'
+import { getFortune } from './lib/fortune'
+import { Home, About, NotFound, ServerError } from './views/pages'
+
+const app = new Hono()
+
+app.use('/*', serveStatic({ root: './public' }))
+
+app.get('/', (c) =&gt; c.html(&lt;Home /&gt;))
+app.get('/about', (c) =&gt; c.html(&lt;About fortune={getFortune()} /&gt;))
+
+app.notFound((c) =&gt; c.html(&lt;NotFound /&gt;, 404))
+app.onError((err, c) =&gt; {
+  console.error(err)
+  return c.html(&lt;ServerError /&gt;, 500)
+})
+
+const port = Number(process.env.PORT) || 3000
+serve({ fetch: app.fetch, port })
+console.log(`服务器已启动：http://localhost:${port}`)
+</pre>
+</div>
+
+<p>为了不用每次手动重启，在 <code>package.json</code> 里加个脚本：</p>
+
+<div class="code" data-lang="json" data-file="package.json">
+<pre>
+{
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.tsx",
+    "start": "tsx src/server.tsx"
+  }
+}
+</pre>
+</div>
+
+<p>以后开发就 <code>npm run dev</code>，改文件自动重启。</p>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li><code>app.get(path, handler)</code> 注册路由；处理函数拿到 <code>c</code>，<strong>返回</strong>响应。</li>
+  <li><code>app.notFound()</code> 和 <code>app.onError()</code> 兜底 404 和异常。</li>
+  <li>路由按注册顺序匹配，具体的写前面。</li>
+  <li>JSX 组件 + <code>c.html()</code> = 服务端渲染的页面；布局组件消除重复的 HTML 骨架。</li>
+  <li><code>serveStatic()</code> 一行搞定静态文件，但它会抢在路由之前匹配。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>加一个 <code>/contact</code> 页面，复用 <code>Layout</code>。</li>
+    <li>把 <code>&lt;header&gt;</code> 里的导航抽成一个独立组件 <code>&lt;Nav /&gt;</code>，在 <code>Layout</code> 里使用。</li>
+    <li>故意在 <code>/about</code> 的处理函数里 <code>throw new Error('炸了')</code>，确认 <code>onError</code> 接住了它，并且服务器<strong>没有</strong>崩溃。</li>
+    <li>在 <code>public/</code> 里放一个 <code>index.html</code>，访问 <code>/</code> 看看发生了什么，然后把 <code>serveStatic</code> 挪到路由后面再试一次。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

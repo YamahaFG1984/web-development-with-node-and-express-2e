@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 4 章 · 整理项目 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 4 章</span>
+<h1>整理项目</h1>
+<p class="lede">
+  前两章我们在「玩」。从这一章起要认真了：定好目录结构，把逻辑拆成模块，
+  配好 TypeScript 和 Git。这些活儿不酷，但它们决定了三个月后你还改不改得动这个项目。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>规划一个能长期扩展的目录结构</li>
+    <li>把路由处理函数抽成独立模块（这也是第 5 章能写测试的前提）</li>
+    <li>看懂本教程用到的 TypeScript 语法，包括 Hono 的泛型参数</li>
+    <li>配好 Git 与 <code>.gitignore</code>，理解 <code>package.json</code> 里的版本号写法</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="layout">目录结构</h2>
+
+<p>
+  目录结构没有标准答案，但有一条被反复验证的原则：<strong>项目根目录只放配置，源码全在 <code>src/</code> 里。</strong>
+  下面是本教程会用到的结构，后面章节会往里加东西：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+meadowlark/
+├── package.json          项目元信息与依赖
+├── tsconfig.json         TypeScript 配置
+├── .gitignore            不进版本库的文件
+├── README.md             这个项目是什么、怎么跑
+├── public/               静态资源，原样发给浏览器
+│   ├── css/
+│   └── img/
+└── src/
+    ├── server.tsx        入口：组装应用、启动服务
+    ├── app.tsx           应用本体：路由注册（可测试）
+    ├── config.ts         配置与密钥读取（第 9 章）
+    ├── db.ts             数据库访问层（第 13 章）
+    ├── handlers/         路由处理函数
+    │   └── index.ts
+    ├── middleware/       自定义中间件（第 10 章）
+    ├── lib/              纯逻辑工具，不依赖 HTTP
+    │   └── fortune.ts
+    └── views/            JSX 组件
+        ├── layout.tsx
+        └── pages.tsx
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="分层结构：入口、路由、处理函数、业务逻辑、数据">
+  <rect class="bx-a" x="250" y="16" width="260" height="42" rx="8"/>
+  <text class="ttl on-a" x="380" y="36" text-anchor="middle">server.tsx · 入口</text>
+  <text class="sm" x="380" y="52" text-anchor="middle">只负责启动，不含业务</text>
+
+  <rect class="bx-b" x="250" y="76" width="260" height="42" rx="8"/>
+  <text class="ttl on-b" x="380" y="96" text-anchor="middle">app.tsx · 路由表</text>
+  <text class="sm" x="380" y="112" text-anchor="middle">哪个 URL 交给谁处理</text>
+
+  <rect class="bx-p" x="250" y="136" width="260" height="42" rx="8"/>
+  <text class="ttl on-p" x="380" y="156" text-anchor="middle">handlers/ · 处理函数</text>
+  <text class="sm" x="380" y="172" text-anchor="middle">读请求、调逻辑、拼响应</text>
+
+  <rect class="bx-g" x="120" y="196" width="200" height="46" rx="8"/>
+  <text class="ttl on-g" x="220" y="216" text-anchor="middle">lib/ · 纯逻辑</text>
+  <text class="sm" x="220" y="232" text-anchor="middle">不知道 HTTP 的存在</text>
+
+  <rect class="bx-g" x="440" y="196" width="200" height="46" rx="8"/>
+  <text class="ttl on-g" x="540" y="216" text-anchor="middle">db.ts · 数据访问</text>
+  <text class="sm" x="540" y="232" text-anchor="middle">增删改查都在这一层</text>
+
+  <path class="ln" d="M380 60 V72" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 120 V132" marker-end="url(#ar)"/>
+  <path class="ln" d="M330 180 L250 194" marker-end="url(#ar)"/>
+  <path class="ln" d="M430 180 L510 194" marker-end="url(#ar)"/>
+
+  <text class="sm" x="30" y="120">依赖只朝下</text>
+  <text class="sm" x="30" y="138">下层不 import 上层</text>
+  <path class="ln-d" d="M85 150 V210" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 4-1　分层：上层依赖下层，下层不认识上层</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么要把 <code>server</code> 和 <code>app</code> 拆开</div>
+  <p>
+    <code>app.tsx</code> 只导出一个配置好的 <code>Hono</code> 实例，不监听端口。
+    <code>server.tsx</code> 才调用 <code>serve()</code>。这样做的好处：<strong>测试可以直接 import <code>app</code>，
+    不用真的开一个服务器</strong>（第 5 章会看到）。换运行时时也只要换 <code>server.tsx</code> 一个文件。
+  </p>
+</div>
+
+<h3>拆分现在的代码</h3>
+
+<p><code>src/handlers/index.ts</code>：</p>
+
+<div class="code" data-lang="tsx" data-file="src/handlers/index.tsx">
+<pre>
+import type { Context } from 'hono'
+import { getFortune } from '../lib/fortune'
+import { Home, About, NotFound, ServerError } from '../views/pages'
+
+export const home = (c: Context) =&gt; c.html(&lt;Home /&gt;)
+
+export const about = (c: Context) =&gt; c.html(&lt;About fortune={getFortune()} /&gt;)
+
+export const notFound = (c: Context) =&gt; c.html(&lt;NotFound /&gt;, 404)
+
+export const serverError = (err: Error, c: Context) =&gt; {
+  console.error(err)
+  return c.html(&lt;ServerError /&gt;, 500)
+}
+</pre>
+</div>
+
+<p><code>src/app.tsx</code>：</p>
+
+<div class="code" data-lang="tsx" data-file="src/app.tsx">
+<pre>
+import { Hono } from 'hono'
+import { serveStatic } from '@hono/node-server/serve-static'
+import * as handlers from './handlers'
+
+export const app = new Hono()
+
+app.use('/*', serveStatic({ root: './public' }))
+
+app.get('/', handlers.home)
+app.get('/about', handlers.about)
+
+app.notFound(handlers.notFound)
+app.onError(handlers.serverError)
+</pre>
+</div>
+
+<p><code>src/server.tsx</code>：</p>
+
+<div class="code" data-lang="tsx" data-file="src/server.tsx">
+<pre>
+import { serve } from '@hono/node-server'
+import { app } from './app'
+
+const port = Number(process.env.PORT) || 3000
+serve({ fetch: app.fetch, port })
+console.log(`服务器已启动：http://localhost:${port}`)
+</pre>
+</div>
+
+<p>
+  现在每个文件只做一件事。<code>handlers</code> 里的函数是<strong>纯函数</strong>：
+  给它一个 Context，它返回一个 Response，没有别的副作用。这种函数最好测。
+</p>
+
+<h2 id="modules">模块：import 与 export</h2>
+
+<p>
+  上面的代码用了 ES 模块语法。它是 JavaScript 的官方模块标准，Hono、Vite、所有现代工具都用它。
+  三种常见写法：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// ① 具名导出（推荐，一个文件可以导出多个东西）
+export function getFortune() { /* ... */ }
+export const VERSION = '1.0'
+// 使用：
+import { getFortune, VERSION } from './lib/fortune'
+
+// ② 默认导出（一个文件只有一个主角，比如 Hono 应用）
+export default app
+// 使用：
+import app from './app'
+
+// ③ 全部导入成一个命名空间
+import * as handlers from './handlers'
+handlers.home(c)
+
+// ④ 只导入类型（编译后会被完全删掉，运行时零开销）
+import type { Context } from 'hono'
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 你可能见过 <code>require()</code></div>
+  <p>
+    <code>const express = require('express')</code> 是 Node.js 早期的 CommonJS 模块系统。
+    新项目一律用 <code>import</code>，只要在 <code>package.json</code> 里写上 <code>"type": "module"</code>。
+    老教程和老库里还大量存在 <code>require</code>，看到时知道是同一件事的旧写法就行。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 封装很重要</div>
+  <p>
+    <code>src/lib/fortune.ts</code> 里的 <code>fortunes</code> 数组<strong>没有</strong> <code>export</code>。
+    这不是遗漏 —— 外面根本不需要知道签语是怎么存的。只暴露 <code>getFortune()</code>，
+    将来把签语换成从数据库读，外部代码一行都不用改。<strong>少暴露一点，将来就少改一点。</strong>
+  </p>
+</div>
+
+<h2 id="ts">你需要的 TypeScript</h2>
+
+<p>
+  本教程全程用 TypeScript。不是为了赶时髦 —— Hono 最大的优势之一就是类型安全，
+  用 JavaScript 写等于把一半好处扔掉。但你不需要成为 TypeScript 专家，下面这些就够了。
+</p>
+
+<h3>基础类型标注</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+let name: string = '云雀'
+let price: number = 99.95
+let inSeason: boolean = true
+let tags: string[] = ['帆船', '啤酒']
+let note: string | null = null          // 联合类型：要么字符串要么 null
+let maybe?: string                       // 可选：可能是 undefined
+
+// 函数：参数类型 + 返回值类型
+function format(price: number, currency: string): string {
+  return `${currency} ${price.toFixed(2)}`
+}
+
+// 描述一个对象的形状
+type Vacation = {
+  name: string
+  price: number
+  tags: string[]
+  notes?: string          // 可选字段
+}
+</pre>
+</div>
+
+<h3>Hono 的两个泛型参数</h3>
+
+<p>
+  这是 Hono 特有的、你迟早会遇到的写法。<code>new Hono()</code> 可以接收一个类型参数，
+  告诉 TypeScript 「这个应用能访问哪些环境变量、中间件往上下文里塞了什么」：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+type Bindings = {
+  DATABASE_URL: string        // 环境变量 / 平台绑定
+  COOKIE_SECRET: string
+}
+
+type Variables = {
+  user: { id: string; name: string }   // 中间件塞进来的值
+}
+
+const app = new Hono&lt;{ Bindings: Bindings; Variables: Variables }&gt;()
+
+app.get('/me', (c) =&gt; {
+  const user = c.get('user')    // ← 类型是 { id: string; name: string }
+  const url = c.env.DATABASE_URL // ← 类型是 string
+  return c.json(user)
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Bindings 与 Variables 的区别">
+  <rect class="bx-b" x="40" y="30" width="300" height="140" rx="10"/>
+  <text class="ttl on-b" x="190" y="56" text-anchor="middle">Bindings</text>
+  <text class="sm" x="60" y="82">来自外部平台：环境变量、</text>
+  <text class="sm" x="60" y="100">数据库连接、KV 命名空间、密钥</text>
+  <text class="mono" x="60" y="126">c.env.DATABASE_URL</text>
+  <text class="mono" x="60" y="146">c.env.MY_KV</text>
+  <text class="sm" x="60" y="164">整个请求生命周期内都不变</text>
+
+  <rect class="bx-p" x="420" y="30" width="300" height="140" rx="10"/>
+  <text class="ttl on-p" x="570" y="56" text-anchor="middle">Variables</text>
+  <text class="sm" x="440" y="82">来自本次请求的中间件：</text>
+  <text class="sm" x="440" y="100">当前登录用户、请求 ID、追踪信息</text>
+  <text class="mono" x="440" y="126">c.set('user', u)</text>
+  <text class="mono" x="440" y="146">c.get('user')</text>
+  <text class="sm" x="440" y="164">每个请求一份，互不干扰</text>
+</svg>
+<figcaption>图 4-2　<code>c.env</code> 是平台给的，<code>c.get()</code> 是中间件给的</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 现在不懂也没关系</div>
+  <p>
+    <code>Bindings</code> 会在第 12、13 章（环境变量与数据库）真正用上，
+    <code>Variables</code> 会在第 10 章（中间件）和第 18 章（认证）用上。
+    现在只要看到这个写法不慌就行。
+  </p>
+</div>
+
+<h2 id="git">版本控制</h2>
+
+<p>
+  哪怕是一个人的周末项目，也用 Git。它给你三样东西：
+</p>
+
+<ul>
+  <li><strong>历史</strong> —— 三个月后你想知道「这行奇怪的代码为什么在这」，<code>git log</code> 能回答。</li>
+  <li><strong>归属</strong> —— 团队里知道该找谁问。</li>
+  <li><strong>试错的胆量</strong> —— 开个分支随便改，不行就丢掉，主线毫发无损。</li>
+</ul>
+
+<div class="code" data-lang="bash">
+<pre>
+git init
+git add -A
+git commit -m "初始提交：云雀旅行骨架"
+</pre>
+</div>
+
+<p>在 <code>git add</code> 之前先写好 <code>.gitignore</code>：</p>
+
+<div class="code" data-lang="text" data-file=".gitignore">
+<pre>
+# 依赖：可以由 package.json 重新装出来，不进版本库
+node_modules
+
+# 构建产物
+dist
+.wrangler
+
+# 密钥：绝对不能提交（第 9 章详谈）
+.env
+.env.*
+.dev.vars
+
+# 系统与编辑器杂物
+.DS_Store
+*.log
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 密钥一旦提交就等于泄露</div>
+  <p>
+    就算你下一次提交把它删了，它仍然留在 Git 历史里，任何能 clone 仓库的人都能挖出来。
+    正确做法是：立刻<strong>作废那个密钥并换新的</strong>，然后再清理历史。
+    所以第一天就把 <code>.gitignore</code> 写对。
+  </p>
+</div>
+
+<h2 id="pkg">package.json 与版本号</h2>
+
+<p>
+  <code>package.json</code> 干两件事：描述你的项目、列出依赖。
+</p>
+
+<div class="code" data-lang="json" data-file="package.json">
+<pre>
+{
+  "name": "meadowlark",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.tsx",
+    "start": "tsx src/server.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>字段</th><th>含义</th></tr>
+  <tr><td><code>type: "module"</code></td><td>用 ES 模块语法（<code>import</code>）而不是 CommonJS</td></tr>
+  <tr><td><code>dependencies</code></td><td>线上运行也需要的包</td></tr>
+  <tr><td><code>devDependencies</code></td><td>只在开发/构建时需要（测试框架、类型定义、编译器）。用 <code>npm i -D</code> 安装</td></tr>
+  <tr><td><code>scripts</code></td><td>常用命令的快捷方式，<code>npm run dev</code> 执行</td></tr>
+</table>
+</div>
+
+<h3>读懂 <code>^4.6.0</code></h3>
+
+<p>
+  npm 用<strong>语义化版本（semver）</strong>：<code>主版本.次版本.修订号</code>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 700 180" role="img" aria-label="语义化版本号的三段含义">
+  <text class="mono" x="350" y="46" text-anchor="middle" style="font-size:30px">4 . 6 . 2</text>
+
+  <path class="ln-r" d="M300 56 V86" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="200" y="90" width="200" height="56" rx="8"/>
+  <text class="ttl on-r" x="300" y="112" text-anchor="middle">主版本 MAJOR</text>
+  <text class="sm" x="300" y="132" text-anchor="middle">有破坏性改动，升级需要改代码</text>
+
+  <path class="ln-b" d="M350 56 V86" style="stroke:var(--blue)" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="410" y="20" width="180" height="52" rx="8"/>
+  <text class="ttl on-b" x="500" y="42" text-anchor="middle">次版本 MINOR</text>
+  <text class="sm" x="500" y="60" text-anchor="middle">加了新功能，向后兼容</text>
+
+  <path class="ln-g" d="M400 56 V70 H600 V90" style="stroke:var(--green)" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="500" y="94" width="180" height="52" rx="8"/>
+  <text class="ttl on-g" x="590" y="116" text-anchor="middle">修订号 PATCH</text>
+  <text class="sm" x="590" y="134" text-anchor="middle">只修 bug</text>
+
+  <text class="sm" x="20" y="168">^4.6.0 表示：允许升到 4.x.x 的任意新版，但不会自动跳到 5.0.0</text>
+</svg>
+<figcaption>图 4-3　<code>^</code> 让你自动拿到兼容更新，同时挡住破坏性升级</figcaption>
+</figure>
+
+<p>
+  <code>package-lock.json</code> 记录的是<strong>实际装了哪些精确版本</strong>。它必须提交到 Git ——
+  这样团队成员和 CI 装出来的依赖树和你完全一致。不要手动编辑它。
+</p>
+
+<h2 id="readme">README</h2>
+
+<p>
+  项目根目录一定要有 <code>README.md</code>。它至少回答三个问题：
+</p>
+
+<div class="code" data-lang="text" data-file="README.md">
+<pre>
+# 云雀旅行
+
+俄勒冈州旅游服务网站，基于 Hono 构建。
+
+## 本地运行
+
+    npm install
+    cp .env.example .env    # 填入你自己的密钥
+    npm run dev             # http://localhost:3000
+
+## 目录说明
+
+- `src/app.tsx`     路由表
+- `src/handlers/`   路由处理函数
+- `src/lib/`        与 HTTP 无关的纯逻辑
+- `src/views/`      JSX 页面组件
+- `public/`         静态资源
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>源码放 <code>src/</code>，根目录只留配置。分层：入口 → 路由 → 处理函数 → 逻辑/数据。</li>
+  <li>把 <code>app</code>（应用实例）和 <code>server</code>（启动监听）拆开，测试和换运行时都会受益。</li>
+  <li>只 <code>export</code> 外部真正需要的东西，其余保持私有。</li>
+  <li>TypeScript 里你现在只需要会：类型标注、<code>type</code> 定义对象形状、<code>import type</code>。</li>
+  <li>第一天就写好 <code>.gitignore</code>，密钥永远不进版本库。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>按本章的结构重构你的项目，确认 <code>npm run dev</code> 仍然正常。</li>
+    <li>运行 <code>npm run typecheck</code>。如果有报错，逐个修掉 —— 这些都是 TypeScript 帮你提前发现的 bug。</li>
+    <li>把 <code>getFortune()</code> 改成不重复返回上一次的签语。想一想：这个状态应该放在模块里，还是每个请求一份？（提示：多个用户会同时访问）</li>
+    <li>初始化 Git 仓库并提交。然后 <code>git log --stat</code> 看看你都提交了什么，确认 <code>node_modules</code> 不在里面。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

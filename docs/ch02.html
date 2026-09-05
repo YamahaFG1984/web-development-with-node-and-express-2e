@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 2 章 · 准备开发环境 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 2 章</span>
+<h1>准备开发环境</h1>
+<p class="lede">
+  装好工具，然后<strong>不用任何框架</strong>手写一个 Web 服务器。
+  只有亲手体会过没有框架的麻烦，你才会明白 Hono 每一个 API 在替你省什么。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>装好 Node.js、包管理器和编辑器，能在终端里跑起一个脚本</li>
+    <li>理解 <code>Request</code> / <code>Response</code> 这两个标准对象</li>
+    <li>不用框架，手写路由和静态文件服务</li>
+    <li>亲眼看到手写方案的问题，从而理解框架存在的理由</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="runtime">选一个运行时</h2>
+
+<p>
+  Hono 支持很多运行时，但作为初学者，你只需要选一个。我的建议：
+</p>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#9989;</span><h4>Node.js（推荐）</h4>
+    <p>生态最全，遇到问题搜得到答案，几乎所有 npm 包都能用。本教程默认用它。装 <strong>LTS</strong> 版本。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128007;</span><h4>Bun</h4>
+    <p>启动飞快，自带打包器和测试跑起来很爽。原生支持 TypeScript，省掉不少配置。适合已经熟悉 Node 的人。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#129422;</span><h4>Deno</h4>
+    <p>默认安全（要显式给网络/文件权限），原生 TypeScript。配置最少，但生态相对小。</p>
+  </div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 别纠结</div>
+  <p>
+    因为 Hono 基于 Web 标准，你现在选 Node，将来想换 Bun，业务代码基本不用动 —— 只改入口那几行。
+    所以先用你最熟的，把注意力放在概念上。
+  </p>
+</div>
+
+<h3>安装 Node.js</h3>
+
+<p>
+  别直接从官网下安装包。用版本管理器，将来切换版本会省很多事。
+  macOS / Linux 推荐 <a href="https://github.com/nvm-sh/nvm">nvm</a>：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 安装 nvm（macOS / Linux）
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# 重开终端后，安装并使用最新的 LTS 版本
+nvm install --lts
+nvm use --lts
+
+# 确认一下
+node --version    # 应该是 v20 或更高
+npm --version
+</pre>
+</div>
+
+<p>Windows 用户可以用 <a href="https://github.com/coreybutler/nvm-windows">nvm-windows</a>，或者直接用 WSL2 跑 Ubuntu（推荐，命令和 Linux 完全一样）。</p>
+
+<h3>包管理器</h3>
+
+<p>
+  <code>npm</code> 随 Node.js 一起装好了，直接用就行。如果你之后管理多个项目，可以考虑 <code>pnpm</code>
+  （磁盘占用小很多）。本教程所有命令都会用 <code>npm</code>，你可以按下表替换：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>动作</th><th>npm</th><th>pnpm</th><th>bun</th></tr>
+  <tr><td>安装依赖</td><td><code>npm install</code></td><td><code>pnpm install</code></td><td><code>bun install</code></td></tr>
+  <tr><td>加一个包</td><td><code>npm i hono</code></td><td><code>pnpm add hono</code></td><td><code>bun add hono</code></td></tr>
+  <tr><td>加开发依赖</td><td><code>npm i -D vitest</code></td><td><code>pnpm add -D vitest</code></td><td><code>bun add -d vitest</code></td></tr>
+  <tr><td>跑脚本</td><td><code>npm run dev</code></td><td><code>pnpm dev</code></td><td><code>bun run dev</code></td></tr>
+  <tr><td>临时执行</td><td><code>npx tsx a.ts</code></td><td><code>pnpm dlx tsx a.ts</code></td><td><code>bunx tsx a.ts</code></td></tr>
+</table>
+</div>
+
+<h3>编辑器</h3>
+
+<p>
+  用 <a href="https://code.visualstudio.com/">VS Code</a>。它对 TypeScript 的支持是同类里最好的，
+  而 TypeScript 恰好是 Hono 最大的卖点之一 —— 编辑器里的自动补全和红波浪线，就是 Hono 类型系统在替你干活的直观体现。
+</p>
+
+<h2 id="first">第一个服务器：完全不用框架</h2>
+
+<p>
+  现在开始写代码。建一个目录，初始化项目：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mkdir meadowlark
+cd meadowlark
+npm init -y
+npm install @hono/node-server
+npm install -D tsx typescript @types/node
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这几个包是干嘛的</div>
+  <ul>
+    <li><code>@hono/node-server</code> —— 让 Node.js 能跑「标准 fetch 处理函数」的适配器。注意：<strong>本章还不会用到 Hono 本身</strong>，我们只借这个适配器把标准 API 接到 Node 上。</li>
+    <li><code>tsx</code> —— 直接运行 TypeScript 文件，不用先编译。</li>
+    <li><code>typescript</code> / <code>@types/node</code> —— 类型检查和 Node API 的类型定义。</li>
+  </ul>
+</div>
+
+<p>新建 <code>src/server.ts</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+
+serve({
+  port: 3000,
+  fetch(request: Request) {
+    return new Response('你好，世界！', {
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })
+  },
+})
+
+console.log('服务器已启动：http://localhost:3000')
+</pre>
+</div>
+
+<p>运行它：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npx tsx src/server.ts
+</pre>
+</div>
+
+<p>浏览器打开 <code>http://localhost:3000</code>，你应该能看到「你好，世界！」。</p>
+
+<p>
+  这几行代码里没有任何框架。<code>fetch</code> 就是一个普通函数：<strong>收到一个 <code>Request</code>，返回一个 <code>Response</code></strong>。
+  这就是整个 Web 标准服务端模型的全部。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Request 和 Response 对象的结构">
+  <rect class="bx-b" x="30" y="30" width="300" height="170" rx="10"/>
+  <text class="ttl on-b" x="45" y="54">Request</text>
+  <text class="mono" x="45" y="80">req.method</text>      <text class="sm" x="200" y="80">"GET" / "POST" …</text>
+  <text class="mono" x="45" y="102">req.url</text>         <text class="sm" x="200" y="102">完整 URL 字符串</text>
+  <text class="mono" x="45" y="124">req.headers</text>     <text class="sm" x="200" y="124">Headers 对象</text>
+  <text class="mono" x="45" y="146">await req.text()</text><text class="sm" x="200" y="146">请求体（文本）</text>
+  <text class="mono" x="45" y="168">await req.json()</text><text class="sm" x="200" y="168">请求体（JSON）</text>
+  <text class="mono" x="45" y="190">await req.formData()</text><text class="sm" x="235" y="190">表单</text>
+
+  <path class="ln-a" d="M340 115 H420" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="380" y="105" text-anchor="middle">你的函数</text>
+
+  <rect class="bx-g" x="430" y="30" width="300" height="170" rx="10"/>
+  <text class="ttl on-g" x="445" y="54">Response</text>
+  <text class="mono" x="445" y="82">new Response(body, init)</text>
+  <text class="sm"  x="445" y="104">body：字符串 / ArrayBuffer / 流 / null</text>
+  <text class="sm"  x="445" y="126">init.status：200、404、500 …</text>
+  <text class="sm"  x="445" y="148">init.headers：Content-Type 等</text>
+  <text class="mono" x="445" y="176">Response.json(obj)</text>
+  <text class="mono" x="445" y="196">Response.redirect(url, 302)</text>
+</svg>
+<figcaption>图 2-1　浏览器里也有的这两个对象，就是服务端编程的全部输入输出</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 这为什么重要</div>
+  <p>
+    你在浏览器里用 <code>fetch()</code> 发请求时，拿到的就是 <code>Response</code> 对象；
+    Service Worker 里拦截请求，拿到的就是 <code>Request</code> 对象。
+    换句话说，你学会的这套东西，前端后端通用 —— 这是 Web 标准路线最大的红利。
+  </p>
+</div>
+
+<h2 id="routing">手写路由</h2>
+
+<p>
+  现在这个服务器不管你访问什么路径，都返回同一句话。我们让它区分首页和「关于」页 ——
+  这个把 URL 映射到不同处理逻辑的机制，就叫<strong>路由（routing）</strong>。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+
+serve({
+  port: 3000,
+  fetch(request: Request) {
+    // 把 URL 字符串解析成结构化对象
+    const url = new URL(request.url)
+    // 去掉结尾斜杠、统一小写，避免 /About/ 匹配不上
+    const path = url.pathname.replace(/\/+$/, '').toLowerCase()
+
+    switch (path) {
+      case '':
+        return new Response('云雀旅行', {
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        })
+      case '/about':
+        return new Response('关于云雀旅行', {
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        })
+      default:
+        return new Response('404 - 页面不存在', {
+          status: 404,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        })
+    }
+  },
+})
+</pre>
+</div>
+
+<p>试试 <code>/</code>、<code>/about</code>、<code>/About/</code>、<code>/nope</code>，还有带查询串的 <code>/about?x=1</code>。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 已经开始难受了</div>
+  <p>
+    注意我们做了多少手工活：解析 URL、去尾部斜杠、转小写、每个分支都要重复写 <code>Content-Type</code>。
+    而且这个 <code>switch</code> 只能按<strong>路径</strong>分支 —— 如果 <code>/about</code> 的 GET 和 POST
+    要走不同逻辑呢？如果路径里有参数比如 <code>/vacations/:sku</code> 呢？<code>switch</code> 就不够用了。
+  </p>
+</div>
+
+<h2 id="static">手写静态文件服务</h2>
+
+<p>
+  真实网站要返回 HTML 和图片，不是纯文本。这类不会变的文件叫<strong>静态资源</strong>。
+  建立目录结构：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+meadowlark/
+├── package.json
+├── public/
+│   ├── home.html
+│   ├── about.html
+│   ├── 404.html
+│   └── img/
+│       └── logo.png
+└── src/
+    └── server.ts
+</pre>
+</div>
+
+<p>随便写点 HTML 进去，比如 <code>public/home.html</code>：</p>
+
+<div class="code" data-lang="html" data-file="public/home.html">
+<pre>
+&lt;!doctype html&gt;
+&lt;html lang="zh-CN"&gt;
+  &lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;云雀旅行&lt;/title&gt;&lt;/head&gt;
+  &lt;body&gt;
+    &lt;img src="/img/logo.png" alt="云雀旅行"&gt;
+    &lt;h1&gt;欢迎来到云雀旅行&lt;/h1&gt;
+    &lt;p&gt;&lt;a href="/about"&gt;关于我们&lt;/a&gt;&lt;/p&gt;
+  &lt;/body&gt;
+&lt;/html&gt;
+</pre>
+</div>
+
+<p>现在改服务器，让它读文件返回：</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+const PUBLIC = join(process.cwd(), 'public')
+
+async function serveFile(relPath: string, contentType: string, status = 200) {
+  try {
+    const data = await readFile(join(PUBLIC, relPath))
+    return new Response(data, {
+      status,
+      headers: { 'Content-Type': contentType },
+    })
+  } catch {
+    return new Response('500 - 服务器内部错误', { status: 500 })
+  }
+}
+
+serve({
+  port: 3000,
+  async fetch(request: Request) {
+    const path = new URL(request.url).pathname.replace(/\/+$/, '').toLowerCase()
+
+    switch (path) {
+      case '':
+        return serveFile('home.html', 'text/html; charset=utf-8')
+      case '/about':
+        return serveFile('about.html', 'text/html; charset=utf-8')
+      case '/img/logo.png':
+        return serveFile('img/logo.png', 'image/png')
+      default:
+        return serveFile('404.html', 'text/html; charset=utf-8', 404)
+    }
+  },
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 问题更严重了</div>
+  <ul>
+    <li>每加一张图片，就要加一个 <code>case</code>。有 200 张图怎么办？</li>
+    <li>MIME 类型要自己查表：<code>.png</code> 是 <code>image/png</code>，<code>.svg</code> 是 <code>image/svg+xml</code>，
+        <code>.woff2</code> 是 <code>font/woff2</code>……</li>
+    <li>如果不写死路径而是直接拼接用户给的路径，用户请求 <code>/../../etc/passwd</code> 就能读到你系统上的任意文件
+        —— 这叫<strong>路径穿越漏洞</strong>，是个真实且常见的安全问题。</li>
+    <li>没有缓存头，浏览器每次都重新下载 logo。</li>
+  </ul>
+</div>
+
+<h2 id="why-framework">所以框架到底解决了什么</h2>
+
+<p>
+  把上面遇到的麻烦列出来，你会发现它们正好对应 Hono 的几个核心 API：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>手写时的麻烦</th><th>Hono 的答案</th><th>在第几章</th></tr>
+  <tr><td>URL 解析、尾斜杠、大小写</td><td>路由器自动处理</td><td>第 3、14 章</td></tr>
+  <tr><td>按 HTTP 方法分支</td><td><code>app.get()</code> / <code>app.post()</code></td><td>第 3 章</td></tr>
+  <tr><td>路径参数 <code>/vacations/:sku</code></td><td><code>c.req.param('sku')</code></td><td>第 14 章</td></tr>
+  <tr><td>每次都写 Content-Type</td><td><code>c.text()</code> / <code>c.json()</code> / <code>c.html()</code></td><td>第 6 章</td></tr>
+  <tr><td>静态文件、MIME、路径安全</td><td><code>serveStatic()</code> 中间件</td><td>第 3、17 章</td></tr>
+  <tr><td>解析表单和 JSON 请求体</td><td><code>c.req.parseBody()</code> / <code>c.req.json()</code></td><td>第 8 章</td></tr>
+  <tr><td>日志、CORS、压缩、认证</td><td>内置中间件，一行接上</td><td>第 10 章</td></tr>
+  <tr><td>统一错误处理</td><td><code>app.onError()</code> / <code>app.notFound()</code></td><td>第 3、6 章</td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="有无框架的代码结构对比">
+  <rect class="bx-r" x="20" y="30" width="330" height="150" rx="10"/>
+  <text class="ttl on-r" x="185" y="54" text-anchor="middle">手写</text>
+  <text class="sm" x="40" y="80">一个巨大的 fetch 函数</text>
+  <text class="sm" x="40" y="100">↳ 解析 URL</text>
+  <text class="sm" x="40" y="118">↳ switch 一堆 case</text>
+  <text class="sm" x="40" y="136">↳ 每个分支重复设置响应头</text>
+  <text class="sm" x="40" y="154">↳ 加功能就往里塞 if</text>
+  <text class="sm on-r" x="40" y="172">越写越长，越写越怕改</text>
+
+  <rect class="bx-g" x="410" y="30" width="330" height="150" rx="10"/>
+  <text class="ttl on-g" x="575" y="54" text-anchor="middle">用 Hono</text>
+  <text class="mono" x="430" y="80">app.use(logger())</text>
+  <text class="mono" x="430" y="100">app.get('/', handlers.home)</text>
+  <text class="mono" x="430" y="120">app.get('/about', handlers.about)</text>
+  <text class="mono" x="430" y="140">app.notFound(handlers.notFound)</text>
+  <text class="sm on-g" x="430" y="166">每一行只说一件事，加功能就加一行</text>
+</svg>
+<figcaption>图 2-2　框架的价值不是「能做到」，而是「改得动」</figcaption>
+</figure>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Web 标准服务端模型只有一条规则：<strong>拿到 <code>Request</code>，返回 <code>Response</code></strong>。</li>
+  <li><code>@hono/node-server</code> 的 <code>serve()</code> 负责把这个标准模型接到 Node.js 上。</li>
+  <li>不用框架也能写服务器，但路由、MIME、安全、错误处理都要自己造，而且很容易造错。</li>
+  <li>框架的价值是让代码<strong>可维护</strong>，不是让代码「变得可能」。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把上面的静态文件服务器跑起来，然后故意请求一个不存在的路径，确认返回的是 404 状态码（在浏览器开发者工具的 Network 面板里看）。</li>
+    <li>给服务器加一个 <code>/api/time</code> 路由，返回 JSON <code>{"now": "..."}</code>。提示：<code>Response.json()</code> 是个静态方法。</li>
+    <li>试着支持 <code>public/</code> 下的任意文件（不再写死 case）。写完之后想一想：用户请求 <code>/../src/server.ts</code> 会发生什么？你会怎么防？</li>
+    <li>用 <code>curl -i http://localhost:3000/about</code> 看看完整的响应头。数一数你手动设置了几个头，浏览器又期待多少个。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

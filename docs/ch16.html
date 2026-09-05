@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 16 章 · 单页应用 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 16 章</span>
+<h1>单页应用</h1>
+<p class="lede">
+  前面十五章，页面都是服务器拼好 HTML 发过来的。这一章换个架构：
+  浏览器加载一次 JavaScript，之后自己渲染页面，Hono 退居幕后只提供 JSON。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 Web 应用架构的演变，知道 SPA 解决了什么、代价是什么</li>
+    <li>用 Vite 建立一个 React 前端，和 Hono 后端协作</li>
+    <li>用 RPC 客户端调用 API，享受端到端类型安全</li>
+    <li>了解开发和生产两种部署形态</li>
+    <li>知道 <code>hono/jsx/dom</code> 和 HonoX 这两个更轻的选择</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="history">简史</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Web 应用架构的四个阶段">
+  <rect class="bx" x="20" y="20" width="700" height="60" rx="8"/>
+  <text class="ttl" x="36" y="42">1990s · 纯静态</text>
+  <text class="sm" x="36" y="62">服务器上放什么文件，浏览器就拿到什么。改内容要重新上传文件。</text>
+  <text class="sm" x="620" y="62" text-anchor="end">没有交互</text>
+
+  <rect class="bx" x="20" y="88" width="700" height="60" rx="8"/>
+  <text class="ttl" x="36" y="110">1995–2005 · 服务端渲染</text>
+  <text class="sm" x="36" y="130">PHP / JSP / Rails。每次交互都是整页刷新，服务器重新拼一遍 HTML。</text>
+  <text class="sm" x="700" y="130" text-anchor="end">白屏闪烁</text>
+
+  <rect class="bx-b" x="20" y="156" width="700" height="60" rx="8"/>
+  <text class="ttl on-b" x="36" y="178">2005–2014 · Ajax 时代</text>
+  <text class="sm" x="36" y="198">jQuery 局部刷新。页面不整体重载了，但 DOM 操作散落各处，状态难以追踪。</text>
+  <text class="sm" x="700" y="198" text-anchor="end">意大利面条代码</text>
+
+  <rect class="bx-a" x="20" y="224" width="700" height="60" rx="8"/>
+  <text class="ttl on-a" x="36" y="246">2014 至今 · 组件化 SPA</text>
+  <text class="sm" x="36" y="266">React / Vue / Svelte。用「状态 → 界面」的声明式模型代替手动操作 DOM。</text>
+  <text class="sm" x="700" y="266" text-anchor="end">代价：包体积、SEO、复杂度</text>
+</svg>
+<figcaption>图 16-1　每一代都在解决上一代的问题，同时带来新问题</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; SPA 真正的价值</div>
+  <p>
+    不是「页面不刷新」这个表象，而是<strong>把「界面应该长什么样」变成状态的纯函数</strong>。
+    你不再手动写「找到这个元素、改它的文字、隐藏那个按钮」，而是描述「当状态是 X 时界面就是 Y」，
+    剩下的交给框架。<br>
+    这个收益在交互复杂时非常大，在展示型页面上则几乎不存在 —— 那种场景 SSR 更合适。
+  </p>
+</div>
+
+<h2 id="arch">项目结构</h2>
+
+<p>前后端在同一个仓库里，共享类型：</p>
+
+<div class="code" data-lang="text">
+<pre>
+meadowlark/
+├── package.json
+├── src/                    ← Hono 后端
+│   ├── server.ts
+│   ├── app.ts
+│   ├── routes/
+│   │   └── api.ts          ← 导出 ApiType
+│   └── db/
+└── client/                 ← React 前端
+    ├── index.html
+    ├── vite.config.ts
+    └── src/
+        ├── main.tsx
+        ├── App.tsx
+        ├── api.ts          ← import type { ApiType } from '../../src/routes/api'
+        └── pages/
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="SPA 与 API 的协作方式">
+  <rect class="bx-b" x="20" y="26" width="200" height="130" rx="10"/>
+  <text class="ttl on-b" x="120" y="50" text-anchor="middle">浏览器</text>
+  <text class="sm" x="36" y="76">① 请求任意路径</text>
+  <text class="sm" x="36" y="96">② 拿到同一个 index.html</text>
+  <text class="sm" x="36" y="116">③ 加载 JS 包</text>
+  <text class="sm" x="36" y="136">④ React 接管，渲染界面</text>
+
+  <path class="ln-b" d="M224 70 H320" marker-end="url(#ar)"/>
+  <text class="sm" x="272" y="62" text-anchor="middle">HTML/JS</text>
+
+  <rect class="bx-g" x="324" y="26" width="200" height="130" rx="10"/>
+  <text class="ttl on-g" x="424" y="50" text-anchor="middle">静态资源服务</text>
+  <text class="sm" x="340" y="76">index.html</text>
+  <text class="sm" x="340" y="96">assets/index-a1b2.js</text>
+  <text class="sm" x="340" y="116">assets/index-c3d4.css</text>
+  <text class="sm" x="340" y="136">CDN 或 serveStatic</text>
+
+  <path class="ln-a" d="M120 160 V196 H320" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="180" y="190">⑤ fetch JSON</text>
+
+  <rect class="bx-a" x="324" y="172" width="200" height="52" rx="10"/>
+  <text class="ttl on-a" x="424" y="194" text-anchor="middle">Hono API</text>
+  <text class="sm" x="424" y="212" text-anchor="middle">/api/v1/*</text>
+
+  <path class="ln" d="M528 198 H600" marker-end="url(#ar)"/>
+  <rect class="bx" x="604" y="172" width="130" height="52" rx="10"/>
+  <text class="sm" x="669" y="202" text-anchor="middle">数据库</text>
+
+  <rect class="bx-d" x="560" y="26" width="180" height="130" rx="10"/>
+  <text class="sm" x="650" y="52" text-anchor="middle">关键点</text>
+  <text class="sm" x="576" y="78">任何前端路径都返回</text>
+  <text class="sm" x="576" y="96">同一个 index.html，</text>
+  <text class="sm" x="576" y="114">由前端路由决定显示什么。</text>
+  <text class="sm" x="576" y="138">这叫 SPA 回退（fallback）。</text>
+</svg>
+<figcaption>图 16-2　后端提供两样东西：静态文件 + JSON API</figcaption>
+</figure>
+
+<h2 id="setup">建立前端</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+npm create vite@latest client -- --template react-ts
+cd client
+npm install
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="client/vite.config.ts">
+<pre>
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    // 开发时把 /api 请求转发给 Hono，避免跨域
+    proxy: {
+      '/api': 'http://localhost:3000',
+    },
+  },
+  build: {
+    // 构建产物直接输出到后端的 public 目录
+    outDir: '../public',
+    emptyOutDir: false,
+  },
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 开发时用代理，就不用配 CORS</div>
+  <p>
+    前端跑在 5173 端口，后端在 3000。加上代理之后，浏览器看到的所有请求都来自
+    <code>localhost:5173</code>，同源，没有 CORS 问题。<br>
+    生产环境两者部署在同一个域名下，同样不需要 CORS。<strong>只有前后端真的跨域时才配 CORS。</strong>
+  </p>
+</div>
+
+<h2 id="react">React 快速入门</h2>
+
+<p>如果你没写过 React，三个概念就够开始了。</p>
+
+<h3>① 组件</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+function VacationCard({ vacation }: { vacation: Vacation }) {
+  return (
+    &lt;article className="vacation"&gt;
+      &lt;h3&gt;{vacation.name}&lt;/h3&gt;
+      &lt;p&gt;{vacation.description}&lt;/p&gt;
+      &lt;span&gt;¥{vacation.price.toFixed(2)}&lt;/span&gt;
+    &lt;/article&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  和第 7 章的 Hono JSX 几乎一样。唯一区别：React 用 <code>className</code>，Hono JSX 用 <code>class</code>。
+</p>
+
+<h3>② 状态</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { useState } from 'react'
+
+function Counter() {
+  const [count, setCount] = useState(0)
+
+  return (
+    &lt;button onClick={() =&gt; setCount(count + 1)}&gt;
+      点了 {count} 次
+    &lt;/button&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  <code>useState</code> 返回「当前值」和「修改它的函数」。
+  调用修改函数时，React 会<strong>重新执行这个组件函数</strong>，用新的值渲染出新的界面。
+  这就是「状态 → 界面」的声明式模型。
+</p>
+
+<h3>③ 副作用</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { useEffect, useState } from 'react'
+
+function VacationList() {
+  const [vacations, setVacations] = useState&lt;Vacation[]&gt;([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState&lt;string | null&gt;(null)
+
+  useEffect(() =&gt; {
+    let cancelled = false
+
+    fetch('/api/v1/vacations')
+      .then((res) =&gt; {
+        if (!res.ok) throw new Error(`请求失败：${res.status}`)
+        return res.json()
+      })
+      .then((body) =&gt; { if (!cancelled) setVacations(body.data) })
+      .catch((err) =&gt; { if (!cancelled) setError(err.message) })
+      .finally(() =&gt; { if (!cancelled) setLoading(false) })
+
+    // 组件卸载时取消，避免对已卸载组件调用 setState
+    return () =&gt; { cancelled = true }
+  }, [])   // 空数组 = 只在组件首次挂载时执行一次
+
+  if (loading) return &lt;p&gt;加载中…&lt;/p&gt;
+  if (error) return &lt;p role="alert"&gt;出错了：{error}&lt;/p&gt;
+  if (vacations.length === 0) return &lt;p&gt;暂时没有可预订的行程。&lt;/p&gt;
+
+  return (
+    &lt;div&gt;
+      {vacations.map((v) =&gt; &lt;VacationCard key={v.sku} vacation={v} /&gt;)}
+    &lt;/div&gt;
+  )
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 三个状态，一个都不能少</div>
+  <p>
+    <strong>加载中、出错了、空数据</strong> —— 初学者最常见的错误就是只写「成功且有数据」的分支。
+    结果用户在网速慢时看到一片空白，在接口挂掉时也看到一片空白，完全不知道发生了什么。
+    <br>
+    在真实项目里，用 <a href="https://tanstack.com/query">TanStack Query</a> 或 SWR
+    可以把这三个状态、缓存、重试、去重都管起来，比手写 <code>useEffect</code> 可靠得多。
+  </p>
+</div>
+
+<h2 id="rpc-client">用 RPC 调 API</h2>
+
+<p>第 15 章导出的 <code>ApiType</code> 在这里派上用场：</p>
+
+<div class="code" data-lang="ts" data-file="client/src/api.ts">
+<pre>
+import { hc } from 'hono/client'
+import type { ApiType } from '../../src/routes/api'
+
+export const api = hc&lt;ApiType&gt;('/api/v1')
+</pre>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { api } from './api'
+
+useEffect(() =&gt; {
+  api.vacations
+    .$get({ query: { available: 'true' } })
+    .then(async (res) =&gt; {
+      if (!res.ok) throw new Error('加载失败')
+      const body = await res.json()
+      setVacations(body.data)     // ← body.data 的类型是自动推导出来的
+    })
+    .catch((err) =&gt; setError(err.message))
+}, [])
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 试一下这个体验</div>
+  <p>
+    把后端的 <code>price</code> 字段改名成 <code>priceCny</code>，然后回到前端 ——
+    <code>v.price</code> 那一行立刻出现红波浪线。<br>
+    没有这层类型的话，你要等到打开页面看到「¥undefined」才发现。
+    <strong>而且如果那个页面你今天正好没点开，这个 bug 就上线了。</strong>
+  </p>
+</div>
+
+<h3>提交数据</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+function NotifyForm({ sku }: { sku: string }) {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState&lt;'idle' | 'sending' | 'done' | 'error'&gt;('idle')
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setStatus('sending')
+
+    const res = await api.vacations[':sku'].notify.$post({
+      param: { sku },
+      json: { email },
+    })
+
+    setStatus(res.ok ? 'done' : 'error')
+  }
+
+  if (status === 'done') return &lt;p&gt;好的，到季节我们会通知你。&lt;/p&gt;
+
+  return (
+    &lt;form onSubmit={handleSubmit}&gt;
+      &lt;label htmlFor="email"&gt;邮箱&lt;/label&gt;
+      &lt;input
+        id="email"
+        type="email"
+        required
+        value={email}
+        onChange={(e) =&gt; setEmail(e.target.value)}
+      /&gt;
+      &lt;button type="submit" disabled={status === 'sending'}&gt;
+        {status === 'sending' ? '提交中…' : '通知我'}
+      &lt;/button&gt;
+      {status === 'error' &amp;&amp; &lt;p role="alert"&gt;提交失败，请重试。&lt;/p&gt;}
+    &lt;/form&gt;
+  )
+}
+</pre>
+</div>
+
+<h2 id="routing">前端路由</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install react-router-dom
+</pre>
+</div>
+
+<div class="code" data-lang="tsx" data-file="client/src/App.tsx">
+<pre>
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
+
+export default function App() {
+  return (
+    &lt;BrowserRouter&gt;
+      &lt;nav&gt;
+        &lt;Link to="/"&gt;首页&lt;/Link&gt;
+        &lt;Link to="/vacations"&gt;行程&lt;/Link&gt;
+        &lt;Link to="/about"&gt;关于&lt;/Link&gt;
+      &lt;/nav&gt;
+      &lt;Routes&gt;
+        &lt;Route path="/" element={&lt;Home /&gt;} /&gt;
+        &lt;Route path="/vacations" element={&lt;VacationList /&gt;} /&gt;
+        &lt;Route path="/vacations/:sku" element={&lt;VacationDetail /&gt;} /&gt;
+        &lt;Route path="*" element={&lt;NotFound /&gt;} /&gt;
+      &lt;/Routes&gt;
+    &lt;/BrowserRouter&gt;
+  )
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 服务端必须配合前端路由</div>
+  <p>
+    用户直接在地址栏输入 <code>/vacations/HR199</code> 并回车，请求会发到<strong>服务器</strong>。
+    如果服务器上没有这个路径，就会返回 404 —— 前端路由根本没机会运行。<br>
+    解决办法是「SPA 回退」：所有没匹配到 API 和静态文件的请求，一律返回 <code>index.html</code>。
+  </p>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.ts">
+<pre>
+// 1. API 路由优先
+app.route('/api/v1', apiRoutes)
+
+// 2. 真实存在的静态文件
+app.use('/*', serveStatic({ root: './public' }))
+
+// 3. 其余全部回退到 index.html，交给前端路由
+app.get('*', serveStatic({ path: './public/index.html' }))
+</pre>
+</div>
+
+<h2 id="state">状态管理什么时候需要</h2>
+
+<div class="tw">
+<table>
+  <tr><th>情况</th><th>用什么</th></tr>
+  <tr><td>状态只在一个组件里用</td><td><code>useState</code> 就够了</td></tr>
+  <tr><td>父子组件之间传</td><td>props 往下传，回调往上传</td></tr>
+  <tr><td>很多层组件都要用（当前用户、主题）</td><td>React Context</td></tr>
+  <tr><td>来自服务器的数据（列表、详情）</td><td><strong>TanStack Query / SWR</strong>，不是状态管理库</td></tr>
+  <tr><td>复杂的纯客户端状态（编辑器、画布）</td><td>Zustand / Jotai / Redux</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 大部分「状态管理」其实是「服务器数据缓存」</div>
+  <p>
+    很多项目把 Redux 塞满了从 API 拿回来的数据，然后手写一堆代码去处理加载状态、
+    缓存失效、重新拉取、并发请求去重。<br>
+    这些问题 TanStack Query 已经全部解决了。<strong>先分清「这个状态的真相在服务器还是在浏览器」</strong>，
+    再选工具。真相在服务器的，用数据获取库；真正属于客户端的（比如「侧边栏展开了吗」），才用状态管理。
+  </p>
+</div>
+
+<h2 id="deploy">部署形态</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="两种部署方式">
+  <rect class="bx-b" x="20" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-b" x="192" y="44" text-anchor="middle">A. 同域部署（推荐入门）</text>
+  <text class="sm" x="36" y="70">前端构建产物放进后端的 public/</text>
+  <text class="sm" x="36" y="90">一个域名，一次部署</text>
+  <text class="mono sm" x="36" y="118">meadowlark.com/</text>
+  <text class="mono sm" x="36" y="136">meadowlark.com/api/v1/*</text>
+  <text class="sm on-g" x="36" y="164">&#10003; 不需要 CORS</text>
+  <text class="sm on-g" x="36" y="184">&#10003; Cookie 直接能用</text>
+  <text class="sm on-g" x="36" y="204">&#10003; 部署简单</text>
+
+  <rect class="bx-p" x="395" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-p" x="567" y="44" text-anchor="middle">B. 分离部署</text>
+  <text class="sm" x="411" y="70">前端上 CDN，后端独立部署</text>
+  <text class="sm" x="411" y="90">两个域名，两条流水线</text>
+  <text class="mono sm" x="411" y="118">app.meadowlark.com（CDN）</text>
+  <text class="mono sm" x="411" y="136">api.meadowlark.com（Hono）</text>
+  <text class="sm on-g" x="411" y="164">&#10003; 前端全球加速</text>
+  <text class="sm on-g" x="411" y="184">&#10003; 前后端独立发版</text>
+  <text class="sm on-r" x="411" y="204">&#10007; 要配 CORS 和跨域 Cookie</text>
+</svg>
+<figcaption>图 16-3　先用 A，遇到性能瓶颈再考虑 B</figcaption>
+</figure>
+
+<div class="code" data-lang="json" data-file="package.json">
+<pre>
+{
+  "scripts": {
+    "dev:api": "tsx watch src/server.ts",
+    "dev:web": "vite --root client",
+    "dev": "npm-run-all --parallel dev:api dev:web",
+    "build": "vite build --root client && tsc -p tsconfig.build.json",
+    "start": "node dist/server.js"
+  }
+}
+</pre>
+</div>
+
+<h2 id="alternatives">更轻的选择</h2>
+
+<p>不是每个项目都需要完整的 React。Hono 生态里有两个更轻的方案：</p>
+
+<h3><code>hono/jsx/dom</code>：客户端也用 Hono 的 JSX</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { render, useState } from 'hono/jsx/dom'
+
+function Counter() {
+  const [count, setCount] = useState(0)
+  return &lt;button onClick={() =&gt; setCount(count + 1)}&gt;点了 {count} 次&lt;/button&gt;
+}
+
+render(&lt;Counter /&gt;, document.getElementById('root')!)
+</pre>
+</div>
+
+<p>
+  API 和 React 高度相似，但体积小一个数量级。适合「页面基本是服务端渲染的，
+  只有几个地方需要交互」的场景 —— 而这其实是<strong>大多数网站</strong>的真实情况。
+</p>
+
+<h3>HonoX：全栈元框架</h3>
+
+<p>
+  <a href="https://github.com/honojs/honox">HonoX</a> 是 Hono 官方的全栈框架，
+  提供基于文件的路由、服务端渲染、以及「孤岛架构」——
+  默认整页服务端渲染，只把标记为「岛」的组件送到客户端做水合。
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+app/
+├── routes/
+│   ├── index.tsx           → /
+│   ├── about.tsx           → /about
+│   └── vacations/
+│       └── [sku].tsx       → /vacations/:sku
+├── islands/
+│   └── NotifyForm.tsx      ← 只有这个组件的 JS 会发到浏览器
+└── server.ts
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 怎么选</div>
+  <ul>
+    <li><strong>内容为主、少量交互</strong>（营销站、博客、文档）→ Hono SSR + <code>hono/jsx/dom</code></li>
+    <li><strong>想要文件路由和孤岛架构</strong> → HonoX</li>
+    <li><strong>交互密集的应用</strong>（后台、看板、编辑器）→ Hono API + React/Vue SPA</li>
+    <li><strong>团队已经很熟 React</strong> → 直接上 React，别为了轻量增加学习成本</li>
+  </ul>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>SPA 的价值是「状态 → 界面」的声明式模型，不是「页面不刷新」。</li>
+  <li>后端在 SPA 架构里只做两件事：提供静态文件、提供 JSON API。</li>
+  <li>开发时用 Vite 代理避开 CORS；生产同域部署同样不需要 CORS。</li>
+  <li>RPC 客户端让前端拿到后端类型，接口改了当场编译报错。</li>
+  <li>数据请求一定要处理加载中、出错、空数据三种状态。</li>
+  <li>服务器要配 SPA 回退，否则刷新子路径会 404。</li>
+  <li>不是所有项目都需要 React；<code>hono/jsx/dom</code> 和 HonoX 值得考虑。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 Vite 建一个 React 前端，通过代理调用你的 <code>/api/v1/vacations</code>，把结果渲染成列表。</li>
+    <li>把 <code>fetch</code> 换成 RPC 客户端 <code>hc</code>。然后在后端把某个字段改名，确认前端立刻编译报错。</li>
+    <li>加上 react-router 和至少两个页面，配好服务端的 SPA 回退，确认直接访问 <code>/vacations</code> 并刷新不会 404。</li>
+    <li>故意把后端停掉，看看你的前端界面表现如何。如果只是一片空白，去补上错误状态。</li>
+    <li>把「到季通知」表单做出来，包含提交中禁用按钮、成功提示、失败重试。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

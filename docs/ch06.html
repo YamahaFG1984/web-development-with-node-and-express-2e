@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 6 章 · Context：请求与响应 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 6 章</span>
+<h1>Context：请求与响应</h1>
+<p class="lede">
+  处理函数拿到的那个 <code>c</code>，是你和整个 HTTP 世界之间的唯一接口。
+  这一章把它拆开来看：URL 由哪些部分组成、有哪些方法和头、怎么读请求、怎么造响应。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>能说清 URL 的六个组成部分，知道哪些会传到服务器</li>
+    <li>掌握 <code>c.req</code> 上常用的读取方法</li>
+    <li>掌握 <code>c.text/json/html/redirect</code> 等造响应的方法</li>
+    <li>知道什么时候该绕过 Hono，直接用标准的 <code>Request</code>/<code>Response</code></li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="url">URL 的组成</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="URL 各组成部分的名称">
+  <text class="mono" x="30" y="42" style="font-size:15px">https://www.example.com:8080/vacations/hood-river?guests=2&amp;lang=zh#photos</text>
+
+  <path class="ln-b" d="M56 52 V78" style="stroke:var(--blue)"/>
+  <text class="sm on-b" x="30" y="94">协议 protocol</text>
+  <text class="sm" x="30" y="110">http / https</text>
+
+  <path class="ln-b" d="M170 52 V130" style="stroke:var(--blue)"/>
+  <text class="sm on-b" x="118" y="146">主机 host</text>
+  <text class="sm" x="118" y="162">域名或 IP</text>
+
+  <path class="ln-b" d="M290 52 V78" style="stroke:var(--blue)"/>
+  <text class="sm on-b" x="252" y="94">端口 port</text>
+  <text class="sm" x="252" y="110">省略时 http=80，https=443</text>
+
+  <path class="ln-a" d="M395 52 V186"/>
+  <text class="sm on-a" x="330" y="202">路径 path</text>
+  <text class="sm" x="330" y="218">你的路由主要看它</text>
+
+  <path class="ln-a" d="M540 52 V130"/>
+  <text class="sm on-a" x="470" y="146">查询串 query</text>
+  <text class="sm" x="470" y="162">? 开头，&amp; 分隔的键值对</text>
+
+  <path class="ln-r" d="M700 52 V78" style="stroke:var(--red)"/>
+  <text class="sm on-r" x="620" y="94">片段 fragment</text>
+  <text class="sm on-r" x="620" y="110"># 之后的部分</text>
+  <text class="sm on-r" x="620" y="126">永远不会发给服务器！</text>
+
+  <rect class="bx-d" x="30" y="228" width="700" height="26" rx="6"/>
+  <text class="sm" x="380" y="246" text-anchor="middle">服务器能看到：协议、主机、端口、路径、查询串 —— 但看不到 # 后面的内容</text>
+</svg>
+<figcaption>图 6-1　URL 的六个部分</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 片段为什么看不到</div>
+  <p>
+    <code>#photos</code> 是浏览器的私事 —— 原本用来滚动到锚点，后来被一些单页应用拿去做前端路由。
+    浏览器发请求时会把 <code>#</code> 及之后的部分<strong>截掉</strong>。所以服务端逻辑永远不能依赖它。
+  </p>
+</div>
+
+<h2 id="methods">HTTP 方法</h2>
+
+<p>
+  同一个路径 <code>/vacations</code>，配上不同的方法，含义完全不同。这是 REST 风格的基础：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>方法</th><th>语义</th><th>有请求体吗</th><th>可重复执行吗</th></tr>
+  <tr><td><code>GET</code></td><td>取数据</td><td>没有</td><td>可以（不改变任何东西）</td></tr>
+  <tr><td><code>POST</code></td><td>新建</td><td>有</td><td>不可以（重复提交会创建两条）</td></tr>
+  <tr><td><code>PUT</code></td><td>整体替换</td><td>有</td><td>可以（结果一样）</td></tr>
+  <tr><td><code>PATCH</code></td><td>局部修改</td><td>有</td><td>通常可以</td></tr>
+  <tr><td><code>DELETE</code></td><td>删除</td><td>通常没有</td><td>可以</td></tr>
+  <tr><td><code>OPTIONS</code></td><td>问「我能做什么」</td><td>没有</td><td>可以（CORS 预检用它，第 15 章讲）</td></tr>
+</table>
+</div>
+
+<p>浏览器地址栏和普通链接只会发 <code>GET</code>；HTML 表单只支持 <code>GET</code> 和 <code>POST</code>。
+其余方法要靠 JavaScript 的 <code>fetch()</code> 发出。</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/vacations', listVacations)          // 列表
+app.post('/vacations', createVacation)         // 新建
+app.get('/vacations/:sku', getVacation)        // 单个
+app.put('/vacations/:sku', replaceVacation)    // 整体替换
+app.delete('/vacations/:sku', deleteVacation)  // 删除
+
+app.all('/webhook', handleWebhook)             // 任意方法
+app.on(['GET', 'HEAD'], '/ping', pong)         // 指定若干方法
+</pre>
+</div>
+
+<h2 id="headers">请求头与响应头</h2>
+
+<p>
+  除了 URL，浏览器每次还会附带一堆<strong>请求头</strong>。写个路由把它们打印出来看看：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/headers', (c) =&gt; {
+  const lines: string[] = []
+  // c.req.raw.headers 是标准的 Headers 对象，可以直接遍历
+  c.req.raw.headers.forEach((value, key) =&gt; {
+    lines.push(`${key}: ${value}`)
+  })
+  return c.text(lines.join('\n'))
+})
+</pre>
+</div>
+
+<p>你会看到类似这些：</p>
+
+<div class="tw">
+<table>
+  <tr><th>请求头</th><th>它告诉服务器什么</th></tr>
+  <tr><td><code>accept</code></td><td>我能接受什么格式（HTML？JSON？）</td></tr>
+  <tr><td><code>accept-language</code></td><td>我偏好什么语言（可用于自动切换中英文）</td></tr>
+  <tr><td><code>user-agent</code></td><td>我是什么浏览器、什么系统</td></tr>
+  <tr><td><code>cookie</code></td><td>你上次给我存的东西（第 9 章）</td></tr>
+  <tr><td><code>content-type</code></td><td>我的请求体是什么格式（第 8 章）</td></tr>
+  <tr><td><code>authorization</code></td><td>我的身份凭证（第 18 章）</td></tr>
+</table>
+</div>
+
+<p>反过来，服务器用<strong>响应头</strong>告诉浏览器怎么处理返回的内容：</p>
+
+<div class="tw">
+<table>
+  <tr><th>响应头</th><th>作用</th></tr>
+  <tr><td><code>Content-Type</code></td><td>这是什么格式。<strong>最重要的一个</strong></td></tr>
+  <tr><td><code>Cache-Control</code></td><td>能缓存多久（第 17 章）</td></tr>
+  <tr><td><code>Set-Cookie</code></td><td>请存下这个值（第 9 章）</td></tr>
+  <tr><td><code>Location</code></td><td>去这个地址（配合 3xx 状态码）</td></tr>
+  <tr><td><code>Content-Security-Policy</code></td><td>只许加载这些来源的脚本（第 18 章）</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; Content-Type 决定一切</div>
+  <p>
+    浏览器<strong>完全按 <code>Content-Type</code> 来解释响应内容，和 URL 后缀无关</strong>。
+    你可以在 <code>/image.jpg</code> 返回 HTML，也可以在 <code>/page.html</code> 返回 PNG。
+    路径只是个名字，格式由响应头说了算。这也是为什么 <code>c.json()</code> 和 <code>c.html()</code>
+    这类快捷方法有价值 —— 它们不让你忘记设这个头。
+  </p>
+</div>
+
+<h3>媒体类型</h3>
+
+<p>
+  <code>Content-Type</code> 的值叫<strong>互联网媒体类型</strong>（旧称 MIME 类型），格式是
+  <code>类型/子类型; 参数</code>：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+text/html; charset=utf-8          HTML 页面
+text/plain; charset=utf-8         纯文本
+application/json                  JSON
+image/png                         PNG 图片
+application/x-www-form-urlencoded 普通表单提交
+multipart/form-data               带文件的表单
+</pre>
+</div>
+
+<h2 id="creq">读请求：c.req</h2>
+
+<p>Hono 把请求信息都挂在 <code>c.req</code> 上（类型叫 <code>HonoRequest</code>）：</p>
+
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>拿到什么</th></tr>
+  <tr><td><code>c.req.method</code></td><td>方法字符串，如 <code>'GET'</code></td></tr>
+  <tr><td><code>c.req.url</code></td><td>完整 URL 字符串</td></tr>
+  <tr><td><code>c.req.path</code></td><td>路径，如 <code>'/vacations/hr199'</code></td></tr>
+  <tr><td><code>c.req.routePath</code></td><td>匹配到的<strong>路由模式</strong>，如 <code>'/vacations/:sku'</code>。调试路由时很有用</td></tr>
+  <tr><td><code>c.req.param('sku')</code></td><td>单个路径参数</td></tr>
+  <tr><td><code>c.req.param()</code></td><td>所有路径参数组成的对象</td></tr>
+  <tr><td><code>c.req.query('q')</code></td><td>单个查询串参数</td></tr>
+  <tr><td><code>c.req.query()</code></td><td>所有查询串参数组成的对象</td></tr>
+  <tr><td><code>c.req.queries('tag')</code></td><td>同名参数的<strong>数组</strong>，如 <code>?tag=a&amp;tag=b</code></td></tr>
+  <tr><td><code>c.req.header('accept')</code></td><td>单个请求头（不区分大小写）</td></tr>
+  <tr><td><code>await c.req.json()</code></td><td>把请求体解析成 JSON</td></tr>
+  <tr><td><code>await c.req.text()</code></td><td>请求体的纯文本</td></tr>
+  <tr><td><code>await c.req.parseBody()</code></td><td>解析表单（含文件），第 8 章详讲</td></tr>
+  <tr><td><code>await c.req.formData()</code></td><td>标准 <code>FormData</code> 对象</td></tr>
+  <tr><td><code>await c.req.arrayBuffer()</code></td><td>原始字节</td></tr>
+  <tr><td><code>c.req.valid('json')</code></td><td>校验器验证过的数据，第 8 章详讲</td></tr>
+  <tr><td><code>c.req.raw</code></td><td><strong>原始的标准 <code>Request</code> 对象</strong>，Hono 没包装的东西从这里拿</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/vacations/:sku', (c) =&gt; {
+  const sku = c.req.param('sku')                // 路径参数
+  const currency = c.req.query('currency') ?? 'CNY'  // 查询串，带默认值
+  const lang = c.req.header('accept-language')  // 请求头
+  return c.json({ sku, currency, lang })
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 请求体只能读一次</div>
+  <p>
+    请求体是一个<strong>流</strong>。<code>await c.req.text()</code> 之后再 <code>await c.req.json()</code>
+    会失败或拿到空值。需要多次使用同一份数据，先读出来存到变量里。
+    （Hono 内部对 <code>c.req.json()</code> 等方法做了缓存，但混用不同方法仍然容易出问题，养成读一次的习惯。）
+  </p>
+</div>
+
+<h2 id="cres">造响应</h2>
+
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>做什么</th></tr>
+  <tr><td><code>c.text('hi')</code></td><td>纯文本，自动设 <code>text/plain; charset=UTF-8</code></td></tr>
+  <tr><td><code>c.json({ a: 1 })</code></td><td>JSON，自动设 <code>application/json</code></td></tr>
+  <tr><td><code>c.html(&lt;Page /&gt;)</code></td><td>HTML，接受 JSX 或字符串</td></tr>
+  <tr><td><code>c.redirect('/about')</code></td><td>重定向，默认 302</td></tr>
+  <tr><td><code>c.redirect('/about', 303)</code></td><td>指定重定向状态码</td></tr>
+  <tr><td><code>c.notFound()</code></td><td>触发 <code>app.notFound()</code> 的处理逻辑</td></tr>
+  <tr><td><code>c.body(data, 200, headers)</code></td><td>任意内容 + 状态码 + 响应头</td></tr>
+  <tr><td><code>c.newResponse(...)</code></td><td>完全自定义构造</td></tr>
+  <tr><td><code>c.header('X-Foo', 'bar')</code></td><td>设置一个响应头</td></tr>
+  <tr><td><code>c.status(201)</code></td><td>设置状态码</td></tr>
+  <tr><td><code>c.res</code></td><td>当前的 Response 对象（中间件里改响应用）</td></tr>
+</table>
+</div>
+
+<p>状态码可以直接作为第二个参数传：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/teapot', (c) =&gt; c.text('我是茶壶', 418))
+
+app.post('/vacations', (c) =&gt; c.json({ ok: true }, 201))   // 201 Created
+
+app.get('/old-page', (c) =&gt; c.redirect('/new-page', 301))  // 永久重定向
+</pre>
+</div>
+
+<h3>常用状态码</h3>
+
+<div class="tw">
+<table>
+  <tr><th>码</th><th>名字</th><th>什么时候用</th></tr>
+  <tr><td>200</td><td>OK</td><td>成功（默认值）</td></tr>
+  <tr><td>201</td><td>Created</td><td>POST 成功创建了资源</td></tr>
+  <tr><td>204</td><td>No Content</td><td>成功但没有返回内容（如 DELETE）</td></tr>
+  <tr><td>301</td><td>Moved Permanently</td><td>永久搬家。<strong>浏览器会缓存，慎用</strong></td></tr>
+  <tr><td>302</td><td>Found</td><td>临时跳转</td></tr>
+  <tr><td>303</td><td>See Other</td><td><strong>表单提交后跳转的正确选择</strong>（第 8 章解释为什么）</td></tr>
+  <tr><td>304</td><td>Not Modified</td><td>内容没变，用你的缓存（第 17 章）</td></tr>
+  <tr><td>400</td><td>Bad Request</td><td>客户端参数有问题</td></tr>
+  <tr><td>401</td><td>Unauthorized</td><td>没登录（其实是「未认证」，名字取错了）</td></tr>
+  <tr><td>403</td><td>Forbidden</td><td>登录了但没权限</td></tr>
+  <tr><td>404</td><td>Not Found</td><td>资源不存在</td></tr>
+  <tr><td>409</td><td>Conflict</td><td>和现有数据冲突（如邮箱已注册）</td></tr>
+  <tr><td>422</td><td>Unprocessable Entity</td><td>格式对但内容不合法（校验失败）</td></tr>
+  <tr><td>429</td><td>Too Many Requests</td><td>限流</td></tr>
+  <tr><td>500</td><td>Internal Server Error</td><td>服务器自己出错了</td></tr>
+</table>
+</div>
+
+<h2 id="escape">需要时可以绕过 Hono</h2>
+
+<p>
+  Hono 的封装是<strong>可选的</strong>。任何时候你都能拿到原始对象，也能直接返回标准 <code>Response</code>：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/raw', (c) =&gt; {
+  const request: Request = c.req.raw   // 标准 Request
+
+  // 直接返回标准 Response，Hono 完全接受
+  return new Response('自己造的响应', {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  })
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="Hono 的 Context 是标准对象之上的一层薄封装">
+  <rect class="bx-d" x="60" y="110" width="640" height="60" rx="10"/>
+  <text class="ttl" x="380" y="134" text-anchor="middle">Web 标准层</text>
+  <text class="mono sm" x="380" y="154" text-anchor="middle">Request · Response · Headers · URL · FormData</text>
+
+  <rect class="bx-a" x="60" y="26" width="640" height="60" rx="10"/>
+  <text class="ttl on-a" x="380" y="50" text-anchor="middle">Hono Context（c）</text>
+  <text class="mono sm" x="380" y="70" text-anchor="middle">c.req.param() · c.req.query() · c.json() · c.html() · c.redirect()</text>
+
+  <path class="ln-a" d="M200 88 V106" marker-end="url(#ar-a)"/>
+  <text class="sm" x="255" y="102">封装</text>
+
+  <path class="ln-g" d="M560 106 V88" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="600" y="102">c.req.raw 直达</text>
+</svg>
+<figcaption>图 6-2　Context 是薄薄一层，底下的标准对象随时可取</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 这就是「不锁定」的含义</div>
+  <p>
+    很多框架的封装是<em>不透明</em>的：一旦框架没提供某个能力，你就卡住了。
+    Hono 的封装是<em>透明</em>的：<code>c.req.raw</code> 永远在那儿，你随时能掉回标准层。
+    学 Hono 的时间不会浪费，因为你学的大部分是 Web 标准本身。
+  </p>
+</div>
+
+<h2 id="patterns">三种常见模式速查</h2>
+
+<h3>① 渲染页面</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+// 最简单
+app.get('/about', (c) =&gt; c.html(&lt;About /&gt;))
+
+// 带状态码
+app.get('/gone', (c) =&gt; c.html(&lt;Gone /&gt;, 410))
+
+// 从查询串取数据传给视图
+app.get('/greeting', (c) =&gt; {
+  const name = c.req.query('name') ?? '朋友'
+  return c.html(&lt;Greeting name={name} /&gt;)
+})
+
+// 返回纯文本（调试时方便）
+app.get('/debug', (c) =&gt; c.text(JSON.stringify(c.req.query(), null, 2)))
+</pre>
+</div>
+
+<h3>② 处理表单</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/contact', async (c) =&gt; {
+  const body = await c.req.parseBody()
+  const name = String(body.name ?? '')
+  const email = String(body.email ?? '')
+
+  if (!email.includes('@')) {
+    return c.html(&lt;ContactError /&gt;, 400)
+  }
+
+  console.log(`收到联系请求：${name} &lt;${email}&gt;`)
+  // 303 而不是 302：确保浏览器用 GET 访问下一个地址
+  return c.redirect('/contact/thank-you', 303)
+})
+</pre>
+</div>
+
+<h3>③ 提供 API</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+const tours = [
+  { id: 0, name: '胡德河一日游', price: 99.95 },
+  { id: 1, name: '俄勒冈海岸', price: 149.95 },
+]
+
+app.get('/api/tours', (c) =&gt; c.json(tours))
+
+app.get('/api/tours/:id', (c) =&gt; {
+  const id = Number(c.req.param('id'))
+  const tour = tours.find((t) =&gt; t.id === id)
+  if (!tour) return c.json({ error: '没有这个行程' }, 404)
+  return c.json(tour)
+})
+
+app.put('/api/tours/:id', async (c) =&gt; {
+  const id = Number(c.req.param('id'))
+  const tour = tours.find((t) =&gt; t.id === id)
+  if (!tour) return c.json({ error: '没有这个行程' }, 404)
+
+  const patch = await c.req.json&lt;{ name?: string; price?: number }&gt;()
+  if (patch.name !== undefined) tour.name = patch.name
+  if (patch.price !== undefined) tour.price = patch.price
+  return c.json(tour)
+})
+
+app.delete('/api/tours/:id', (c) =&gt; {
+  const id = Number(c.req.param('id'))
+  const idx = tours.findIndex((t) =&gt; t.id === id)
+  if (idx &lt; 0) return c.json({ error: '没有这个行程' }, 404)
+  tours.splice(idx, 1)
+  return c.body(null, 204)   // 204 表示成功但无内容
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 上面的 tours 数组是玩具</div>
+  <p>
+    它存在服务器进程的内存里。重启就没了，而且如果你跑了两个实例，两边的数据会不一致。
+    第 13 章会换成真正的数据库。现在这样写只是为了聚焦在请求/响应上。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>URL 有六个部分，<code>#</code> 之后的片段永远不会到服务器。</li>
+  <li><code>Content-Type</code> 决定浏览器怎么解释响应，和路径后缀无关。</li>
+  <li>读请求全靠 <code>c.req.*</code>，造响应全靠 <code>c.text/json/html/redirect/body</code>。</li>
+  <li>请求体是流，只能读一次。</li>
+  <li><code>c.req.raw</code> 让你随时回到标准 <code>Request</code>；直接 <code>return new Response(...)</code> 也完全合法。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>写一个 <code>/inspect</code> 路由，把方法、路径、查询串、所有请求头都以 JSON 返回。用 <code>curl</code> 和浏览器各访问一次，对比差异。</li>
+    <li>写一个 <code>/lang</code> 路由：读 <code>accept-language</code> 头，如果包含 <code>zh</code> 返回中文问候，否则返回英文。</li>
+    <li>用 <code>curl -X DELETE http://localhost:3000/api/tours/0 -i</code> 试试上面的删除接口，观察 204 响应确实没有响应体。</li>
+    <li>把 <code>/api/tours</code> 改成：如果请求头 <code>accept</code> 里包含 <code>text/html</code> 就返回一个 HTML 表格，否则返回 JSON。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

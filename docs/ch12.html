@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 12 章 · 生产环境考量 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 12 章</span>
+<h1>生产环境考量</h1>
+<p class="lede">
+  离上线还有九章，但现在就该想这些事了。在本地跑得好好的应用，
+  一到生产环境会遇到完全不同的问题：配置、并发、崩溃、监控。提前想清楚，比上线后半夜救火便宜得多。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用环境变量区分开发/测试/生产，并做到跨运行时通用</li>
+    <li>理解「进程扩容」和「边缘天然扩容」两种模型的区别</li>
+    <li>正确处理未捕获异常，避免服务器静默死掉</li>
+    <li>加上健康检查、日志和错误上报</li>
+    <li>做一次压力测试，知道自己的应用大概能扛多少</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="env">执行环境</h2>
+
+<p>
+  同一份代码，在不同环境要有不同行为：开发时打详细日志、显示错误堆栈；生产时压缩输出、
+  隐藏内部信息、连生产数据库。区分方式是环境变量 <code>NODE_ENV</code>：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+NODE_ENV=development npm run dev     # 开发（默认）
+NODE_ENV=test npm test               # 测试
+NODE_ENV=production node dist/server.js   # 生产
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 只用这三个值</div>
+  <p>
+    <code>development</code> / <code>test</code> / <code>production</code> 是约定俗成的，
+    很多库会根据它们改变行为。别发明 <code>staging</code> 这种值放进 <code>NODE_ENV</code> ——
+    库不认识它，会当成非生产环境处理。
+    需要区分预发布环境的话，另开一个变量，比如 <code>APP_ENV=staging</code>，
+    同时保持 <code>NODE_ENV=production</code>。
+  </p>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+import { logger } from 'hono/logger'
+import { compress } from 'hono/compress'
+import { config, isProduction } from './config'
+
+if (isProduction) {
+  app.use(compress())
+  app.use(logger(structuredLog))     // 生产：结构化 JSON 日志，便于机器分析
+} else {
+  app.use(logger())                  // 开发：人类可读的彩色输出
+}
+
+app.onError((err, c) =&gt; {
+  console.error(err)
+  return c.json(
+    {
+      error: '服务器内部错误',
+      // 只有非生产环境才暴露堆栈
+      ...(isProduction ? {} : { message: err.message, stack: err.stack }),
+    },
+    500
+  )
+})
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 让环境差异尽可能小</div>
+  <p>
+    每加一处 <code>if (isProduction)</code>，就多一条「本地跑得好好的，线上却挂了」的可能路径。
+    开发和生产用一样的数据库类型、一样的 Node 版本、一样的构建产物。
+    差异只留给：日志格式、错误详情、密钥、外部服务地址。
+  </p>
+</div>
+
+<h2 id="cross-runtime">跨运行时读配置</h2>
+
+<p>
+  这是 Hono 项目特有的一个问题：<strong>不同运行时读环境变量的方式不一样</strong>。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>运行时</th><th>怎么读</th><th>配置放哪</th></tr>
+  <tr><td>Node.js</td><td><code>process.env.KEY</code></td><td><code>.env</code> 文件 / 系统环境变量</td></tr>
+  <tr><td>Bun</td><td><code>process.env.KEY</code>（兼容）或 <code>Bun.env</code></td><td><code>.env</code>（自动加载）</td></tr>
+  <tr><td>Deno</td><td><code>Deno.env.get('KEY')</code></td><td>系统环境变量</td></tr>
+  <tr><td>Cloudflare Workers</td><td><code>c.env.KEY</code></td><td><code>wrangler.toml</code> / Secrets / <code>.dev.vars</code></td></tr>
+</table>
+</div>
+
+<p>Hono 提供了统一入口：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { env } from 'hono/adapter'
+
+app.get('/config-demo', (c) =&gt; {
+  const { DATABASE_URL, COOKIE_SECRET } = env&lt;{
+    DATABASE_URL: string
+    COOKIE_SECRET: string
+  }&gt;(c)
+
+  return c.text('配置读取成功')
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 注意 Workers 上的一个重要差别</div>
+  <p>
+    在 Node 上你可以在<strong>模块顶层</strong>读 <code>process.env</code>，随便用。<br>
+    在 Cloudflare Workers 上，环境变量只在<strong>请求上下文里</strong>可用 ——
+    模块顶层读不到 <code>c.env</code>。<br>
+    所以别写 <code>const db = createDb(process.env.DATABASE_URL)</code> 这种顶层初始化，
+    要写成 <code>const db = createDb(c.env.DATABASE_URL)</code> 或者用惰性初始化。
+    这是从 Node 迁到 Workers 时最常踩的坑。
+  </p>
+</div>
+
+<h3>Cloudflare 的配置分层</h3>
+
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+name = "meadowlark"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# 非敏感配置，可以提交到 Git
+[vars]
+APP_NAME = "云雀旅行"
+LOG_LEVEL = "info"
+
+# 密钥不写在这里！用命令行设置：
+#   wrangler secret put COOKIE_SECRET
+#   wrangler secret put RESEND_API_KEY
+
+[[d1_databases]]
+binding = "DB"
+database_name = "meadowlark"
+database_id = "xxxx-xxxx"
+
+[env.staging]
+name = "meadowlark-staging"
+vars = { LOG_LEVEL = "debug" }
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".dev.vars">
+<pre>
+# 本地开发用的密钥，在 .gitignore 里
+COOKIE_SECRET=dev-secret-at-least-32-characters-long
+RESEND_API_KEY=re_test_xxx
+</pre>
+</div>
+
+<h2 id="run">让进程一直活着</h2>
+
+<p>
+  在 Node 上，<code>node server.js</code> 只是把程序跑起来。终端一关它就没了，
+  崩溃了也不会自己起来。生产环境需要一个「看门人」：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>方案</th><th>适用场景</th><th>说明</th></tr>
+  <tr><td>PM2</td><td>自己管的服务器</td><td>Node 生态最流行的进程管理器，带集群模式、日志轮转、开机自启</td></tr>
+  <tr><td>systemd</td><td>Linux 服务器</td><td>系统自带，不用装东西。<code>Restart=always</code> 就够用</td></tr>
+  <tr><td>Docker + 编排</td><td>容器化部署</td><td>容器退出后由 Kubernetes / ECS / Docker Compose 拉起</td></tr>
+  <tr><td>平台托管</td><td>Workers / Vercel / Fly.io</td><td><strong>什么都不用做</strong>，平台负责进程管理</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="text" data-file="Dockerfile">
+<pre>
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY --from=build /app/dist ./dist
+COPY public ./public
+EXPOSE 3000
+USER node
+CMD ["node", "dist/server.js"]
+</pre>
+</div>
+
+<h2 id="scale">扩容</h2>
+
+<p>两种思路：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="垂直扩容与水平扩容">
+  <rect class="bx-b" x="20" y="20" width="345" height="120" rx="10"/>
+  <text class="ttl on-b" x="192" y="44" text-anchor="middle">垂直扩容（scale up）</text>
+  <text class="sm" x="36" y="70">换更强的机器：更多 CPU、更大内存</text>
+  <text class="sm on-g" x="36" y="94">&#10003; 不用改代码</text>
+  <text class="sm on-r" x="36" y="114">&#10007; 有物理上限，且价格是超线性的</text>
+  <text class="sm on-r" x="36" y="132">&#10007; 单点故障：这台机器挂了就全挂</text>
+
+  <rect class="bx-g" x="395" y="20" width="345" height="120" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">水平扩容（scale out）</text>
+  <text class="sm" x="411" y="70">加更多台普通机器，前面放个负载均衡</text>
+  <text class="sm on-g" x="411" y="94">&#10003; 几乎无上限，成本线性</text>
+  <text class="sm on-g" x="411" y="114">&#10003; 挂一台不影响整体</text>
+  <text class="sm on-r" x="411" y="132">&#10007; <tspan class="on-r">代码必须是无状态的</tspan></text>
+
+  <rect class="bx-a" x="20" y="160" width="720" height="128" rx="10"/>
+  <text class="ttl on-a" x="380" y="184" text-anchor="middle">无状态是水平扩容的前提</text>
+  <text class="sm on-r" x="40" y="210">&#10007; 会话存在进程内存里 → 用户下一个请求落到另一台，登录状态就没了</text>
+  <text class="sm on-r" x="40" y="230">&#10007; 上传文件存本地磁盘 → 另一台机器上找不到这个文件</text>
+  <text class="sm on-r" x="40" y="250">&#10007; 计数器存模块变量里 → 两台各数各的，数字永远不对</text>
+  <text class="sm on-g" x="40" y="274">&#10003; 全部放到共享存储：数据库、Redis / KV、对象存储</text>
+</svg>
+<figcaption>图 12-1　「代码里不留状态」是能不能扩容的分水岭</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 一个真实的教训</div>
+  <p>
+    原书作者讲过一个故事：他做了一个抽奖活动，用文件记录中奖人数，满 50 人就停止。
+    结果服务器是负载均衡的两台 —— 每台各自数到 50，最后送出了 100 份奖品。
+    <br>
+    这个 bug 在本地永远复现不出来。<strong>写代码时就假设「随时会有第二个实例」，
+    比上线后再改便宜一百倍。</strong>
+  </p>
+</div>
+
+<h3>Node 上的集群模式</h3>
+
+<p>
+  一个 Node 进程只用一个 CPU 核心。有 8 核就该跑 8 个进程。
+  PM2 一行命令搞定：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+pm2 start dist/server.js -i max --name meadowlark
+</pre>
+</div>
+
+<p>或者用 Node 内置的 <code>cluster</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/cluster.ts">
+<pre>
+import cluster from 'node:cluster'
+import { availableParallelism } from 'node:os'
+
+if (cluster.isPrimary) {
+  const n = availableParallelism()
+  console.log(`启动 ${n} 个工作进程`)
+  for (let i = 0; i &lt; n; i++) cluster.fork()
+
+  // 有进程死了就补一个
+  cluster.on('exit', (worker, code, signal) =&gt; {
+    console.error(`工作进程 ${worker.process.pid} 退出（${code}/${signal}），正在重启`)
+    cluster.fork()
+  })
+} else {
+  await import('./server.js')
+}
+</pre>
+</div>
+
+<h3>边缘环境不需要操心这些</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="传统部署与边缘部署的扩容模型">
+  <rect class="bx-b" x="20" y="20" width="345" height="170" rx="10"/>
+  <text class="ttl on-b" x="192" y="44" text-anchor="middle">传统部署</text>
+  <rect class="bx" x="50" y="60" width="80" height="34" rx="6"/><text class="sm" x="90" y="82" text-anchor="middle">实例 1</text>
+  <rect class="bx" x="150" y="60" width="80" height="34" rx="6"/><text class="sm" x="190" y="82" text-anchor="middle">实例 2</text>
+  <rect class="bx-d" x="250" y="60" width="80" height="34" rx="6"/><text class="sm" x="290" y="82" text-anchor="middle">要加吗？</text>
+  <text class="sm" x="40" y="118">你要决定：开几台、什么时候扩、什么时候缩</text>
+  <text class="sm" x="40" y="138">要配负载均衡、健康检查、滚动更新</text>
+  <text class="sm" x="40" y="158">流量低谷时机器闲着也花钱</text>
+  <text class="sm" x="40" y="178">但你能完全控制运行环境</text>
+
+  <rect class="bx-g" x="395" y="20" width="345" height="170" rx="10"/>
+  <text class="ttl on-g" x="567" y="44" text-anchor="middle">边缘部署</text>
+  <circle class="bx-g" cx="440" cy="77" r="13"/><circle class="bx-g" cx="480" cy="77" r="13"/>
+  <circle class="bx-g" cx="520" cy="77" r="13"/><circle class="bx-g" cx="560" cy="77" r="13"/>
+  <circle class="bx-g" cx="600" cy="77" r="13"/><circle class="bx-g" cx="640" cy="77" r="13"/>
+  <circle class="bx-g" cx="680" cy="77" r="13"/>
+  <text class="sm" x="415" y="118">代码自动复制到全球几百个节点</text>
+  <text class="sm" x="415" y="138">按请求计费，没请求就不花钱</text>
+  <text class="sm" x="415" y="158">扩容这件事你根本感知不到</text>
+  <text class="sm on-r" x="415" y="178">代价：受限的运行时、执行时间上限</text>
+</svg>
+<figcaption>图 12-2　边缘部署把扩容问题变成了平台的问题</figcaption>
+</figure>
+
+<h2 id="crash">未捕获的异常</h2>
+
+<p>
+  路由里抛出的异常会被 Hono 的 <code>onError</code> 接住，服务器不会挂。
+  但异步代码里的「游离」异常不一样：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/ok', (c) =&gt; {
+  throw new Error('这个会被 onError 接住')     // ✅ 安全
+})
+
+app.get('/danger', (c) =&gt; {
+  setTimeout(() =&gt; {
+    throw new Error('这个没人接')               // ❌ 整个进程会崩
+  }, 100)
+  return c.text('已受理')
+})
+
+app.get('/danger2', async (c) =&gt; {
+  doSomethingAsync()      // ❌ 忘了 await，Promise 被拒绝时无人处理
+  return c.text('已受理')
+})
+</pre>
+</div>
+
+<p>
+  原因是：<code>setTimeout</code> 的回调执行时，已经脱离了请求的上下文，
+  Hono 的 <code>try/catch</code> 早就退出了。Node 只能选择<strong>终止整个进程</strong> ——
+  因为它无法判断程序还处于什么状态。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+process.on('uncaughtException', (err) =&gt; {
+  console.error('未捕获异常：', err)
+  reportToSentry(err)
+  // 清理资源，然后退出。让进程管理器拉起一个干净的新进程
+  server.close(() =&gt; process.exit(1))
+  // 兜底：10 秒还没关掉就强杀
+  setTimeout(() =&gt; process.exit(1), 10_000).unref()
+})
+
+process.on('unhandledRejection', (reason) =&gt; {
+  console.error('未处理的 Promise 拒绝：', reason)
+  reportToSentry(reason)
+})
+
+// 优雅关闭：收到停止信号时，先处理完手头的请求
+process.on('SIGTERM', () =&gt; {
+  console.log('收到 SIGTERM，正在优雅关闭')
+  server.close(() =&gt; process.exit(0))
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 不要用它「兜底继续跑」</div>
+  <p>
+    有人写 <code>process.on('uncaughtException', err =&gt; console.log(err))</code> 然后<strong>不退出</strong>，
+    以为这样服务器就永远不会挂。这非常危险：程序现在处于未知状态，
+    可能有连接没关、有事务没提交、有内存在泄漏。<strong>正确做法是记录、上报、退出、重启。</strong>
+  </p>
+</div>
+
+<h2 id="monitor">监控</h2>
+
+<h3>健康检查端点</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/health', (c) =&gt; c.json({ status: 'ok' }))
+
+// 更有用的版本：真的去摸一下依赖
+app.get('/health/deep', async (c) =&gt; {
+  const checks: Record&lt;string, string&gt; = {}
+  let healthy = true
+
+  try {
+    await db.ping()
+    checks.database = 'ok'
+  } catch {
+    checks.database = 'fail'
+    healthy = false
+  }
+
+  return c.json({ status: healthy ? 'ok' : 'degraded', checks }, healthy ? 200 : 503)
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 两个端点各有用途</div>
+  <p>
+    <code>/health</code> 给负载均衡器用：只回答「这个进程还活着吗」，必须极快、不查依赖。
+    如果它因为数据库慢而超时，负载均衡会把健康的实例也摘掉，小故障变成全面瘫痪。<br>
+    <code>/health/deep</code> 给运维看板用：告诉你到底哪个依赖出问题了。
+  </p>
+</div>
+
+<h3>结构化日志</h3>
+
+<p>
+  开发时 <code>console.log('用户登录了')</code> 很好读。生产时你需要能被机器检索的日志：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+function log(level: string, msg: string, extra: Record&lt;string, unknown&gt; = {}) {
+  console.log(JSON.stringify({
+    level,
+    msg,
+    time: new Date().toISOString(),
+    ...extra,
+  }))
+}
+
+app.use(async (c, next) =&gt; {
+  const start = Date.now()
+  const id = c.get('requestId')
+  await next()
+  log('info', 'request', {
+    requestId: id,
+    method: c.req.method,
+    path: c.req.path,
+    status: c.res.status,
+    durationMs: Date.now() - start,
+  })
+})
+</pre>
+</div>
+
+<p>
+  这样你就能在日志系统里查询「过去一小时所有 500 响应」或「p99 耗时超过 1 秒的接口」。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 日志里不要写这些</div>
+  <p>
+    密码、令牌、完整的 Cookie、身份证号、完整银行卡号、以及任何用户隐私数据。
+    日志通常保留很久、被很多人看到、还会同步到第三方服务。
+    <strong>「不小心把用户密码打进日志」是真实且高频的数据泄露原因。</strong>
+  </p>
+</div>
+
+<h3>外部监控</h3>
+
+<ul>
+  <li><strong>可用性监控</strong>：UptimeRobot、Better Stack 等，从外部每分钟请求一次 <code>/health</code>。
+      必须在外部 —— 你的服务器整个挂了的话，跑在上面的监控也一起挂了。</li>
+  <li><strong>错误追踪</strong>：Sentry 之类。它会聚合相同的错误、附上堆栈和上下文、超过阈值就告警。
+      比翻日志有效得多。</li>
+</ul>
+
+<div class="code" data-lang="ts">
+<pre>
+app.onError((err, c) =&gt; {
+  Sentry.captureException(err, {
+    tags: { path: c.req.path, method: c.req.method },
+    extra: { requestId: c.get('requestId') },
+  })
+  return c.json({ error: '服务器内部错误' }, 500)
+})
+</pre>
+</div>
+
+<h2 id="stress">压力测试</h2>
+
+<p>
+  上线前你至少该知道：应用大概能扛多少并发？哪个接口最慢？
+  用 <a href="https://github.com/mcollina/autocannon">autocannon</a>：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npx autocannon -c 50 -d 10 http://localhost:3000/vacations
+# -c 50  50 个并发连接
+# -d 10  持续 10 秒
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+┌─────────┬──────┬──────┬───────┬──────┬─────────┬─────────┬───────┐
+│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%  │ Avg     │ Stdev   │ Max   │
+├─────────┼──────┼──────┼───────┼──────┼─────────┼─────────┼───────┤
+│ Latency │ 2 ms │ 4 ms │ 11 ms │ 18 ms│ 4.82 ms │ 3.11 ms │ 89 ms │
+└─────────┴──────┴──────┴───────┴──────┴─────────┴─────────┴───────┘
+
+Req/Sec   9856
+2xx       98560
+non-2xx   0
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 看 p99，不要看平均值</div>
+  <p>
+    平均 4.8 ms 听起来很棒，但 1% 的用户等了 18 ms 以上。当接口变复杂后，
+    这个尾部会拉得很长 —— 平均 50 ms、p99 3 秒的情况很常见，
+    意味着每 100 个用户就有 1 个觉得你的网站「卡死了」。
+    <strong>性能问题永远藏在尾部。</strong>
+  </p>
+</div>
+
+<p>压测的正确用法是<strong>比较</strong>，而不是看绝对数字：</p>
+<ul>
+  <li>加了一个新功能后，同样的压测数据变差了多少？</li>
+  <li>加了缓存之后提升了多少？</li>
+  <li>数据从 100 条涨到 10 万条后，响应时间是线性增长还是爆炸增长？</li>
+</ul>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li><code>NODE_ENV</code> 只用三个标准值；环境差异越少越好。</li>
+  <li>用 <code>env(c)</code> 跨运行时读配置；Workers 上不能在模块顶层读环境变量。</li>
+  <li>水平扩容的前提是无状态：会话、文件、计数器都要放共享存储。</li>
+  <li>未捕获异常要记录、上报、退出、重启，不要装作没事继续跑。</li>
+  <li><code>/health</code> 要快且不查依赖；日志要结构化且不含敏感信息。</li>
+  <li>压测看 p99，用它做版本间的对比。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给应用加上 <code>/health</code> 端点，用 <code>curl</code> 确认它返回 200 且响应极快。</li>
+    <li>写一个 <code>/danger</code> 路由，在 <code>setTimeout</code> 里抛异常，观察服务器真的崩掉了。然后加上 <code>uncaughtException</code> 处理，确认它记录后正常退出。</li>
+    <li>用 autocannon 压测你的首页，记下 p99。然后在处理函数里加一个 <code>await new Promise(r =&gt; setTimeout(r, 50))</code>，再压一次，对比差异。</li>
+    <li>检查你现在的代码：有没有存在模块级变量里的状态？如果同时跑三个实例会出什么问题？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

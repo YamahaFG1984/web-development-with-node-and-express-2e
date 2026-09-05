@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 5 章 · 质量保证 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 5 章</span>
+<h1>质量保证</h1>
+<p class="lede">
+  Hono 有个别的框架羡慕的特性：<strong>测试一个路由不需要启动服务器</strong>。
+  因为应用本身就是个函数，你直接调用它就行。这让写测试的成本低到没有借口不写。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清单元测试和集成测试，知道各自该测什么</li>
+    <li>用 <code>app.request()</code> 和 <code>testClient</code> 在内存里测路由</li>
+    <li>用 Vitest 写断言、做 mock、看覆盖率</li>
+    <li>用 Playwright 写一个真浏览器的端到端测试</li>
+    <li>配好代码检查工具和 GitHub Actions 持续集成</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">测试到底在保护什么</h2>
+
+<p>
+  很多人把测试理解成「证明代码是对的」。更准确的说法是：<strong>测试保护的是「改代码的勇气」</strong>。
+  没有测试的项目，每次改动都是赌博；有测试的项目，你敢重构。
+</p>
+
+<p>
+  质量本身有四个维度，但只有一部分能自动化：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>维度</th><th>关心什么</th><th>能自动测吗</th></tr>
+  <tr><td>触达</td><td>有多少人能找到并访问你的站（SEO、可达性）</td><td>部分（链接检查、结构化数据校验）</td></tr>
+  <tr><td>功能</td><td>它是否按承诺工作</td><td><strong>可以，本章重点</strong></td></tr>
+  <tr><td>易用性</td><td>用户能不能顺利完成任务</td><td>不能，需要真人</td></tr>
+  <tr><td>美观</td><td>看起来是否得体</td><td>不能（视觉回归测试只能测「有没有变」）</td></tr>
+</table>
+</div>
+
+<h3>逻辑与展现要分开</h3>
+
+<p>
+  一条规则：「租摩托车必须有驾照」—— 这是<strong>逻辑</strong>。
+  「驾照那一栏是复选框还是输入框」—— 这是<strong>展现</strong>。
+</p>
+<p>
+  逻辑应该待在 <code>src/lib/</code> 这样不认识 HTTP 的模块里，因为它最值得也最容易测。
+  展现变化频繁，测得太死反而拖后腿。这就是我们在第 4 章分层的实际收益。
+</p>
+
+<h2 id="types">两种测试</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="单元测试与集成测试的覆盖范围">
+  <rect class="bx-d" x="30" y="26" width="700" height="120" rx="10"/>
+  <text class="sm" x="45" y="46">你的应用</text>
+
+  <rect class="bx" x="60"  y="60" width="130" height="66" rx="8"/>
+  <text class="lbl" x="125" y="86" text-anchor="middle">lib/fortune</text>
+  <text class="sm"  x="125" y="104" text-anchor="middle">纯函数</text>
+
+  <rect class="bx" x="215" y="60" width="130" height="66" rx="8"/>
+  <text class="lbl" x="280" y="86" text-anchor="middle">handlers</text>
+  <text class="sm"  x="280" y="104" text-anchor="middle">读请求拼响应</text>
+
+  <rect class="bx" x="370" y="60" width="130" height="66" rx="8"/>
+  <text class="lbl" x="435" y="86" text-anchor="middle">app 路由表</text>
+  <text class="sm"  x="435" y="104" text-anchor="middle">中间件 + 路由</text>
+
+  <rect class="bx" x="525" y="60" width="175" height="66" rx="8"/>
+  <text class="lbl" x="612" y="86" text-anchor="middle">浏览器</text>
+  <text class="sm"  x="612" y="104" text-anchor="middle">HTML / CSS / 点击</text>
+
+  <rect class="bx-b" x="52" y="168" width="146" height="34" rx="8"/>
+  <text class="sm on-b" x="125" y="190" text-anchor="middle">单元测试</text>
+  <path class="ln-b" d="M125 166 V132" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="207" y="168" width="300" height="34" rx="8"/>
+  <text class="sm on-g" x="357" y="190" text-anchor="middle">集成测试（app.request / testClient）</text>
+  <path class="ln-g" d="M280 166 V132" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M435 166 V132" marker-end="url(#ar)"/>
+
+  <rect class="bx-p" x="516" y="212" width="200" height="34" rx="8"/>
+  <text class="sm on-p" x="616" y="234" text-anchor="middle">端到端测试（Playwright）</text>
+  <path class="ln-d" d="M616 210 V132" marker-end="url(#ar)"/>
+
+  <text class="sm" x="30" y="234">越往左：跑得快、定位准</text>
+  <text class="sm" x="30" y="248">越往右：更接近真实用户</text>
+</svg>
+<figcaption>图 5-1　三层测试，各有各的位置</figcaption>
+</figure>
+
+<h2 id="setup">安装 Vitest</h2>
+
+<p>
+  <a href="https://vitest.dev">Vitest</a> 是目前 TypeScript 项目最顺手的测试框架：原生支持 TS 和 ESM，不用额外配置。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D vitest
+</pre>
+</div>
+
+<p>在 <code>package.json</code> 的 <code>scripts</code> 里加：</p>
+
+<div class="code" data-lang="json">
+<pre>
+"scripts": {
+  "test": "vitest run",
+  "test:watch": "vitest",
+  "coverage": "vitest run --coverage"
+}
+</pre>
+</div>
+
+<h2 id="unit">单元测试</h2>
+
+<p>
+  先测最简单的：<code>src/lib/fortune.ts</code>。新建 <code>src/lib/fortune.test.ts</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/fortune.test.ts">
+<pre>
+import { describe, it, expect } from 'vitest'
+import { getFortune } from './fortune'
+
+describe('getFortune', () =&gt; {
+  it('返回一个非空字符串', () =&gt; {
+    const fortune = getFortune()
+    expect(typeof fortune).toBe('string')
+    expect(fortune.length).toBeGreaterThan(0)
+  })
+
+  it('多次调用能返回不同结果', () =&gt; {
+    const results = new Set&lt;string&gt;()
+    for (let i = 0; i &lt; 50; i++) results.add(getFortune())
+    expect(results.size).toBeGreaterThan(1)
+  })
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 测试随机性的坑</div>
+  <p>
+    第二个测试有个隐患：理论上 50 次全抽到同一条签语是<em>可能</em>的，测试会偶发失败。
+    这类「有时红有时绿」的测试叫 <strong>flaky test</strong>，比没有测试还烦人。
+    处理办法：要么把阈值放宽（像这里只要求「不止一种」），要么把随机源作为参数注入，测试时传一个假的。
+  </p>
+</div>
+
+<h2 id="integration">测路由：不用启动服务器</h2>
+
+<p>这是 Hono 最舒服的地方。因为 <code>app</code> 就是个函数，你可以直接给它一个请求：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.test.ts">
+<pre>
+import { describe, it, expect } from 'vitest'
+import { app } from './app'
+
+describe('页面路由', () =&gt; {
+  it('首页返回 200 和 HTML', async () =&gt; {
+    const res = await app.request('/')
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/html')
+
+    const html = await res.text()
+    expect(html).toContain('欢迎来到云雀旅行')
+  })
+
+  it('关于页包含签语', async () =&gt; {
+    const res = await app.request('/about')
+    const html = await res.text()
+    expect(html).toContain('今日签语')
+  })
+
+  it('不存在的路径返回 404', async () =&gt; {
+    const res = await app.request('/这个页面不存在')
+    expect(res.status).toBe(404)
+  })
+})
+</pre>
+</div>
+
+<p>
+  <code>app.request()</code> 接受一个路径字符串或一个完整的 <code>Request</code> 对象，返回标准的 <code>Response</code>。
+  没有端口，没有网络，没有 <code>beforeEach</code> 里启动服务器再关掉。<strong>毫秒级。</strong>
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="传统集成测试与 Hono 内存测试的对比">
+  <rect class="bx-r" x="20" y="24" width="340" height="150" rx="10"/>
+  <text class="ttl on-r" x="190" y="48" text-anchor="middle">传统做法</text>
+  <text class="sm" x="40" y="74">1. 找一个没被占用的端口</text>
+  <text class="sm" x="40" y="94">2. 启动 HTTP 服务器</text>
+  <text class="sm" x="40" y="114">3. 用 fetch 发真实网络请求</text>
+  <text class="sm" x="40" y="134">4. 断言</text>
+  <text class="sm" x="40" y="154">5. 关闭服务器</text>
+
+  <path class="ln-a" d="M368 100 H400" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="410" y="24" width="330" height="150" rx="10"/>
+  <text class="ttl on-g" x="575" y="48" text-anchor="middle">Hono</text>
+  <text class="mono" x="430" y="82">const res = await app.request('/')</text>
+  <text class="mono" x="430" y="106">expect(res.status).toBe(200)</text>
+  <text class="sm on-g" x="430" y="140">没有端口冲突，没有异步启动竞态，</text>
+  <text class="sm on-g" x="430" y="158">一个测试文件可以并行跑几百个用例</text>
+</svg>
+<figcaption>图 5-2　应用即函数带来的直接好处</figcaption>
+</figure>
+
+<h3>testClient：带类型的测试客户端</h3>
+
+<p>
+  <code>app.request('/about')</code> 里的路径是字符串，写错了 TypeScript 不会提醒你。
+  <code>testClient</code> 解决这个问题 —— 它根据你的路由定义生成一个<strong>有类型的</strong>客户端：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { testClient } from 'hono/testing'
+import { Hono } from 'hono'
+
+// 注意：要用链式写法定义路由，类型才能被推导出来
+const routes = new Hono()
+  .get('/api/vacations', (c) =&gt; c.json([{ sku: 'HR199', name: '胡德河一日游' }]))
+  .get('/api/vacations/:sku', (c) =&gt; c.json({ sku: c.req.param('sku') }))
+
+const client = testClient(routes)
+
+it('列出度假套餐', async () =&gt; {
+  const res = await client.api.vacations.$get()
+  expect(res.status).toBe(200)
+
+  const data = await res.json()   // ← 类型是 { sku: string; name: string }[]
+  expect(data[0].sku).toBe('HR199')
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么必须链式写</div>
+  <p>
+    <code>app.get(...)</code> 会返回一个<em>带上了这条路由类型信息</em>的新类型。
+    如果你写成分开的 <code>app.get(a); app.get(b);</code>，类型信息就丢了。
+    链式 <code>.get().get().post()</code> 让类型一路累加。这同样是第 15 章 RPC 客户端能工作的前提。
+  </p>
+</div>
+
+<h2 id="mock">Mock：把依赖换成假的</h2>
+
+<p>
+  测试要<strong>隔离</strong>。如果 <code>/about</code> 的测试因为签语模块改了内容而失败，那这个测试就太脆了。
+  用 Vitest 的 mock 把依赖替换掉：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { describe, it, expect, vi } from 'vitest'
+
+// 把整个模块替换成假的
+vi.mock('./lib/fortune', () =&gt; ({
+  getFortune: () =&gt; '这是一条测试签语',
+}))
+
+// 注意：import 要放在 vi.mock 之后（Vitest 会自动提升，但这样读起来更清楚）
+const { app } = await import('./app')
+
+it('关于页渲染签语', async () =&gt; {
+  const res = await app.request('/about')
+  const html = await res.text()
+  expect(html).toContain('这是一条测试签语')   // 现在结果是确定的
+})
+</pre>
+</div>
+
+<p>还有一种常用 mock：监视函数被怎么调用了。</p>
+
+<div class="code" data-lang="ts">
+<pre>
+const sendEmail = vi.fn()          // 一个记录调用情况的假函数
+
+await someHandlerThatSendsEmail(sendEmail)
+
+expect(sendEmail).toHaveBeenCalledTimes(1)
+expect(sendEmail).toHaveBeenCalledWith('a@example.com', expect.stringContaining('欢迎'))
+</pre>
+</div>
+
+<h2 id="coverage">覆盖率</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D @vitest/coverage-v8
+npm run coverage
+</pre>
+</div>
+
+<p>你会得到一张表，四个数字：</p>
+
+<div class="tw">
+<table>
+  <tr><th>指标</th><th>含义</th></tr>
+  <tr><td>Stmts 语句</td><td>有多少条语句被执行过</td></tr>
+  <tr><td>Branch 分支</td><td><code>if/else</code> 的两条路都走过吗</td></tr>
+  <tr><td>Funcs 函数</td><td>有多少函数被调用过</td></tr>
+  <tr><td>Lines 行</td><td>有多少行被执行过</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 覆盖率是个骗子</div>
+  <p>
+    100% 覆盖率不代表没 bug —— 它只说明每行代码都被<em>执行</em>过，不代表每行的<em>结果被检查</em>过。
+    反过来，<code>server.tsx</code> 覆盖率是 0% 也完全正常，那里面只有启动逻辑，测它没有意义。
+    把覆盖率当成<strong>找出「完全没人碰过的角落」的工具</strong>，而不是 KPI。
+  </p>
+</div>
+
+<h2 id="e2e">端到端测试</h2>
+
+<p>
+  前面的测试都在内存里，验证不了「用户点了链接会不会跳转」。这需要真浏览器。
+  <a href="https://playwright.dev">Playwright</a> 能控制一个无头浏览器（不显示界面但功能完整的 Chrome）。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D @playwright/test
+npx playwright install chromium
+</pre>
+</div>
+
+<p>先给要测的链接加一个专门的标记属性：</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+&lt;a href="/about" data-testid="about-link"&gt;关于我们&lt;/a&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么用 data-testid 而不是 class</div>
+  <p>
+    <code>class</code> 是给设计师改样式用的，随时可能变；靠文字「关于我们」定位，改一次文案测试就挂。
+    <code>data-testid</code> 是专门给测试用的锚点，看到它的人就知道「这个别乱删」。
+  </p>
+</div>
+
+<p><code>e2e/navigation.spec.ts</code>：</p>
+
+<div class="code" data-lang="ts" data-file="e2e/navigation.spec.ts">
+<pre>
+import { test, expect } from '@playwright/test'
+
+test('首页能跳到关于页', async ({ page }) =&gt; {
+  await page.goto('http://localhost:3000/')
+  await page.getByTestId('about-link').click()
+  await expect(page).toHaveURL(/\/about$/)
+  await expect(page.getByRole('heading', { name: '关于云雀旅行' })).toBeVisible()
+})
+</pre>
+</div>
+
+<p><code>playwright.config.ts</code> 让它自动帮你启动服务器：</p>
+
+<div class="code" data-lang="ts" data-file="playwright.config.ts">
+<pre>
+import { defineConfig } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './e2e',
+  webServer: {
+    command: 'npm run start',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI,
+  },
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 端到端测试要少而精</div>
+  <p>
+    它慢（秒级）、脆（改个按钮位置就挂）、难调试。只用它覆盖<strong>最关键的几条用户路径</strong>：
+    注册、下单、支付。其余交给单元测试和 <code>app.request()</code>。
+  </p>
+</div>
+
+<h2 id="lint">代码检查</h2>
+
+<p>
+  Linter 找的不是「错误」，而是「未来可能出错的写法」：没用到的变量、忘了 <code>await</code> 的 Promise、
+  可能是 <code>undefined</code> 的访问。
+</p>
+
+<p>
+  推荐 <a href="https://biomejs.dev">Biome</a>：一个工具同时做检查和格式化，速度极快，配置极少。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D --save-exact @biomejs/biome
+npx biome init
+</pre>
+</div>
+
+<div class="code" data-lang="json" data-file="biome.json">
+<pre>
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "linter": { "enabled": true, "rules": { "recommended": true } },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
+  "javascript": { "formatter": { "semicolons": "asNeeded", "quoteStyle": "single" } }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="json">
+<pre>
+"scripts": {
+  "lint": "biome check src",
+  "lint:fix": "biome check --write src",
+  "format": "biome format --write src"
+}
+</pre>
+</div>
+
+<p>
+  第一次跑会看到一堆问题，这很正常。每条报告有三种处理方式：
+</p>
+<ol>
+  <li><strong>它是对的</strong> —— 改代码。</li>
+  <li><strong>你不同意这条规则</strong> —— 在配置里关掉它。规则是为你服务的。</li>
+  <li><strong>规则对，但这一处确实要例外</strong> —— 用 <code>// biome-ignore lint/...: 原因</code> 单行豁免，<strong>并写清楚原因</strong>。</li>
+</ol>
+
+<h2 id="ci">持续集成</h2>
+
+<p>
+  写了测试却不跑，等于没写。持续集成（CI）就是「每次推代码，服务器自动帮你跑一遍」。
+  GitHub 上建一个文件就行：
+</p>
+
+<div class="code" data-lang="yaml" data-file=".github/workflows/ci.yml">
+<pre>
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="CI 流水线的各个环节">
+  <rect class="bx-b" x="20" y="50" width="110" height="50" rx="8"/>
+  <text class="lbl" x="75" y="80" text-anchor="middle">git push</text>
+
+  <rect class="bx" x="160" y="50" width="110" height="50" rx="8"/>
+  <text class="lbl" x="215" y="73" text-anchor="middle">lint</text>
+  <text class="sm"  x="215" y="90" text-anchor="middle">写法规范吗</text>
+
+  <rect class="bx" x="300" y="50" width="110" height="50" rx="8"/>
+  <text class="lbl" x="355" y="73" text-anchor="middle">typecheck</text>
+  <text class="sm"  x="355" y="90" text-anchor="middle">类型对吗</text>
+
+  <rect class="bx" x="440" y="50" width="110" height="50" rx="8"/>
+  <text class="lbl" x="495" y="73" text-anchor="middle">test</text>
+  <text class="sm"  x="495" y="90" text-anchor="middle">行为对吗</text>
+
+  <rect class="bx-g" x="580" y="50" width="150" height="50" rx="8"/>
+  <text class="lbl on-g" x="655" y="73" text-anchor="middle">✓ 可以合并</text>
+  <text class="sm"  x="655" y="90" text-anchor="middle">第 21 章：自动部署</text>
+
+  <path class="ln" d="M132 75 H156" marker-end="url(#ar)"/>
+  <path class="ln" d="M272 75 H296" marker-end="url(#ar)"/>
+  <path class="ln" d="M412 75 H436" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M552 75 H576" marker-end="url(#ar)"/>
+
+  <path class="ln-r" d="M355 104 V126 H75 V104" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="215" y="142" text-anchor="middle">任何一步失败 → 阻止合并，通知作者</text>
+</svg>
+<figcaption>图 5-3　CI 是团队协作的安全网</figcaption>
+</figure>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Hono 应用是函数，所以 <code>app.request('/path')</code> 就能测路由，不用起服务器。</li>
+  <li><code>testClient</code> 给测试加上类型，前提是路由用链式语法定义。</li>
+  <li>用 mock 隔离依赖，让测试结果确定、失败原因明确。</li>
+  <li>覆盖率是发现「没人碰过的角落」的工具，不是目标。</li>
+  <li>端到端测试只用在最关键的用户路径上。</li>
+  <li>CI 让「跑测试」这件事不依赖任何人的自觉。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给你的 <code>/</code>、<code>/about</code>、404 三个路由都补上测试，跑 <code>npm test</code> 全绿。</li>
+    <li>故意把 <code>Home</code> 组件里的标题改掉，确认测试变红了 —— 这才说明测试真的在保护你。</li>
+    <li>跑一次 <code>npm run coverage</code>，找出覆盖率最低的文件。它是「该补测试」还是「不值得测」？</li>
+    <li>接上 Biome，把 <code>npm run lint</code> 跑到零报错。有哪条规则你不认同？把它关掉，并在配置里写注释说明理由。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
