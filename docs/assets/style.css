@@ -324,7 +324,11 @@ figcaption {
 .dgm .ln-a  { stroke: var(--accent);  stroke-width: 1.8; fill: none; }
 .dgm .ln-b  { stroke: var(--blue);    stroke-width: 1.8; fill: none; }
 .dgm .ln-g  { stroke: var(--green);   stroke-width: 1.8; fill: none; }
+.dgm .ln-r  { stroke: var(--red);    stroke-width: 1.8; fill: none; }
+.dgm .ln-p  { stroke: var(--purple); stroke-width: 1.8; fill: none; }
 .dgm .ln-d  { stroke: var(--line-2); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+/* 兜底：任何折线路径都不该被填充 */
+.dgm path   { fill: none; }
 .dgm text   { fill: var(--fg); font-family: var(--sans); font-size: 13px; }
 .dgm .lbl   { fill: var(--fg-soft); font-size: 12px; }
 .dgm .sm    { fill: var(--fg-faint); font-size: 11px; }

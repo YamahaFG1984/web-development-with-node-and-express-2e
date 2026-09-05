@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 23 章 · 更多资源 — Hono 全栈开发教程</title>
+<title>第 23 章 · 上线 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="23">
@@ -12,271 +12,482 @@
 <main>
 
 <span class="chapter-eyebrow">第 23 章</span>
-<h1>更多资源</h1>
+<h1>上线</h1>
 <p class="lede">
-  二十二章走下来，你已经从「Hello World」做到了一个能上线、能维护的完整应用。
-  这一章给出继续深入的方向、值得收藏的资料，以及一份帮你巩固的复习地图。
+  云雀旅行终于要见人了。这一章讲域名、DNS、部署平台的选择，
+  以及怎么把「发布」变成一件不需要勇气的日常操作。
 </p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>看懂 DNS 记录，把域名指向你的应用</li>
+    <li>根据项目特点选择部署平台</li>
+    <li>把云雀旅行部署到 Cloudflare Workers 和传统服务器</li>
+    <li>搭一条自动化的发布流水线</li>
+    <li>准备好回滚方案</li>
+  </ul>
+</div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="recap">你学到了什么</h2>
+<h2 id="dns">域名与 DNS</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="全书知识地图">
-  <rect class="bx-a" x="290" y="16" width="180" height="42" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">Hono 应用</text>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="DNS 解析流程">
+  <rect class="bx-b" x="20" y="90" width="110" height="50" rx="8"/>
+  <text class="sm" x="75" y="112" text-anchor="middle">浏览器</text>
+  <text class="sm" x="75" y="130" text-anchor="middle">要访问站点</text>
 
-  <path class="ln-d" d="M330 60 L130 96"/>
-  <path class="ln-d" d="M360 60 L300 96"/>
-  <path class="ln-d" d="M400 60 L460 96"/>
-  <path class="ln-d" d="M430 60 L630 96"/>
+  <path class="ln-b" d="M134 105 H240" marker-end="url(#ar)"/>
+  <text class="sm" x="187" y="98" text-anchor="middle">① 这个域名</text>
+  <text class="sm" x="187" y="114" text-anchor="middle">的 IP 是多少？</text>
 
-  <rect class="bx-b" x="20" y="100" width="220" height="96" rx="10"/>
-  <text class="ttl on-b" x="34" y="122">HTTP 基础</text>
-  <text class="sm" x="34" y="142">URL 结构 · 方法 · 状态码</text>
-  <text class="sm" x="34" y="160">请求头 / 响应头</text>
-  <text class="sm" x="34" y="178">Cookie · 会话 · 缓存</text>
-  <text class="sm" x="34" y="192">第 6、9、17 章</text>
+  <rect class="bx" x="244" y="82" width="150" height="66" rx="8"/>
+  <text class="ttl" x="319" y="106" text-anchor="middle">DNS 解析器</text>
+  <text class="sm" x="319" y="124" text-anchor="middle">通常是运营商</text>
+  <text class="sm" x="319" y="140" text-anchor="middle">或 8.8.8.8</text>
 
-  <rect class="bx-p" x="252" y="100" width="220" height="96" rx="10"/>
-  <text class="ttl on-p" x="266" y="122">Hono 核心</text>
-  <text class="sm" x="266" y="142">路由 · Context · 中间件</text>
-  <text class="sm" x="266" y="160">JSX 渲染 · 校验器</text>
-  <text class="sm" x="266" y="178">RPC · 测试客户端</text>
-  <text class="sm" x="266" y="192">第 3、7、10、14、15 章</text>
+  <path class="ln" d="M398 105 H500" marker-end="url(#ar)"/>
+  <text class="sm" x="449" y="98" text-anchor="middle">② 逐级查询</text>
 
-  <rect class="bx-g" x="484" y="100" width="256" height="96" rx="10"/>
-  <text class="ttl on-g" x="498" y="122">工程实践</text>
-  <text class="sm" x="498" y="142">测试 · 类型 · 分层</text>
-  <text class="sm" x="498" y="160">日志 · 监控 · CI/CD</text>
-  <text class="sm" x="498" y="178">依赖管理 · 文档</text>
-  <text class="sm" x="498" y="192">第 4、5、12、20、22 章</text>
+  <rect class="bx-a" x="504" y="82" width="180" height="66" rx="8"/>
+  <text class="ttl on-a" x="594" y="104" text-anchor="middle">权威 DNS 服务器</text>
+  <text class="sm" x="594" y="122" text-anchor="middle">你在这里配置记录</text>
+  <text class="sm" x="594" y="140" text-anchor="middle">Cloudflare / 阿里云 …</text>
 
-  <rect class="bx-r" x="20" y="212" width="345" height="100" rx="10"/>
-  <text class="ttl on-r" x="34" y="234">安全</text>
-  <text class="sm" x="34" y="256">HTTPS · CSP · CSRF · XSS</text>
-  <text class="sm" x="34" y="274">密码哈希 · JWT · OAuth</text>
-  <text class="sm" x="34" y="292">输入校验 · 限流</text>
-  <text class="sm" x="34" y="306">第 8、18 章</text>
+  <path class="ln-g" d="M594 152 V180 H75 V145" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="340" y="174" text-anchor="middle">③ 返回 IP 地址，浏览器才开始真正的 HTTP 请求</text>
 
-  <rect class="bx" x="395" y="212" width="345" height="100" rx="10"/>
-  <text class="ttl" x="409" y="234">数据与集成</text>
-  <text class="sm" x="409" y="256">SQL · ORM · 迁移 · 索引</text>
-  <text class="sm" x="409" y="274">对象存储 · KV · 缓存策略</text>
-  <text class="sm" x="409" y="292">第三方 API · 降级 · 熔断</text>
-  <text class="sm" x="409" y="306">第 13、19 章</text>
+  <rect class="bx-d" x="150" y="196" width="460" height="30" rx="6"/>
+  <text class="sm" x="380" y="216" text-anchor="middle">每一层都有缓存，所以改了 DNS 不会立刻全球生效（见 TTL）</text>
 </svg>
-<figcaption>图 23-1　这些知识里，只有中间那一块是 Hono 专属的</figcaption>
+<figcaption>图 23-1　DNS 就是互联网的电话簿</figcaption>
 </figure>
 
-<div class="box key">
-  <div class="t">&#9733; 最值钱的部分不会过时</div>
+<h3>常见记录类型</h3>
+
+<div class="tw">
+<table>
+  <tr><th>类型</th><th>作用</th><th>例子</th></tr>
+  <tr><td><code>A</code></td><td>域名 → IPv4 地址</td><td><code>meadowlarktravel.com → 203.0.113.10</code></td></tr>
+  <tr><td><code>AAAA</code></td><td>域名 → IPv6 地址</td><td><code>meadowlarktravel.com → 2001:db8::1</code></td></tr>
+  <tr><td><code>CNAME</code></td><td>域名 → 另一个域名（别名）</td><td><code>www → meadowlark.pages.dev</code></td></tr>
+  <tr><td><code>MX</code></td><td>这个域名的邮件由谁接收</td><td>配邮箱服务时用</td></tr>
+  <tr><td><code>TXT</code></td><td>任意文本。用于域名验证、SPF、DKIM</td><td>第 11 章的发信配置</td></tr>
+  <tr><td><code>NS</code></td><td>这个域名由哪些 DNS 服务器负责</td><td>换 DNS 服务商时改这个</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; TTL 与「DNS 生效要多久」</div>
   <p>
-    HTTP 的工作方式、缓存的原理、安全的攻防、分层的思路、测试的方法 ——
-    这些和框架无关。哪天你换到别的语言、别的框架，它们照样带得走。<br>
-    Hono 只是一个特别顺手的容器，让你能把注意力放在这些真正重要的东西上。
+    每条记录有个 TTL（生存时间），告诉各级缓存「这个结果可以存多久」。
+    默认常见是 3600 秒（1 小时）。<br>
+    <strong>迁移前的技巧</strong>：提前一两天把 TTL 调到 300 秒，
+    这样切换时最多 5 分钟就全网生效；切换完成稳定后再调回去。
   </p>
 </div>
 
-<h2 id="official">官方资料</h2>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128218;</span><h4>hono.dev</h4>
-    <p>官方文档。写得非常好，而且每个 API 都有可运行的例子。有中文版。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128187;</span><h4>github.com/honojs/hono</h4>
-    <p>源码。核心不到一万行，读起来比你想的容易。想搞懂中间件怎么串起来的，直接看 <code>compose.ts</code>。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#129513;</span><h4>github.com/honojs/middleware</h4>
-    <p>所有 <code>@hono/*</code> 官方扩展都在这里：zod-validator、zod-openapi、oauth-providers、swagger-ui 等。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128172;</span><h4>Discord 社区</h4>
-    <p>官方 Discord，维护者很活跃。提问前先搜一下，很多问题有人问过了。</p>
-  </div>
+<div class="box warn">
+  <div class="t">&#9888; 根域名不能用 CNAME</div>
+  <p>
+    DNS 规范不允许根域名（<code>meadowlarktravel.com</code>，也叫 apex）配 CNAME。
+    但很多平台只给你一个域名而不是 IP。<br>
+    解决办法：用支持 <strong>CNAME 展平</strong>（也叫 ALIAS / ANAME）的 DNS 服务商 ——
+    Cloudflare、Route53 等都支持。它们在解析时自动把 CNAME 转成 A 记录返回。
+  </p>
 </div>
 
-<h2 id="mdn">Web 基础（比框架文档更值得读）</h2>
+<h2 id="platforms">选择部署平台</h2>
 
 <div class="tw">
 <table>
-  <tr><th>资源</th><th>为什么值得读</th></tr>
+  <tr><th>平台</th><th>适合</th><th>注意</th></tr>
   <tr>
-    <td><strong>MDN Web Docs</strong></td>
-    <td>Fetch API、Request、Response、Headers、URL、FormData、Web Crypto ——
-        Hono 的一切都建立在这些之上。<strong>读 MDN 就是在读 Hono 的底层。</strong></td>
+    <td><strong>Cloudflare Workers</strong></td>
+    <td>全球分发、按量计费、想要极低冷启动。配套有 D1、KV、R2、队列</td>
+    <td>受限运行时，没有文件系统，单请求有 CPU 时间上限</td>
   </tr>
   <tr>
-    <td><strong>MDN HTTP 指南</strong></td>
-    <td>缓存、CORS、Cookie、安全响应头的权威解释。本教程第 6、9、15、17、18 章的内容在这里有更完整的版本</td>
+    <td><strong>Deno Deploy</strong></td>
+    <td>Deno 项目，配置极少</td>
+    <td>生态比 Node 小</td>
   </tr>
   <tr>
-    <td><strong>web.dev</strong></td>
-    <td>性能优化、Core Web Vitals、可访问性。前端和后端的交界地带</td>
+    <td><strong>Vercel / Netlify</strong></td>
+    <td>前端和 API 一起部署，预览环境体验好</td>
+    <td>长任务和 WebSocket 支持有限</td>
   </tr>
   <tr>
-    <td><strong>OWASP Top 10</strong></td>
-    <td>Web 安全的必读清单。第 18 章覆盖了其中大部分，但值得读原文</td>
+    <td><strong>Fly.io / Railway / Render</strong></td>
+    <td>要完整的 Node 环境、要跑后台任务、要连传统数据库</td>
+    <td>要自己管实例数量和扩缩容</td>
   </tr>
   <tr>
-    <td><strong>HTTP RFC（9110 / 9111）</strong></td>
-    <td>枯燥但权威。遇到「到底该返回哪个状态码」的争论时，这里有答案</td>
+    <td><strong>自己的 VPS + Docker</strong></td>
+    <td>有合规要求、要完全控制、成本敏感</td>
+    <td>系统更新、证书、监控、备份全都归你</td>
   </tr>
 </table>
-</div>
-
-<h2 id="ecosystem">生态里值得认识的工具</h2>
-
-<div class="tw">
-<table>
-  <tr><th>领域</th><th>工具</th><th>用途</th></tr>
-  <tr><td>校验</td><td>Zod / Valibot / ArkType</td><td>Valibot 体积更小，适合边缘部署</td></tr>
-  <tr><td>数据库</td><td>Drizzle / Prisma / Kysely</td><td>Kysely 是「带类型的 SQL 构造器」，介于原生 SQL 和 ORM 之间</td></tr>
-  <tr><td>认证</td><td>Lucia / better-auth / Auth.js</td><td>不想自己实现会话和 OAuth 时</td></tr>
-  <tr><td>全栈框架</td><td>HonoX</td><td>文件路由 + 孤岛架构，第 16 章介绍过</td></tr>
-  <tr><td>测试</td><td>Vitest / Playwright / MSW</td><td>MSW 用于拦截和模拟外部 HTTP 请求</td></tr>
-  <tr><td>代码质量</td><td>Biome / ESLint + Prettier</td><td>Biome 一个工具搞定检查和格式化</td></tr>
-  <tr><td>可观测性</td><td>Sentry / Axiom / Baselime</td><td>后两个对边缘环境支持较好</td></tr>
-  <tr><td>队列与定时</td><td>Cloudflare Queues / Cron Triggers</td><td>把慢操作移出请求路径</td></tr>
-</table>
-</div>
-
-<h2 id="next">接下来做什么</h2>
-
-<p>看完教程最容易发生的事是「学了但没用上，两个月后忘光」。避免的办法只有一个：<strong>做点东西。</strong></p>
-
-<h3>三个练手项目，难度递增</h3>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128279;</span><h4>短链接服务</h4>
-    <p>
-      涉及：路由、KV 存储、重定向、防滥用限流、点击统计。<br>
-      <strong>一个周末</strong>能做完，而且真的能用。
-    </p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128221;</span><h4>带认证的记事本</h4>
-    <p>
-      涉及：注册登录、会话、数据库 CRUD、权限（只能看自己的）、表单校验、分页。<br>
-      <strong>覆盖本教程八成内容。</strong>
-    </p>
-  </div>
-  <div class="card">
-    <span class="ic">&#127760;</span><h4>API + SPA 全栈应用</h4>
-    <p>
-      涉及：REST 设计、RPC 类型共享、React 前端、文件上传、第三方登录、部署流水线。<br>
-      <strong>接近真实产品的复杂度。</strong>
-    </p>
-  </div>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 做项目时逼自己做这三件事</div>
-  <ol>
-    <li><strong>真的部署上去。</strong>本地能跑和线上能跑之间隔着一整章（第 21 章）的坑。</li>
-    <li><strong>真的写测试。</strong>哪怕只有五个。你会立刻发现哪些代码难测 —— 那通常也是设计有问题的地方。</li>
-    <li><strong>三个月后回来加个功能。</strong>这时你才会真正体会到第 4 章的分层、第 22 章的文档值多少钱。</li>
-  </ol>
+  <div class="t">&#9733; 怎么选</div>
+  <p>
+    先问一个问题：<strong>「我需要文件系统、长连接、或者跑几分钟的后台任务吗？」</strong><br>
+    不需要 → 边缘平台（Workers / Deno Deploy / Vercel），最省心。<br>
+    需要 → 容器平台（Fly.io / Railway）或自己的服务器。<br>
+    <br>
+    因为 Hono 基于 Web 标准，<strong>选错了也不是灾难</strong> —— 换平台主要是改入口文件和部署配置，
+    业务代码基本不动。
+  </p>
 </div>
 
-<h2 id="ask">怎么问出好问题</h2>
+<h2 id="workers">部署到 Cloudflare Workers</h2>
 
-<p>
-  卡住时，问问题的质量直接决定你多久能被解答。一个好问题包含：
-</p>
-
-<div class="code" data-lang="text">
+<div class="code" data-lang="ts" data-file="src/index.ts">
 <pre>
-【环境】
-Hono 4.6.3 · Node 20.11 · 部署在 Cloudflare Workers
+import { app } from './app'
 
-【我想做什么】
-在中间件里读会话，然后在路由处理函数中用 c.get('user')
-
-【实际发生了什么】
-c.get('user') 永远是 undefined，中间件里的 console.log 确实打印了用户对象
-
-【最小复现代码】
-（20 行以内，能直接跑起来的）
-
-【我已经试过】
-- 确认中间件注册在路由之前
-- 确认 c.set 确实被调用了
-- 查了文档的 Variables 一节，但没找到相关说明
+export default app     // 就这一行
 </pre>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 「橡皮鸭效应」</div>
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+name = "meadowlark"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[vars]
+APP_NAME = "云雀旅行"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "meadowlark"
+database_id = "your-database-id"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "your-kv-id"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "meadowlark-uploads"
+
+# 预发布环境
+[env.staging]
+name = "meadowlark-staging"
+vars = { APP_NAME = "云雀旅行（预发布）" }
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 本地开发（会模拟 D1、KV、R2）
+npx wrangler dev
+
+# 设置密钥（不会写进配置文件）
+npx wrangler secret put COOKIE_SECRET
+npx wrangler secret put RESEND_API_KEY
+
+# 应用数据库迁移
+npx wrangler d1 migrations apply meadowlark --remote
+
+# 部署
+npx wrangler deploy                    # 生产
+npx wrangler deploy --env staging      # 预发布
+
+# 看线上日志
+npx wrangler tail
+</pre>
+</div>
+
+<p>绑定自定义域名：在 Cloudflare 控制台把域名加进来，然后在 Workers 的 Triggers 里添加路由，
+或者直接在配置里声明：</p>
+
+<div class="code" data-lang="toml">
+<pre>
+routes = [
+  { pattern = "meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" },
+  { pattern = "www.meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" }
+]
+</pre>
+</div>
+
+<h2 id="node">部署到 Node 服务器</h2>
+
+<div class="code" data-lang="ts" data-file="src/server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { app } from './app'
+
+const port = Number(process.env.PORT) || 3000
+
+const server = serve({ fetch: app.fetch, port }, (info) =&gt; {
+  console.log(`服务器已启动：http://localhost:${info.port}`)
+})
+
+// 优雅关闭：让手头的请求处理完再退出
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () =&gt; {
+    console.log(`收到 ${signal}，正在关闭`)
+    server.close(() =&gt; process.exit(0))
+    setTimeout(() =&gt; process.exit(1), 10_000).unref()
+  })
+}
+</pre>
+</div>
+
+<div class="code" data-lang="text" data-file="Dockerfile">
+<pre>
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN npm ci --omit=dev &amp;&amp; npm cache clean --force
+COPY --from=build /app/dist ./dist
+COPY public ./public
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD node -e "fetch('http://localhost:3000/health').then(r=&gt;process.exit(r.ok?0:1)).catch(()=&gt;process.exit(1))"
+CMD ["node", "dist/server.js"]
+</pre>
+</div>
+
+<p>前面放一个反向代理来终止 TLS。Caddy 的配置短得离谱，而且自动申请续期证书：</p>
+
+<div class="code" data-lang="text" data-file="Caddyfile">
+<pre>
+meadowlarktravel.com, www.meadowlarktravel.com {
+    reverse_proxy localhost:3000
+    encode gzip zstd
+}
+</pre>
+</div>
+
+<h2 id="others">其他运行时</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+// Bun
+export default { port: 3000, fetch: app.fetch }
+
+// Deno
+Deno.serve({ port: 3000 }, app.fetch)
+
+// Vercel（api/[[...route]].ts）
+import { handle } from 'hono/vercel'
+export default handle(app)
+
+// AWS Lambda
+import { handle } from 'hono/aws-lambda'
+export const handler = handle(app)
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 这就是第 1 章说的「通用」</div>
   <p>
-    很多人在写完最小复现代码的过程中就自己找到了原因 ——
-    因为把问题精确表达出来，本身就是一次严格的排查。<br>
-    <strong>所以就算最后没发出去，写下来也不亏。</strong>
+    上面每一段都只有一两行，而 <code>app</code> 本身完全没变。
+    你在第 3 到 20 章写的所有业务代码，在这五个平台上都能跑。
   </p>
 </div>
 
-<h2 id="contribute">参与开源</h2>
+<h2 id="cicd">自动化发布</h2>
 
-<p>Hono 是个欢迎新人的项目。如果你想回馈：</p>
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="CI/CD 流水线">
+  <rect class="bx-b" x="20" y="30" width="110" height="46" rx="8"/>
+  <text class="sm" x="75" y="50" text-anchor="middle">推送到</text>
+  <text class="sm" x="75" y="66" text-anchor="middle">功能分支</text>
 
-<ul>
-  <li><strong>改文档。</strong>发现文档里有错、有过时的例子、或者某处让你困惑 —— 提个 PR。
-      这是门槛最低也最受欢迎的贡献。</li>
-  <li><strong>提有质量的 issue。</strong>带最小复现的 bug 报告，对维护者的价值极高。</li>
-  <li><strong>回答别人的问题。</strong>你刚踩过的坑，正是别人现在踩的。</li>
-  <li><strong>写中间件。</strong>做了个通用的东西？发到 npm，或者提交到官方 middleware 仓库。</li>
-  <li><strong>写文章。</strong>把你解决某个问题的过程写出来。搜索引擎会替你把它送到需要的人面前。</li>
-</ul>
+  <path class="ln" d="M134 53 H190" marker-end="url(#ar)"/>
+  <rect class="bx" x="194" y="30" width="130" height="46" rx="8"/>
+  <text class="sm" x="259" y="50" text-anchor="middle">CI 检查</text>
+  <text class="sm" x="259" y="66" text-anchor="middle">lint · 类型 · 测试</text>
 
-<h2 id="last">最后几句</h2>
+  <path class="ln" d="M328 53 H384" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="388" y="30" width="140" height="46" rx="8"/>
+  <text class="sm on-p" x="458" y="50" text-anchor="middle">预览环境</text>
+  <text class="sm" x="458" y="66" text-anchor="middle">每个 PR 一个地址</text>
 
-<div class="box key">
-  <div class="t">&#9733; 三个会一直有用的判断</div>
-  <ol>
-    <li>
-      <strong>「这个响应能给另一个用户看吗？」</strong><br>
-      这一个问题同时决定了：能不能缓存（第 17 章）、能不能放 CDN、
-      有没有数据泄露风险（第 18 章）。
-    </li>
-    <li>
-      <strong>「如果现在同时跑三个实例，会出什么问题？」</strong><br>
-      它会立刻暴露出所有藏在内存里的状态（第 12 章）。
-    </li>
-    <li>
-      <strong>「这个依赖挂了，我的应用会怎样？」</strong><br>
-      数据库、第三方 API、邮件服务 —— 每一个都会挂。想清楚降级方案（第 19 章）。
-    </li>
-  </ol>
+  <path class="ln" d="M532 53 H588" marker-end="url(#ar)"/>
+  <rect class="bx" x="592" y="30" width="140" height="46" rx="8"/>
+  <text class="sm" x="662" y="50" text-anchor="middle">代码评审</text>
+  <text class="sm" x="662" y="66" text-anchor="middle">人来看</text>
+
+  <path class="ln-a" d="M662 80 V106 H75 V130" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="380" y="100" text-anchor="middle">合并到 main</text>
+
+  <rect class="bx-a" x="20" y="134" width="130" height="46" rx="8"/>
+  <text class="sm on-a" x="85" y="154" text-anchor="middle">跑迁移</text>
+  <text class="sm" x="85" y="170" text-anchor="middle">数据库先行</text>
+
+  <path class="ln-a" d="M154 157 H210" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="214" y="134" width="130" height="46" rx="8"/>
+  <text class="sm on-a" x="279" y="154" text-anchor="middle">部署预发布</text>
+
+  <path class="ln-a" d="M348 157 H404" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="408" y="134" width="130" height="46" rx="8"/>
+  <text class="sm on-a" x="473" y="154" text-anchor="middle">冒烟测试</text>
+
+  <path class="ln-g" d="M542 157 H598" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="602" y="134" width="130" height="46" rx="8"/>
+  <text class="sm on-g" x="667" y="154" text-anchor="middle">部署生产</text>
+  <text class="sm" x="667" y="170" text-anchor="middle">&#127881;</text>
+
+  <text class="sm on-r" x="380" y="206" text-anchor="middle">任何一步失败 → 停止，不部署，通知作者</text>
+</svg>
+<figcaption>图 23-2　把「发布」变成一条自动流水线</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file=".github/workflows/deploy.yml">
+<pre>
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run build
+
+      - name: 应用数据库迁移
+        run: npx wrangler d1 migrations apply meadowlark --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: 部署
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: 冒烟测试
+        run: |
+          sleep 10
+          curl -sf https://meadowlarktravel.com/health || exit 1
+</pre>
 </div>
 
-<p>
-  最后回到第 1 章那句话：<strong>Hono 应用就是一个 <code>(Request) =&gt; Response</code> 的函数，
-  中间件是包在它外面的一层层洋葱皮。</strong>
-</p>
+<div class="box warn">
+  <div class="t">&#9888; 数据库迁移必须向后兼容</div>
+  <p>
+    部署过程中，会有一小段时间是<strong>新旧两个版本同时在跑</strong>。
+    如果迁移直接删掉了一个列，旧版本代码立刻报错。<br>
+    <strong>安全的做法是分两次发布：</strong><br>
+    ① 先加新列，新旧代码都能跑 → 部署新代码 → 确认稳定<br>
+    ② 下次发布再删旧列<br>
+    麻烦，但这是零停机发布的必要代价。
+  </p>
+</div>
 
-<p>
-  二十三章过去，这句话应该已经从一句抽象的描述，变成了你脑子里一幅具体的图像：
-  请求进来，穿过日志、安全头、会话、认证一层层中间件，
-  到达处理函数，读参数、查数据库、渲染视图，
-  然后响应带着结果原路返回，沿途被压缩、被加上缓存头、被记录耗时。
-</p>
+<h2 id="checklist">上线检查清单</h2>
 
-<p>
-  剩下的，就是去写点什么了。
-</p>
+<div class="box key">
+  <div class="t">&#9733; 第一次上线前逐项确认</div>
+  <ul>
+    <li>☐ 域名解析正确，<code>www</code> 和根域名都能访问（且互相跳转统一）</li>
+    <li>☐ HTTPS 生效，HTTP 自动跳转（第 18 章）</li>
+    <li>☐ 所有环境变量和密钥都在生产环境配好了</li>
+    <li>☐ 数据库迁移已应用，种子数据已就位</li>
+    <li>☐ <code>NODE_ENV=production</code></li>
+    <li>☐ 404 和 500 页面是自定义的，不泄露内部信息</li>
+    <li>☐ <code>/health</code> 端点正常，已接入外部可用性监控（第 12 章）</li>
+    <li>☐ 错误上报已接通，故意触发一次确认能收到</li>
+    <li>☐ 有 <code>robots.txt</code> 和 <code>sitemap.xml</code></li>
+    <li>☐ favicon、Open Graph 标签（分享到社交平台时的预览图）</li>
+    <li>☐ 数据库有自动备份，<strong>并且你恢复演练过一次</strong></li>
+    <li>☐ 知道怎么回滚，而且演练过</li>
+  </ul>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 没验证过的备份等于没有备份</div>
+  <p>
+    「我们有每日备份」这句话在真正需要恢复时经常变成
+    「备份文件是空的 / 格式不对 / 三个月前就停了没人发现」。<br>
+    <strong>现在就做一次恢复演练</strong>：把备份还原到一个临时数据库，确认数据完整。
+  </p>
+</div>
+
+<h2 id="rollback">回滚</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+# Cloudflare Workers：回到上一个版本
+npx wrangler rollback
+
+# Docker：换回上一个镜像标签
+docker compose up -d --no-deps app:v1.4.2
+
+# Git：撤销那次合并（保留历史，比 reset 安全）
+git revert -m 1 &lt;merge-commit&gt;
+git push
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 出问题时先回滚，再排查</div>
+  <p>
+    线上出故障时，本能反应是「让我看看哪里错了」。<br>
+    正确的顺序是：<strong>先回滚，恢复服务，然后再慢慢查</strong>。
+    用户不关心原因，只关心网站能不能用。而且回滚之后你可以在没有压力的情况下分析。<br>
+    <em>前提是回滚必须很快很可靠 —— 所以要提前演练。</em>
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>DNS 把域名映射到服务器；迁移前先把 TTL 调小。</li>
+  <li>需不需要文件系统和长任务，决定了你该用边缘平台还是容器平台。</li>
+  <li>Hono 换平台只改入口文件，业务代码不动。</li>
+  <li>发布要自动化：检查 → 迁移 → 部署 → 冒烟测试。</li>
+  <li>数据库迁移必须向后兼容，删列要等下一次发布。</li>
+  <li>回滚和备份恢复都要<strong>演练过</strong>才算数。出故障时先回滚再排查。</li>
+</ul>
 
 <div class="exercise">
-  <h3>最后一个练习</h3>
+  <h3>动手练习</h3>
   <ol>
-    <li>从上面三个练手项目里挑一个，今天就把仓库建起来，写出第一个路由。</li>
-    <li>给它配好第 5 章的测试和第 21 章的部署流水线 —— 在项目还小的时候做，成本几乎为零。</li>
-    <li>把它部署到线上，发给一个朋友看。</li>
-    <li>在 README 里写清楚：这是什么、怎么跑、你为什么做它。</li>
+    <li>用 <code>dig meadowlarktravel.com</code>（或 <code>nslookup</code>）查一个你熟悉的网站，看看它的 A 记录、CNAME 和 TTL。</li>
+    <li>把云雀旅行部署到 Cloudflare Workers 的免费额度上，绑定一个你自己的域名（或者用平台提供的 <code>*.workers.dev</code>）。</li>
+    <li>配一条 GitHub Actions 流水线：推送到 main 就自动跑测试并部署。故意让一个测试失败，确认它<strong>没有</strong>部署。</li>
+    <li>做一次回滚演练：部署一个明显有问题的版本，然后用 <code>wrangler rollback</code> 恢复，计时看要多久。</li>
+    <li>对照上线清单，把你项目里还没做的项列出来。</li>
   </ol>
 </div>
 

@@ -317,7 +317,7 @@ export function createVacationRepo(d1: D1Database): VacationRepo {
     async addInSeasonListener(email, sku) {
       await db.insert(inSeasonListeners)
         .values({ email, sku, createdAt: new Date() })
-        .onConflictDoNothing()          // 重复订阅不报错
+        .onConflictDoNothing()          // 重复订阅不报错（这也是一种防并发的手段，见第 20 章）
     },
   }
 }

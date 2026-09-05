@@ -572,7 +572,7 @@ document.getElementById('photo-form').addEventListener('submit', async (evt) =&g
   <li>查询 用 GET + 查询串；提交 用 POST + 请求体。POST 不等于安全，HTTPS 才是。</li>
   <li>三种编码：<code>urlencoded</code>（普通表单）、<code>multipart</code>（带文件）、<code>json</code>（fetch）。</li>
   <li><code>c.req.parseBody()</code> 处理前两种，<code>c.req.json()</code> 处理第三种。</li>
-  <li>表单提交后用 <strong>303</strong> 重定向，避免刷新重复提交。</li>
+  <li>表单提交后用 <strong>303</strong> 重定向，避免刷新重复提交。（它只能缓解，挡不住双击和客户端重试 —— 彻底的解法是第 20 章的幂等键。）</li>
   <li>前端校验是体验，<strong>服务端校验是必须</strong>。用 Zod + <code>zValidator</code>。</li>
   <li>文件上传要限大小、限类型、自己生成文件名，永远不信任客户端。</li>
 </ul>

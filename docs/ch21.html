@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 21 章 · 上线 — Hono 全栈开发教程</title>
+<title>第 21 章 · 后台任务与队列 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="21">
@@ -12,482 +12,839 @@
 <main>
 
 <span class="chapter-eyebrow">第 21 章</span>
-<h1>上线</h1>
+<h1>后台任务与队列</h1>
 <p class="lede">
-  云雀旅行终于要见人了。这一章讲域名、DNS、部署平台的选择，
-  以及怎么把「发布」变成一件不需要勇气的日常操作。
+  第 11 章发邮件时，用户要一直等着邮件发完才能看到「下单成功」。
+  这一章讲一个能改变你系统架构的思路：<strong>请求路径上只做必须立刻做的事，其余的丢到后面去。</strong>
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>看懂 DNS 记录，把域名指向你的应用</li>
-    <li>根据项目特点选择部署平台</li>
-    <li>把云雀旅行部署到 Cloudflare Workers 和传统服务器</li>
-    <li>搭一条自动化的发布流水线</li>
-    <li>准备好回滚方案</li>
+    <li>判断哪些操作该移出请求路径</li>
+    <li>掌握三种「延后执行」的手段及各自的可靠性边界</li>
+    <li>理解「至少一次投递」意味着什么，以及它为什么强制要求消费者幂等</li>
+    <li>用 Cloudflare Queues 和 BullMQ 各实现一遍</li>
+    <li>设计重试、退避与死信队列</li>
+    <li>知道什么时候<strong>不该</strong>用队列</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="dns">域名与 DNS</h2>
+<h2 id="why">请求路径上的时间预算</h2>
+
+<p>回顾第 11 章那个下单接口，把每一步的耗时列出来：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="DNS 解析流程">
-  <rect class="bx-b" x="20" y="90" width="110" height="50" rx="8"/>
-  <text class="sm" x="75" y="112" text-anchor="middle">浏览器</text>
-  <text class="sm" x="75" y="130" text-anchor="middle">要访问站点</text>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="同步处理与异步处理的响应时间对比">
+  <text class="ttl on-r" x="20" y="22">同步做完所有事</text>
 
-  <path class="ln-b" d="M134 105 H240" marker-end="url(#ar)"/>
-  <text class="sm" x="187" y="98" text-anchor="middle">① 这个域名</text>
-  <text class="sm" x="187" y="114" text-anchor="middle">的 IP 是多少？</text>
+  <rect class="bx" x="20" y="34" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="55" text-anchor="middle">校验 5ms</text>
+  <rect class="bx-g" x="114" y="34" width="120" height="34" rx="6"/>
+  <text class="sm" x="174" y="55" text-anchor="middle">写订单 30ms</text>
+  <rect class="bx-r" x="238" y="34" width="180" height="34" rx="6"/>
+  <text class="sm on-r" x="328" y="55" text-anchor="middle">发确认邮件 800ms</text>
+  <rect class="bx-r" x="422" y="34" width="150" height="34" rx="6"/>
+  <text class="sm on-r" x="497" y="55" text-anchor="middle">生成 PDF 600ms</text>
+  <rect class="bx-r" x="576" y="34" width="150" height="34" rx="6"/>
+  <text class="sm on-r" x="651" y="55" text-anchor="middle">同步 CRM 900ms</text>
 
-  <rect class="bx" x="244" y="82" width="150" height="66" rx="8"/>
-  <text class="ttl" x="319" y="106" text-anchor="middle">DNS 解析器</text>
-  <text class="sm" x="319" y="124" text-anchor="middle">通常是运营商</text>
-  <text class="sm" x="319" y="140" text-anchor="middle">或 8.8.8.8</text>
+  <path class="ln-r" d="M20 80 H726" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="100" text-anchor="middle">用户盯着转圈：2335 ms　·　任何一个外部服务抖动，整个下单就失败</text>
 
-  <path class="ln" d="M398 105 H500" marker-end="url(#ar)"/>
-  <text class="sm" x="449" y="98" text-anchor="middle">② 逐级查询</text>
+  <path class="ln-d" d="M20 116 H740"/>
 
-  <rect class="bx-a" x="504" y="82" width="180" height="66" rx="8"/>
-  <text class="ttl on-a" x="594" y="104" text-anchor="middle">权威 DNS 服务器</text>
-  <text class="sm" x="594" y="122" text-anchor="middle">你在这里配置记录</text>
-  <text class="sm" x="594" y="140" text-anchor="middle">Cloudflare / 阿里云 …</text>
+  <text class="ttl on-g" x="20" y="146">只做必须立刻做的</text>
 
-  <path class="ln-g" d="M594 152 V180 H75 V145" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="340" y="174" text-anchor="middle">③ 返回 IP 地址，浏览器才开始真正的 HTTP 请求</text>
+  <rect class="bx" x="20" y="158" width="90" height="34" rx="6"/>
+  <text class="sm" x="65" y="179" text-anchor="middle">校验 5ms</text>
+  <rect class="bx-g" x="114" y="158" width="120" height="34" rx="6"/>
+  <text class="sm" x="174" y="179" text-anchor="middle">写订单 30ms</text>
+  <rect class="bx-a" x="238" y="158" width="120" height="34" rx="6"/>
+  <text class="sm on-a" x="298" y="179" text-anchor="middle">投递任务 10ms</text>
 
-  <rect class="bx-d" x="150" y="196" width="460" height="30" rx="6"/>
-  <text class="sm" x="380" y="216" text-anchor="middle">每一层都有缓存，所以改了 DNS 不会立刻全球生效（见 TTL）</text>
+  <path class="ln-g" d="M20 204 H362" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="190" y="224" text-anchor="middle">用户拿到响应：45 ms</text>
+
+  <rect class="bx-p" x="400" y="158" width="326" height="34" rx="6"/>
+  <text class="sm on-p" x="563" y="179" text-anchor="middle">邮件 · PDF · CRM 在后台慢慢做</text>
+  <path class="ln-d" d="M362 175 H396" marker-end="url(#ar)"/>
+  <text class="sm" x="563" y="212" text-anchor="middle">失败了可以重试，不影响用户</text>
+
+  <rect class="bx-a" x="20" y="244" width="720" height="40" rx="8"/>
+  <text class="sm on-a" x="380" y="268" text-anchor="middle">响应快了 50 倍，而且下单的成功率不再取决于三个外部服务是否健康</text>
 </svg>
-<figcaption>图 21-1　DNS 就是互联网的电话簿</figcaption>
+<figcaption>图 21-1　同样的功能，两种架构，用户体验和可靠性差一个数量级</figcaption>
 </figure>
 
-<h3>常见记录类型</h3>
+<h3>怎么判断该不该移出去</h3>
+
+<p>问一个问题：<strong>「用户看到响应时，这件事必须已经完成吗？」</strong></p>
 
 <div class="tw">
 <table>
-  <tr><th>类型</th><th>作用</th><th>例子</th></tr>
-  <tr><td><code>A</code></td><td>域名 → IPv4 地址</td><td><code>meadowlarktravel.com → 203.0.113.10</code></td></tr>
-  <tr><td><code>AAAA</code></td><td>域名 → IPv6 地址</td><td><code>meadowlarktravel.com → 2001:db8::1</code></td></tr>
-  <tr><td><code>CNAME</code></td><td>域名 → 另一个域名（别名）</td><td><code>www → meadowlark.pages.dev</code></td></tr>
-  <tr><td><code>MX</code></td><td>这个域名的邮件由谁接收</td><td>配邮箱服务时用</td></tr>
-  <tr><td><code>TXT</code></td><td>任意文本。用于域名验证、SPF、DKIM</td><td>第 11 章的发信配置</td></tr>
-  <tr><td><code>NS</code></td><td>这个域名由哪些 DNS 服务器负责</td><td>换 DNS 服务商时改这个</td></tr>
-</table>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; TTL 与「DNS 生效要多久」</div>
-  <p>
-    每条记录有个 TTL（生存时间），告诉各级缓存「这个结果可以存多久」。
-    默认常见是 3600 秒（1 小时）。<br>
-    <strong>迁移前的技巧</strong>：提前一两天把 TTL 调到 300 秒，
-    这样切换时最多 5 分钟就全网生效；切换完成稳定后再调回去。
-  </p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 根域名不能用 CNAME</div>
-  <p>
-    DNS 规范不允许根域名（<code>meadowlarktravel.com</code>，也叫 apex）配 CNAME。
-    但很多平台只给你一个域名而不是 IP。<br>
-    解决办法：用支持 <strong>CNAME 展平</strong>（也叫 ALIAS / ANAME）的 DNS 服务商 ——
-    Cloudflare、Route53 等都支持。它们在解析时自动把 CNAME 转成 A 记录返回。
-  </p>
-</div>
-
-<h2 id="platforms">选择部署平台</h2>
-
-<div class="tw">
-<table>
-  <tr><th>平台</th><th>适合</th><th>注意</th></tr>
-  <tr>
-    <td><strong>Cloudflare Workers</strong></td>
-    <td>全球分发、按量计费、想要极低冷启动。配套有 D1、KV、R2、队列</td>
-    <td>受限运行时，没有文件系统，单请求有 CPU 时间上限</td>
-  </tr>
-  <tr>
-    <td><strong>Deno Deploy</strong></td>
-    <td>Deno 项目，配置极少</td>
-    <td>生态比 Node 小</td>
-  </tr>
-  <tr>
-    <td><strong>Vercel / Netlify</strong></td>
-    <td>前端和 API 一起部署，预览环境体验好</td>
-    <td>长任务和 WebSocket 支持有限</td>
-  </tr>
-  <tr>
-    <td><strong>Fly.io / Railway / Render</strong></td>
-    <td>要完整的 Node 环境、要跑后台任务、要连传统数据库</td>
-    <td>要自己管实例数量和扩缩容</td>
-  </tr>
-  <tr>
-    <td><strong>自己的 VPS + Docker</strong></td>
-    <td>有合规要求、要完全控制、成本敏感</td>
-    <td>系统更新、证书、监控、备份全都归你</td>
-  </tr>
+  <tr><th>必须同步做</th><th>可以异步做</th></tr>
+  <tr><td>校验输入（不合法就不该继续）</td><td>发确认邮件 / 短信</td></tr>
+  <tr><td>写入核心业务数据（订单、支付记录）</td><td>生成 PDF / 发票 / 报表</td></tr>
+  <tr><td>扣减库存（涉及正确性，见第 20 章）</td><td>压缩、裁剪、转码上传的图片视频</td></tr>
+  <tr><td>返回用户马上要看的数据</td><td>同步数据到 CRM / 数据仓库 / 搜索引擎</td></tr>
+  <tr><td>权限判断</td><td>推送通知、发 webhook 给第三方</td></tr>
+  <tr><td></td><td>写审计日志、统计埋点</td></tr>
+  <tr><td></td><td>调用 AI 生成摘要、翻译、推荐</td></tr>
 </table>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 怎么选</div>
+  <div class="t">&#9733; 一个额外的好处：故障隔离</div>
   <p>
-    先问一个问题：<strong>「我需要文件系统、长连接、或者跑几分钟的后台任务吗？」</strong><br>
-    不需要 → 边缘平台（Workers / Deno Deploy / Vercel），最省心。<br>
-    需要 → 容器平台（Fly.io / Railway）或自己的服务器。<br>
-    <br>
-    因为 Hono 基于 Web 标准，<strong>选错了也不是灾难</strong> —— 换平台主要是改入口文件和部署配置，
-    业务代码基本不动。
+    同步架构下，邮件服务挂了 → 下单接口报 500 → <strong>用户下不了单，公司损失收入</strong>。<br>
+    异步架构下，邮件服务挂了 → 任务在队列里堆着 → 下单照常 → 服务恢复后邮件自动补发。<br>
+    <em>队列把「外部依赖的可用性」和「核心业务的可用性」解耦开了。</em>这往往比性能提升更值钱。
   </p>
 </div>
 
-<h2 id="workers">部署到 Cloudflare Workers</h2>
+<h2 id="three">三种延后执行的手段</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种延后执行手段的可靠性对比">
+  <rect class="bx-b" x="20" y="20" width="230" height="180" rx="10"/>
+  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① waitUntil</text>
+  <text class="sm" x="36" y="70">响应先返回，任务在同一个</text>
+  <text class="sm" x="36" y="88">进程里继续跑完</text>
+  <text class="mono sm" x="36" y="114">c.executionCtx.waitUntil(p)</text>
+  <text class="sm on-g" x="36" y="142">&#10003; 零基础设施，一行代码</text>
+  <text class="sm on-r" x="36" y="164">&#10007; 失败了没人知道</text>
+  <text class="sm on-r" x="36" y="182">&#10007; 进程挂了任务就没了</text>
+
+  <rect class="bx-a" x="266" y="20" width="230" height="180" rx="10"/>
+  <text class="ttl on-a" x="381" y="44" text-anchor="middle">② 队列</text>
+  <text class="sm" x="282" y="70">任务写进持久化的队列，</text>
+  <text class="sm" x="282" y="88">由独立的消费者取出执行</text>
+  <text class="mono sm" x="282" y="114">await QUEUE.send(task)</text>
+  <text class="sm on-g" x="282" y="142">&#10003; 不会丢，自动重试</text>
+  <text class="sm on-g" x="282" y="160">&#10003; 可观测、可限速</text>
+  <text class="sm on-r" x="282" y="182">&#10007; 多一个组件要维护</text>
+
+  <rect class="bx-p" x="512" y="20" width="228" height="180" rx="10"/>
+  <text class="ttl on-p" x="626" y="44" text-anchor="middle">③ 定时任务</text>
+  <text class="sm" x="528" y="70">按时间表周期性执行，</text>
+  <text class="sm" x="528" y="88">不由请求触发</text>
+  <text class="mono sm" x="528" y="114">Cron: 0 3 * * *</text>
+  <text class="sm on-g" x="528" y="142">&#10003; 适合批处理、清理、对账</text>
+  <text class="sm on-r" x="528" y="164">&#10007; 有延迟（下次执行才做）</text>
+  <text class="sm on-r" x="528" y="182">&#10007; 要自己防重复执行</text>
+
+  <rect class="bx-d" x="20" y="216" width="720" height="70" rx="10"/>
+  <text class="ttl" x="36" y="240">怎么选</text>
+  <text class="sm" x="36" y="262">丢了也无所谓（统计埋点、缓存预热）→ waitUntil　　丢了会出问题（邮件、支付回调、扣款）→ 队列</text>
+  <text class="sm" x="36" y="280">不由用户触发、要扫全表（日报、清理过期数据、对账）→ 定时任务</text>
+</svg>
+<figcaption>图 21-2　可靠性从左到右递增，复杂度也是</figcaption>
+</figure>
+
+<h3>① waitUntil：最轻量的那个</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/api/v1/orders', async (c) =&gt; {
+  const order = await createOrder(...)
+
+  // 响应立刻返回，但运行时会等这个 Promise 结束才回收执行环境
+  c.executionCtx.waitUntil(
+    recordAnalytics({ event: 'order_created', orderId: order.id })
+      .catch((err) =&gt; console.error('埋点失败', err))   // ← 必须自己 catch
+  )
+
+  return c.json({ orderId: order.id }, 201)
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; waitUntil 的三个限制</div>
+  <ol>
+    <li><strong>没有重试。</strong>失败就是失败了，没有任何人会再试一次。</li>
+    <li><strong>没有持久化。</strong>进程/实例在任务跑完前被回收，任务直接消失，不留痕迹。</li>
+    <li><strong>受执行时间上限约束。</strong>边缘平台对单次调用的 CPU 时间和墙钟时间都有限制。</li>
+  </ol>
+  <p>
+    所以它只适合<strong>「做成了最好，没做成也不影响正确性」</strong>的事。
+    发确认邮件用它是不合适的 —— 用户没收到邮件是个真问题。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Node.js 上没有 waitUntil</div>
+  <p>
+    <code>c.executionCtx</code> 是 Workers 等边缘运行时提供的。在 Node 上，
+    进程是长驻的，你直接 <code>promise.catch(...)</code> 不 await 就行 ——
+    但同样没有重试和持久化保证，而且要小心第 12 章讲的「未处理的 Promise 拒绝」。
+  </p>
+</div>
+
+<h2 id="queue">队列的心智模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="生产者、队列、消费者的关系">
+  <rect class="bx-b" x="20" y="60" width="150" height="70" rx="10"/>
+  <text class="ttl on-b" x="95" y="86" text-anchor="middle">生产者</text>
+  <text class="sm" x="95" y="106" text-anchor="middle">你的 Hono 路由</text>
+  <text class="sm" x="95" y="122" text-anchor="middle">投递任务后立刻返回</text>
+
+  <path class="ln-b" d="M174 95 H236" marker-end="url(#ar)"/>
+  <text class="sm" x="205" y="86" text-anchor="middle">send</text>
+
+  <rect class="bx-a" x="240" y="46" width="200" height="98" rx="10"/>
+  <text class="ttl on-a" x="340" y="70" text-anchor="middle">队列</text>
+  <rect class="bx" x="254" y="80" width="34" height="26" rx="4"/>
+  <rect class="bx" x="292" y="80" width="34" height="26" rx="4"/>
+  <rect class="bx" x="330" y="80" width="34" height="26" rx="4"/>
+  <rect class="bx" x="368" y="80" width="34" height="26" rx="4"/>
+  <text class="sm" x="340" y="128" text-anchor="middle">持久化存储，进程重启不丢</text>
+
+  <path class="ln-a" d="M444 95 H506" marker-end="url(#ar-a)"/>
+  <text class="sm" x="475" y="86" text-anchor="middle">拉取</text>
+
+  <rect class="bx-g" x="510" y="46" width="230" height="98" rx="10"/>
+  <text class="ttl on-g" x="625" y="70" text-anchor="middle">消费者</text>
+  <text class="sm" x="625" y="90" text-anchor="middle">独立进程 / Worker</text>
+  <text class="sm" x="625" y="110" text-anchor="middle">处理完显式确认（ack）</text>
+  <text class="sm" x="625" y="130" text-anchor="middle">没确认 → 任务会被重新投递</text>
+
+  <rect class="bx-d" x="20" y="164" width="720" height="120" rx="10"/>
+  <text class="ttl" x="36" y="188">解耦带来的四件事</text>
+  <text class="sm" x="36" y="212">① 削峰：突然来了一万个任务，队列存着，消费者按自己的速度慢慢做，不会被压垮</text>
+  <text class="sm" x="36" y="234">② 重试：消费失败了，任务回到队列，稍后再试，不用生产者操心</text>
+  <text class="sm" x="36" y="256">③ 扩容：处理不过来就多开几个消费者，生产者一行代码不用改</text>
+  <text class="sm" x="36" y="278">④ 隔离：消费者崩了，Web 服务照常响应用户</text>
+</svg>
+<figcaption>图 21-3　队列是生产者和消费者之间的缓冲带</figcaption>
+</figure>
+
+<h3>「至少一次投递」是什么意思</h3>
+
+<p>
+  绝大多数队列（SQS、Cloudflare Queues、RabbitMQ 默认配置、BullMQ）提供的是
+  <strong>at-least-once</strong> 保证：任务<em>至少</em>会被投递一次，但可能投递多次。
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+消费者收到任务 → 处理成功 → 准备发送 ack → 此时网络断了 / 进程崩了
+                                          ↓
+                          队列没收到 ack，认为处理失败
+                                          ↓
+                                    重新投递这个任务
+                                          ↓
+                              同一个任务被处理了第二次
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 这个推论极其重要</div>
+  <p>
+    <strong>至少一次投递 ⇒ 你的任务处理逻辑必须是幂等的。</strong><br>
+    这不是「最好做一下」，而是「不做就一定会出事」—— 只是时间问题。<br>
+    第 20 章讲的幂等技巧在这里全部适用，而且这次是<strong>强制</strong>的。
+  </p>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 非幂等的任务</div>
+    <div class="code" data-lang="ts"><pre>
+async function handle(task) {
+  await mailer.send({
+    to: task.email,
+    subject: '订单确认',
+  })
+  await db.update(accounts)
+    .set({ points: sql`points + 100` })
+    .where(eq(accounts.id, task.userId))
+}
+// 重投一次 = 用户收到两封邮件
+//            + 多得 100 积分
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 幂等的任务</div>
+    <div class="code" data-lang="ts"><pre>
+async function handle(task) {
+  // 用任务自带的唯一 id 做去重
+  const claimed = await claimOnce(task.id)
+  if (!claimed) return          // 处理过了，直接结束
+
+  await mailer.send({
+    to: task.email,
+    subject: '订单确认',
+    // 很多邮件服务也支持幂等键
+    idempotencyKey: task.id,
+  })
+  await db.update(accounts)
+    .set({ points: sql`points + 100` })
+    .where(eq(accounts.id, task.userId))
+}
+</pre></div>
+  </div>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+/** 用一张表 + 唯一约束实现「只处理一次」*/
+async function claimOnce(taskId: string): Promise&lt;boolean&gt; {
+  try {
+    await db.insert(processedTasks).values({ id: taskId, at: new Date() })
+    return true            // 插入成功 = 我是第一个
+  } catch (err) {
+    if (isUniqueViolation(err)) return false   // 已经有人处理过了
+    throw err
+  }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 更严谨的做法：先做事，再标记，同一个事务</div>
+  <p>
+    上面这个写法有个窄窗口：标记成功后、业务执行前崩溃，任务会被跳过（变成「至多一次」）。
+    如果业务本身在数据库里，把<strong>标记和业务放进同一个事务</strong>就能彻底解决 ——
+    和第 20 章的幂等键写法完全一样。<br>
+    如果业务是外部调用（发邮件），就没法用事务，此时优先<strong>让外部服务承担去重</strong>
+    （传幂等键给它），这是最可靠的。
+  </p>
+</div>
+
+<h2 id="cf">实现：Cloudflare Queues</h2>
+
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+[[queues.producers]]
+binding = "TASKS"           # 代码里用 c.env.TASKS 投递
+queue = "meadowlark-tasks"
+
+[[queues.consumers]]
+queue = "meadowlark-tasks"
+max_batch_size = 10         # 一次最多取 10 条一起处理
+max_batch_timeout = 5       # 或者攒够 5 秒就处理
+max_retries = 5             # 最多重试 5 次
+dead_letter_queue = "meadowlark-dlq"    # 5 次还失败就丢到这里
+</pre>
+</div>
+
+<h3>定义任务类型</h3>
+
+<div class="code" data-lang="ts" data-file="src/tasks/types.ts">
+<pre>
+export type Task =
+  | { type: 'send-order-email'; id: string; orderId: string; email: string }
+  | { type: 'generate-invoice'; id: string; orderId: string }
+  | { type: 'sync-to-crm'; id: string; customerId: string }
+
+export function newTask&lt;T extends Task['type']&gt;(
+  type: T,
+  payload: Omit&lt;Extract&lt;Task, { type: T }&gt;, 'type' | 'id'&gt;
+): Task {
+  return { type, id: crypto.randomUUID(), ...payload } as Task
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 任务里放 ID，不放数据</div>
+  <p>
+    投递 <code>{ orderId: 'o_123' }</code>，而不是把整个订单对象塞进去。原因：<br>
+    ① 消息体有大小限制；<br>
+    ② 任务可能几分钟后才执行，那时数据可能已经变了 —— <strong>你要的是最新数据，不是投递时的快照</strong>；<br>
+    ③ 消息可能被日志记录下来，里面别带敏感信息。
+  </p>
+</div>
+
+<h3>生产者</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+type Bindings = { TASKS: Queue&lt;Task&gt;; DB: D1Database }
+
+app.post('/api/v1/orders', async (c) =&gt; {
+  const order = await createOrder(...)     // 同步：必须完成
+
+  // 异步：投递即返回，10 ms 左右
+  await c.env.TASKS.send(
+    newTask('send-order-email', { orderId: order.id, email: order.email })
+  )
+
+  // 批量投递更省事
+  await c.env.TASKS.sendBatch([
+    { body: newTask('generate-invoice', { orderId: order.id }) },
+    { body: newTask('sync-to-crm', { customerId: order.customerId }) },
+  ])
+
+  return c.json({ orderId: order.id }, 201)
+})
+</pre>
+</div>
+
+<h3>消费者</h3>
 
 <div class="code" data-lang="ts" data-file="src/index.ts">
 <pre>
 import { app } from './app'
+import { handleTask } from './tasks/handlers'
 
-export default app     // 就这一行
+export default {
+  // HTTP 请求走 Hono
+  fetch: app.fetch,
+
+  // 队列消息走这里
+  async queue(batch: MessageBatch&lt;Task&gt;, env: Bindings) {
+    for (const msg of batch.messages) {
+      try {
+        await handleTask(msg.body, env)
+        msg.ack()                      // 明确确认：处理成功
+      } catch (err) {
+        console.error('任务失败', {
+          taskId: msg.body.id,
+          type: msg.body.type,
+          attempt: msg.attempts,
+          error: String(err),
+        })
+        // 指数退避后重投；不调 retry 而是让它超时也可以，但显式更清楚
+        msg.retry({ delaySeconds: Math.min(2 ** msg.attempts * 10, 900) })
+      }
+    }
+  },
+}
 </pre>
 </div>
 
-<div class="code" data-lang="toml" data-file="wrangler.toml">
+<div class="code" data-lang="ts" data-file="src/tasks/handlers.ts">
 <pre>
-name = "meadowlark"
-main = "src/index.ts"
-compatibility_date = "2025-01-01"
+export async function handleTask(task: Task, env: Bindings) {
+  switch (task.type) {
+    case 'send-order-email':
+      return sendOrderEmail(task, env)
+    case 'generate-invoice':
+      return generateInvoice(task, env)
+    case 'sync-to-crm':
+      return syncToCrm(task, env)
+    default: {
+      // 穷尽检查：将来加了新任务类型忘了处理，这里会编译报错
+      const never: never = task
+      throw new Error(`未知任务类型：${JSON.stringify(never)}`)
+    }
+  }
+}
 
-[assets]
-directory = "./public"
-binding = "ASSETS"
+async function sendOrderEmail(
+  task: Extract&lt;Task, { type: 'send-order-email' }&gt;,
+  env: Bindings
+) {
+  // ① 幂等
+  if (!(await claimOnce(task.id, env))) return
 
-[vars]
-APP_NAME = "云雀旅行"
+  // ② 取最新数据，而不是用投递时的快照
+  const order = await getOrder(env.DB, task.orderId)
+  if (!order) return          // 订单被删了，任务作废，不是错误
 
-[[d1_databases]]
-binding = "DB"
-database_name = "meadowlark"
-database_id = "your-database-id"
-
-[[kv_namespaces]]
-binding = "SESSIONS"
-id = "your-kv-id"
-
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "meadowlark-uploads"
-
-# 预发布环境
-[env.staging]
-name = "meadowlark-staging"
-vars = { APP_NAME = "云雀旅行（预发布）" }
-</pre>
-</div>
-
-<div class="code" data-lang="bash">
-<pre>
-# 本地开发（会模拟 D1、KV、R2）
-npx wrangler dev
-
-# 设置密钥（不会写进配置文件）
-npx wrangler secret put COOKIE_SECRET
-npx wrangler secret put RESEND_API_KEY
-
-# 应用数据库迁移
-npx wrangler d1 migrations apply meadowlark --remote
-
-# 部署
-npx wrangler deploy                    # 生产
-npx wrangler deploy --env staging      # 预发布
-
-# 看线上日志
-npx wrangler tail
-</pre>
-</div>
-
-<p>绑定自定义域名：在 Cloudflare 控制台把域名加进来，然后在 Workers 的 Triggers 里添加路由，
-或者直接在配置里声明：</p>
-
-<div class="code" data-lang="toml">
-<pre>
-routes = [
-  { pattern = "meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" },
-  { pattern = "www.meadowlarktravel.com/*", zone_name = "meadowlarktravel.com" }
-]
-</pre>
-</div>
-
-<h2 id="node">部署到 Node 服务器</h2>
-
-<div class="code" data-lang="ts" data-file="src/server.ts">
-<pre>
-import { serve } from '@hono/node-server'
-import { app } from './app'
-
-const port = Number(process.env.PORT) || 3000
-
-const server = serve({ fetch: app.fetch, port }, (info) =&gt; {
-  console.log(`服务器已启动：http://localhost:${info.port}`)
-})
-
-// 优雅关闭：让手头的请求处理完再退出
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(signal, () =&gt; {
-    console.log(`收到 ${signal}，正在关闭`)
-    server.close(() =&gt; process.exit(0))
-    setTimeout(() =&gt; process.exit(1), 10_000).unref()
+  // ③ 干活
+  const html = renderEmail(&lt;OrderConfirmationEmail order={order} /&gt;)
+  await createMailer(env).send({
+    to: task.email,
+    subject: `预订确认 · ${order.number}`,
+    html,
+    text: htmlToText(html),
   })
 }
 </pre>
 </div>
 
-<div class="code" data-lang="text" data-file="Dockerfile">
-<pre>
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
+<h2 id="node-queue">实现：Node.js 上用 BullMQ</h2>
 
-FROM node:20-alpine
-WORKDIR /app
-ENV NODE_ENV=production
-COPY package*.json ./
-RUN npm ci --omit=dev &amp;&amp; npm cache clean --force
-COPY --from=build /app/dist ./dist
-COPY public ./public
-USER node
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD node -e "fetch('http://localhost:3000/health').then(r=&gt;process.exit(r.ok?0:1)).catch(()=&gt;process.exit(1))"
-CMD ["node", "dist/server.js"]
+<p>如果你部署在传统服务器上，BullMQ（基于 Redis）是最成熟的选择：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install bullmq ioredis
 </pre>
 </div>
 
-<p>前面放一个反向代理来终止 TLS。Caddy 的配置短得离谱，而且自动申请续期证书：</p>
-
-<div class="code" data-lang="text" data-file="Caddyfile">
+<div class="code" data-lang="ts" data-file="src/tasks/queue.ts">
 <pre>
-meadowlarktravel.com, www.meadowlarktravel.com {
-    reverse_proxy localhost:3000
-    encode gzip zstd
+import { Queue } from 'bullmq'
+import IORedis from 'ioredis'
+
+const connection = new IORedis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,        // BullMQ 要求
+})
+
+export const taskQueue = new Queue&lt;Task&gt;('meadowlark-tasks', {
+  connection,
+  defaultJobOptions: {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { age: 3600, count: 1000 },   // 别让 Redis 无限增长
+    removeOnFail: { age: 7 * 24 * 3600 },           // 失败的多留几天用于排查
+  },
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/tasks/worker.ts">
+<pre>
+import { Worker } from 'bullmq'
+import { handleTask } from './handlers'
+
+// 注意：这是一个独立的进程，和 Web 服务分开部署
+const worker = new Worker&lt;Task&gt;(
+  'meadowlark-tasks',
+  async (job) =&gt; {
+    await handleTask(job.data)
+  },
+  { connection, concurrency: 5 }     // 同时处理 5 个任务
+)
+
+worker.on('failed', (job, err) =&gt; {
+  console.error('任务失败', { id: job?.id, attempts: job?.attemptsMade, err: err.message })
+  if (job &amp;&amp; job.attemptsMade &gt;= (job.opts.attempts ?? 1)) {
+    reportToSentry(err, { taskId: job.id, data: job.data })   // 彻底失败了才告警
+  }
+})
+
+// 优雅关闭：让正在处理的任务做完
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(sig, async () =&gt; {
+    await worker.close()
+    process.exit(0)
+  })
 }
 </pre>
 </div>
 
-<h2 id="others">其他运行时</h2>
+<div class="box note">
+  <div class="t">&#9432; Worker 是独立进程</div>
+  <p>
+    别把 Worker 塞进 Web 服务的同一个进程里。分开的好处：
+    可以独立扩容（Web 开 2 个实例，Worker 开 10 个）、
+    重任务不会抢占 Web 的 CPU、Worker 崩了不影响用户访问。<br>
+    部署上就是两条命令：<code>node dist/server.js</code> 和 <code>node dist/worker.js</code>。
+  </p>
+</div>
+
+<h2 id="retry">重试、退避与死信队列</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="任务重试与死信队列的流程">
+  <rect class="bx-a" x="300" y="20" width="160" height="40" rx="8"/>
+  <text class="ttl on-a" x="380" y="45" text-anchor="middle">消费任务</text>
+
+  <path class="ln-g" d="M300 40 H200 V72" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="240" y="34">成功</text>
+  <rect class="bx-g" x="120" y="76" width="160" height="36" rx="8"/>
+  <text class="sm on-g" x="200" y="99" text-anchor="middle">ack，任务结束</text>
+
+  <path class="ln-r" d="M460 40 H560 V72" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="516" y="34">失败</text>
+
+  <rect class="bx-r" x="470" y="76" width="180" height="36" rx="8"/>
+  <text class="sm on-r" x="560" y="99" text-anchor="middle">重试次数 &lt; 上限？</text>
+
+  <path class="ln-a" d="M470 94 H400 V128 H386" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="432" y="88">是</text>
+
+  <rect class="bx-a" x="200" y="116" width="186" height="60" rx="8"/>
+  <text class="sm on-a" x="293" y="138" text-anchor="middle">等待后重新投递</text>
+  <text class="mono sm" x="293" y="158" text-anchor="middle">10s → 20s → 40s → 80s</text>
+  <text class="sm" x="293" y="172" text-anchor="middle">指数退避 + 抖动</text>
+
+  <path class="ln-a" d="M293 114 V70 H300" marker-end="url(#ar-a)"/>
+
+  <path class="ln-r" d="M560 116 V152" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="580" y="136">否</text>
+
+  <rect class="bx-r" x="450" y="156" width="220" height="56" rx="8"/>
+  <text class="ttl on-r" x="560" y="178" text-anchor="middle">死信队列（DLQ）</text>
+  <text class="sm" x="560" y="198" text-anchor="middle">不再自动重试，等人来看</text>
+
+  <rect class="bx-d" x="60" y="228" width="640" height="44" rx="8"/>
+  <text class="sm" x="380" y="250" text-anchor="middle">DLQ 有消息 = 需要人工介入的信号。<tspan class="on-r">给它配告警</tspan> ——</text>
+  <text class="sm" x="380" y="266" text-anchor="middle">没人看的死信队列，和没有死信队列是一样的（见第 24 章「隐形故障」）</text>
+</svg>
+<figcaption>图 21-4　重试处理临时故障，死信队列兜住永久故障</figcaption>
+</figure>
+
+<h3>区分两种失败</h3>
 
 <div class="code" data-lang="ts">
 <pre>
-// Bun
-export default { port: 3000, fetch: app.fetch }
+class PermanentTaskError extends Error {}     // 重试也没用
 
-// Deno
-Deno.serve({ port: 3000 }, app.fetch)
+async function sendOrderEmail(task: Task, env: Bindings) {
+  const order = await getOrder(env.DB, task.orderId)
 
-// Vercel（api/[[...route]].ts）
-import { handle } from 'hono/vercel'
-export default handle(app)
+  // 订单不存在 —— 重试一万次也不会存在。直接放弃，不算失败
+  if (!order) {
+    console.warn('订单已不存在，跳过任务', task.orderId)
+    return
+  }
 
-// AWS Lambda
-import { handle } from 'hono/aws-lambda'
-export const handler = handle(app)
+  // 邮箱格式非法 —— 永久错误，重试无意义
+  if (!isValidEmail(task.email)) {
+    throw new PermanentTaskError(`邮箱格式非法：${task.email}`)
+  }
+
+  // 邮件服务 503 —— 临时故障，值得重试
+  await mailer.send({ ... })    // 抛普通 Error
+}
 </pre>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 这就是第 1 章说的「通用」</div>
-  <p>
-    上面每一段都只有一两行，而 <code>app</code> 本身完全没变。
-    你在第 3 到 20 章写的所有业务代码，在这五个平台上都能跑。
-  </p>
-</div>
-
-<h2 id="cicd">自动化发布</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="CI/CD 流水线">
-  <rect class="bx-b" x="20" y="30" width="110" height="46" rx="8"/>
-  <text class="sm" x="75" y="50" text-anchor="middle">推送到</text>
-  <text class="sm" x="75" y="66" text-anchor="middle">功能分支</text>
-
-  <path class="ln" d="M134 53 H190" marker-end="url(#ar)"/>
-  <rect class="bx" x="194" y="30" width="130" height="46" rx="8"/>
-  <text class="sm" x="259" y="50" text-anchor="middle">CI 检查</text>
-  <text class="sm" x="259" y="66" text-anchor="middle">lint · 类型 · 测试</text>
-
-  <path class="ln" d="M328 53 H384" marker-end="url(#ar)"/>
-  <rect class="bx-p" x="388" y="30" width="140" height="46" rx="8"/>
-  <text class="sm on-p" x="458" y="50" text-anchor="middle">预览环境</text>
-  <text class="sm" x="458" y="66" text-anchor="middle">每个 PR 一个地址</text>
-
-  <path class="ln" d="M532 53 H588" marker-end="url(#ar)"/>
-  <rect class="bx" x="592" y="30" width="140" height="46" rx="8"/>
-  <text class="sm" x="662" y="50" text-anchor="middle">代码评审</text>
-  <text class="sm" x="662" y="66" text-anchor="middle">人来看</text>
-
-  <path class="ln-a" d="M662 80 V106 H75 V130" marker-end="url(#ar-a)"/>
-  <text class="sm on-a" x="380" y="100" text-anchor="middle">合并到 main</text>
-
-  <rect class="bx-a" x="20" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="85" y="154" text-anchor="middle">跑迁移</text>
-  <text class="sm" x="85" y="170" text-anchor="middle">数据库先行</text>
-
-  <path class="ln-a" d="M154 157 H210" marker-end="url(#ar-a)"/>
-  <rect class="bx-a" x="214" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="279" y="154" text-anchor="middle">部署预发布</text>
-
-  <path class="ln-a" d="M348 157 H404" marker-end="url(#ar-a)"/>
-  <rect class="bx-a" x="408" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-a" x="473" y="154" text-anchor="middle">冒烟测试</text>
-
-  <path class="ln-g" d="M542 157 H598" marker-end="url(#ar)"/>
-  <rect class="bx-g" x="602" y="134" width="130" height="46" rx="8"/>
-  <text class="sm on-g" x="667" y="154" text-anchor="middle">部署生产</text>
-  <text class="sm" x="667" y="170" text-anchor="middle">&#127881;</text>
-
-  <text class="sm on-r" x="380" y="206" text-anchor="middle">任何一步失败 → 停止，不部署，通知作者</text>
-</svg>
-<figcaption>图 21-2　把「发布」变成一条自动流水线</figcaption>
-</figure>
-
-<div class="code" data-lang="yaml" data-file=".github/workflows/deploy.yml">
+<div class="code" data-lang="ts">
 <pre>
-name: Deploy
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run build
-
-      - name: 应用数据库迁移
-        run: npx wrangler d1 migrations apply meadowlark --remote
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: 部署
-        run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: 冒烟测试
-        run: |
-          sleep 10
-          curl -sf https://meadowlarktravel.com/health || exit 1
+// 在消费者里区别对待
+try {
+  await handleTask(msg.body, env)
+  msg.ack()
+} catch (err) {
+  if (err instanceof PermanentTaskError) {
+    console.error('永久失败，不重试', { taskId: msg.body.id, err: err.message })
+    reportToSentry(err, { task: msg.body })
+    msg.ack()          // ← 确认掉，别让它一直重试浪费资源
+    continue
+  }
+  msg.retry({ delaySeconds: backoff(msg.attempts) })
+}
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 数据库迁移必须向后兼容</div>
+  <div class="t">&#9888; 「毒丸消息」</div>
   <p>
-    部署过程中，会有一小段时间是<strong>新旧两个版本同时在跑</strong>。
-    如果迁移直接删掉了一个列，旧版本代码立刻报错。<br>
-    <strong>安全的做法是分两次发布：</strong><br>
-    ① 先加新列，新旧代码都能跑 → 部署新代码 → 确认稳定<br>
-    ② 下次发布再删旧列<br>
-    麻烦，但这是零停机发布的必要代价。
+    如果一个任务因为数据格式问题<strong>永远</strong>会失败，而你又无限重试，
+    它会一直占用消费能力，拖慢所有其他任务 —— 这叫毒丸消息。<br>
+    防御手段就是上面两条：<strong>设置重试上限</strong>（必须有）+ <strong>识别永久错误直接 ack</strong>。
   </p>
 </div>
 
-<h2 id="checklist">上线检查清单</h2>
+<h2 id="cron">定时任务</h2>
+
+<div class="code" data-lang="toml" data-file="wrangler.toml">
+<pre>
+[triggers]
+crons = [
+  "*/15 * * * *",     # 每 15 分钟：刷新天气缓存
+  "0 3 * * *",        # 每天凌晨 3 点：清理过期会话
+  "0 9 * * 1",        # 每周一上午 9 点：发周报
+]
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+export default {
+  fetch: app.fetch,
+  queue: handleQueue,
+
+  async scheduled(event: ScheduledController, env: Bindings, ctx: ExecutionContext) {
+    switch (event.cron) {
+      case '*/15 * * * *':
+        ctx.waitUntil(refreshWeatherCache(env))
+        break
+      case '0 3 * * *':
+        ctx.waitUntil(cleanupExpiredSessions(env))
+        break
+      case '0 9 * * 1':
+        // 周报要给几千人发 —— 定时任务里不直接发，而是投递任务
+        ctx.waitUntil(enqueueWeeklyReports(env))
+        break
+    }
+  },
+}
+</pre>
+</div>
 
 <div class="box key">
-  <div class="t">&#9733; 第一次上线前逐项确认</div>
+  <div class="t">&#9733; 定时任务负责「决定要做什么」，队列负责「做」</div>
+  <p>
+    定时任务有执行时间上限，而且失败了要等下一个周期。所以它不该自己去做几千件事。<br>
+    正确的分工：<strong>定时任务扫一遍数据库，把要做的事拆成 N 个任务投进队列</strong>，
+    然后立刻结束。队列负责慢慢消化、单独重试失败的那几个。<br>
+    这样一个用户的邮件发失败，不会影响其余 4999 个。
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+async function enqueueWeeklyReports(env: Bindings) {
+  let cursor: string | undefined
+
+  do {
+    // 一定要分页，别一次性把几万条读进内存
+    const page = await getSubscribers(env.DB, { cursor, limit: 500 })
+
+    await env.TASKS.sendBatch(
+      page.items.map((u) =&gt; ({
+        body: newTask('send-weekly-report', { userId: u.id, week: currentWeek() }),
+      }))
+    )
+
+    cursor = page.nextCursor
+  } while (cursor)
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 定时任务可能重复执行</div>
+  <p>
+    平台通常只保证「至少执行一次」。而且多实例部署时，如果用的是自己实现的定时器
+    （比如 <code>node-cron</code>），<strong>每个实例都会各跑一遍</strong>。<br>
+    对策：任务本身幂等，或者用一把带日期的「执行锁」——
+    <code>INSERT INTO cron_runs (job, date) VALUES ('weekly-report', '2026-09-07')</code>，
+    靠唯一约束保证一天只有一个实例能插进去。
+  </p>
+</div>
+
+<h2 id="ux">用户界面怎么配合</h2>
+
+<p>
+  异步带来一个新问题：用户提交后，事情还没做完。界面要诚实地反映这一点。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>场景</th><th>做法</th></tr>
+  <tr><td>用户不关心结果（埋点、同步 CRM）</td><td>什么都不说，正常返回</td></tr>
+  <tr><td>用户知道会晚一点（确认邮件）</td><td>文案说明：「确认邮件将在几分钟内送达」</td></tr>
+  <tr><td>用户要等结果（生成报表、AI 处理）</td><td>返回任务 ID，前端轮询状态；或用 SSE 推送进度</td></tr>
+  <tr><td>结果可能失败（导入文件）</td><td>做一个「任务列表」页面，显示状态、失败原因、重试按钮</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 返回任务 ID，让前端能查进度
+app.post('/api/v1/reports', async (c) =&gt; {
+  const jobId = crypto.randomUUID()
+  await db.insert(jobs).values({ id: jobId, status: 'queued', createdAt: new Date() })
+  await c.env.TASKS.send(newTask('generate-report', { jobId, ...params }))
+
+  return c.json({ jobId, status: 'queued' }, 202)   // 202 Accepted：已受理，尚未完成
+})
+
+app.get('/api/v1/jobs/:id', async (c) =&gt; {
+  const job = await getJob(c.env.DB, c.req.param('id'))
+  if (!job) throw new HTTPException(404, { message: '任务不存在' })
+  return c.json({ status: job.status, progress: job.progress, resultUrl: job.resultUrl })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 202 这个状态码就是为此而生的</div>
+  <p>
+    <code>200 OK</code> 的语义是「做完了，这是结果」。<br>
+    <code>202 Accepted</code> 的语义是「收到了，会去做，但还没做完」。<br>
+    异步接口用 202，配上一个能查询状态的 URL，是 REST 里的标准做法。
+  </p>
+</div>
+
+<h2 id="dont">什么时候不该用队列</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 队列不是免费的</div>
+  <p>
+    它引入了一个新组件（要部署、要监控、要付费）、一套新的故障模式（积压、毒丸、重复消费）、
+    以及调试难度（日志分散在两个进程里）。<strong>不要默认所有东西都走队列。</strong>
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>不该用的情况</th><th>为什么 / 改用什么</th></tr>
+  <tr>
+    <td>操作只要 20 ms</td>
+    <td>投递本身就要 10 ms，还多了一堆复杂度。直接同步做</td>
+  </tr>
+  <tr>
+    <td>用户必须立刻看到结果</td>
+    <td>异步做完还要轮询，总时长反而更长，体验更差</td>
+  </tr>
+  <tr>
+    <td>需要严格的顺序执行</td>
+    <td>大多数队列不保证全局顺序。要顺序就用单分区/单消费者，但那就失去了扩容能力</td>
+  </tr>
+  <tr>
+    <td>任务失败必须让用户当场知道</td>
+    <td>异步失败时用户早就走了。这类操作应该同步做，让用户看到错误</td>
+  </tr>
+  <tr>
+    <td>整个项目只有一个异步需求</td>
+    <td><code>waitUntil</code> + 一张重试表可能就够了，先别上队列</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="observe">让队列可观测</h2>
+
+<p>队列最容易出的问题是<strong>悄悄积压</strong>：一切看起来正常，只是邮件晚了六个小时。</p>
+
+<div class="box key">
+  <div class="t">&#9733; 至少监控这四个指标</div>
   <ul>
-    <li>☐ 域名解析正确，<code>www</code> 和根域名都能访问（且互相跳转统一）</li>
-    <li>☐ HTTPS 生效，HTTP 自动跳转（第 18 章）</li>
-    <li>☐ 所有环境变量和密钥都在生产环境配好了</li>
-    <li>☐ 数据库迁移已应用，种子数据已就位</li>
-    <li>☐ <code>NODE_ENV=production</code></li>
-    <li>☐ 404 和 500 页面是自定义的，不泄露内部信息</li>
-    <li>☐ <code>/health</code> 端点正常，已接入外部可用性监控（第 12 章）</li>
-    <li>☐ 错误上报已接通，故意触发一次确认能收到</li>
-    <li>☐ 有 <code>robots.txt</code> 和 <code>sitemap.xml</code></li>
-    <li>☐ favicon、Open Graph 标签（分享到社交平台时的预览图）</li>
-    <li>☐ 数据库有自动备份，<strong>并且你恢复演练过一次</strong></li>
-    <li>☐ 知道怎么回滚，而且演练过</li>
+    <li><strong>队列深度</strong> —— 待处理任务数。持续增长 = 消费能力不够，该扩容了</li>
+    <li><strong>任务年龄</strong> —— 最老的任务等了多久。比深度更能反映用户感受</li>
+    <li><strong>失败率</strong> —— 突然上升通常意味着某个下游服务出问题了</li>
+    <li><strong>死信队列长度</strong> —— <strong>只要不是 0 就该告警</strong></li>
   </ul>
 </div>
 
-<div class="box warn">
-  <div class="t">&#9888; 没验证过的备份等于没有备份</div>
-  <p>
-    「我们有每日备份」这句话在真正需要恢复时经常变成
-    「备份文件是空的 / 格式不对 / 三个月前就停了没人发现」。<br>
-    <strong>现在就做一次恢复演练</strong>：把备份还原到一个临时数据库，确认数据完整。
-  </p>
-</div>
-
-<h2 id="rollback">回滚</h2>
-
-<div class="code" data-lang="bash">
+<div class="code" data-lang="ts">
 <pre>
-# Cloudflare Workers：回到上一个版本
-npx wrangler rollback
-
-# Docker：换回上一个镜像标签
-docker compose up -d --no-deps app:v1.4.2
-
-# Git：撤销那次合并（保留历史，比 reset 安全）
-git revert -m 1 &lt;merge-commit&gt;
-git push
+// 在消费者里打结构化日志（第 12 章）
+async function handleTask(task: Task, env: Bindings) {
+  const start = Date.now()
+  try {
+    await dispatch(task, env)
+    log('info', 'task_done', {
+      taskId: task.id,
+      type: task.type,
+      durationMs: Date.now() - start,
+      // 从投递到完成的总延迟 —— 这才是用户实际等待的时间
+      latencyMs: Date.now() - task.createdAt,
+    })
+  } catch (err) {
+    log('error', 'task_failed', { taskId: task.id, type: task.type, error: String(err) })
+    throw err
+  }
+}
 </pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 出问题时先回滚，再排查</div>
-  <p>
-    线上出故障时，本能反应是「让我看看哪里错了」。<br>
-    正确的顺序是：<strong>先回滚，恢复服务，然后再慢慢查</strong>。
-    用户不关心原因，只关心网站能不能用。而且回滚之后你可以在没有压力的情况下分析。<br>
-    <em>前提是回滚必须很快很可靠 —— 所以要提前演练。</em>
-  </p>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>DNS 把域名映射到服务器；迁移前先把 TTL 调小。</li>
-  <li>需不需要文件系统和长任务，决定了你该用边缘平台还是容器平台。</li>
-  <li>Hono 换平台只改入口文件，业务代码不动。</li>
-  <li>发布要自动化：检查 → 迁移 → 部署 → 冒烟测试。</li>
-  <li>数据库迁移必须向后兼容，删列要等下一次发布。</li>
-  <li>回滚和备份恢复都要<strong>演练过</strong>才算数。出故障时先回滚再排查。</li>
+  <li>问「用户看到响应时这件事必须完成吗」，不必须的就移出请求路径。</li>
+  <li>队列的最大价值不是快，是<strong>把外部依赖的可用性和核心业务解耦</strong>。</li>
+  <li>三种手段：<code>waitUntil</code>（丢了无所谓）、队列（不能丢）、定时任务（周期性）。</li>
+  <li><strong>至少一次投递 ⇒ 消费者必须幂等</strong>。这是硬性要求，不是可选项。</li>
+  <li>任务里放 ID 不放数据，执行时取最新状态。</li>
+  <li>区分临时失败（重试）和永久失败（直接 ack + 告警），设置重试上限防毒丸。</li>
+  <li>定时任务只负责「拆任务投队列」，不自己做几千件事。</li>
+  <li>异步接口返回 202 + 任务 ID；死信队列非空必须告警。</li>
+  <li>操作很快、用户要等结果、需要严格顺序 —— 这三种情况别用队列。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>用 <code>dig meadowlarktravel.com</code>（或 <code>nslookup</code>）查一个你熟悉的网站，看看它的 A 记录、CNAME 和 TTL。</li>
-    <li>把云雀旅行部署到 Cloudflare Workers 的免费额度上，绑定一个你自己的域名（或者用平台提供的 <code>*.workers.dev</code>）。</li>
-    <li>配一条 GitHub Actions 流水线：推送到 main 就自动跑测试并部署。故意让一个测试失败，确认它<strong>没有</strong>部署。</li>
-    <li>做一次回滚演练：部署一个明显有问题的版本，然后用 <code>wrangler rollback</code> 恢复，计时看要多久。</li>
-    <li>对照上线清单，把你项目里还没做的项列出来。</li>
+    <li>把第 11 章的确认邮件改成异步：下单接口只写库 + 投递任务，用 <code>curl -w '%{time_total}'</code> 对比改造前后的响应时间。</li>
+    <li>故意让邮件服务返回 500，观察任务被重试的过程（看日志里的 <code>attempt</code> 递增）。确认下单接口本身<strong>没有</strong>受影响。</li>
+    <li>把同一个任务手动投递两次，确认只发出一封邮件。如果发了两封，说明幂等没做对。</li>
+    <li>制造一个「毒丸」：投递一个 email 字段为 <code>null</code> 的任务。它会被重试几次？加上 <code>PermanentTaskError</code> 后呢？</li>
+    <li>加一个定时任务，每 15 分钟刷新一次第 19 章的天气缓存。想一想：如果同时有 3 个实例在跑，会发生什么？怎么防？</li>
+    <li>做一个 <code>/api/v1/reports</code> 接口，返回 202 + 任务 ID，再做一个查询状态的接口。前端用轮询显示进度。</li>
   </ol>
 </div>
 

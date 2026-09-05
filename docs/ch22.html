@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 22 章 · 维护 — Hono 全栈开发教程</title>
+<title>第 22 章 · 调试 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="22">
@@ -12,444 +12,453 @@
 <main>
 
 <span class="chapter-eyebrow">第 22 章</span>
-<h1>维护</h1>
+<h1>调试</h1>
 <p class="lede">
-  上线不是终点。一个项目八成的生命周期是在上线之后度过的。
-  这一章讲怎么让它活过三年 —— 而不是变成一个没人敢碰的黑箱。
+  调试的核心不是工具，是方法。这一章先讲一条能用一辈子的原则，
+  再给出 Hono 项目里最常见故障的速查表。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>为项目制定一个符合实际的长期计划</li>
-    <li>建立依赖更新的日常节奏，避免「三年不动，一动就崩」</li>
-    <li>识别并处理技术债</li>
-    <li>让「隐形故障」显形</li>
-    <li>把重复的代码提炼成可复用的中间件和库</li>
+    <li>掌握「二分缩小范围」这个通用调试方法</li>
+    <li>用好 <code>console</code> 里那些你可能没用过的方法</li>
+    <li>用调试器打断点，而不是到处加打印</li>
+    <li>调试异步代码和中间件顺序问题</li>
+    <li>会用 Hono 的诊断工具定位路由问题</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="plan">先想清楚这个项目要活多久</h2>
+<h2 id="principle">第一原则：缩小范围</h2>
 
 <p>
-  不同寿命的项目，值得投入的维护成本完全不同。上线前就该说清楚：
+  面对一个 bug，最没效率的做法是盯着代码想「哪里错了」。
+  最有效的做法是<strong>系统地把「可能出错的范围」一次次砍半</strong>，直到只剩几行。
 </p>
 
-<div class="tw">
-<table>
-  <tr><th>类型</th><th>预期寿命</th><th>该做什么</th></tr>
-  <tr>
-    <td>活动页 / 一次性项目</td>
-    <td>几周到几个月</td>
-    <td>写好下线日期。<strong>到期真的下线</strong>，不要让它变成没人管的僵尸</td>
-  </tr>
-  <tr>
-    <td>内部工具</td>
-    <td>一到三年</td>
-    <td>基本的测试和文档。明确写出「谁负责」</td>
-  </tr>
-  <tr>
-    <td>核心产品</td>
-    <td>多年</td>
-    <td>完整的测试、监控、依赖更新流程、值班机制</td>
-  </tr>
-</table>
-</div>
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="二分法缩小问题范围">
+  <rect class="bx-r" x="20" y="24" width="720" height="34" rx="6"/>
+  <text class="sm on-r" x="380" y="46" text-anchor="middle">「订单页面报错了」—— 可能出错的地方：整个应用</text>
+
+  <path class="ln-d" d="M380 62 V78" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="120" y="82" width="520" height="34" rx="6"/>
+  <text class="sm on-a" x="380" y="104" text-anchor="middle">问：接口返回的数据对吗？→ 对。所以问题在前端渲染</text>
+
+  <path class="ln-d" d="M380 120 V136" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="200" y="140" width="360" height="34" rx="6"/>
+  <text class="sm on-b" x="380" y="162" text-anchor="middle">问：数据传进组件了吗？→ 传了，但 total 是 undefined</text>
+
+  <path class="ln-d" d="M380 178 V194" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="270" y="198" width="220" height="34" rx="6"/>
+  <text class="sm on-g" x="380" y="220" text-anchor="middle">找到了：字段名拼成了 totle</text>
+</svg>
+<figcaption>图 22-1　每一步都在把范围砍半，而不是随机猜测</figcaption>
+</figure>
 
 <div class="box key">
-  <div class="t">&#9733; 「没有计划」也是一种计划，而且是最糟的那种</div>
-  <p>
-    最常见的情况是：一个「临时」项目上线了，三年后它变成了业务关键系统，
-    但从来没人给过它测试、文档或维护预算。原作者早就离职了，
-    没人知道它怎么部署，也没人敢改它。<br>
-    <strong>在 README 里写一句「这个项目预期服务到 X 时间，负责人是 Y」，
-    成本是一分钟，价值是三年。</strong>
-  </p>
+  <div class="t">&#9733; 调试前先回答四个问题</div>
+  <ol>
+    <li><strong>能稳定复现吗？</strong>不能稳定复现的 bug，无法验证是否修好了。先花时间找到复现步骤。</li>
+    <li><strong>最小复现是什么？</strong>把无关的部分一点点删掉，直到删任何一行 bug 就消失。
+        这个过程本身经常就把原因暴露出来了。</li>
+    <li><strong>最后一次正常是什么时候？</strong><code>git bisect</code> 能在几十次提交里用几步定位到引入问题的那次提交。</li>
+    <li><strong>我假设了什么？</strong>Bug 几乎总是藏在你「觉得肯定没问题」的地方。把假设一条条验证。</li>
+  </ol>
 </div>
-
-<h2 id="deps">依赖更新</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="定期小更新与长期不更新的对比">
-  <rect class="bx-g" x="20" y="20" width="345" height="180" rx="10"/>
-  <text class="ttl on-g" x="192" y="44" text-anchor="middle">每周花 15 分钟</text>
-  <text class="sm" x="36" y="72">每次只升几个小版本</text>
-  <text class="sm" x="36" y="94">改动小，出问题一眼能看出是谁</text>
-  <text class="sm" x="36" y="116">CHANGELOG 短，读得完</text>
-  <text class="sm" x="36" y="138">出事了容易回滚</text>
-  <text class="sm on-g" x="36" y="168">安全补丁及时到位</text>
-  <text class="sm on-g" x="36" y="188">年成本：约 13 小时</text>
-
-  <rect class="bx-r" x="395" y="20" width="345" height="180" rx="10"/>
-  <text class="ttl on-r" x="567" y="44" text-anchor="middle">两年不动一次</text>
-  <text class="sm" x="411" y="72">几十个包跨了多个大版本</text>
-  <text class="sm" x="411" y="94">破坏性变更堆在一起</text>
-  <text class="sm" x="411" y="116">升级 A 要求先升 B，B 又和 C 冲突</text>
-  <text class="sm" x="411" y="138">出了问题不知道是哪个包引起的</text>
-  <text class="sm on-r" x="411" y="168">期间一直带着已知漏洞在跑</text>
-  <text class="sm on-r" x="411" y="188">一次成本：两周起，而且很痛苦</text>
-</svg>
-<figcaption>图 22-1　依赖更新的成本不是线性的，是指数的</figcaption>
-</figure>
 
 <div class="code" data-lang="bash">
 <pre>
-# 看看有哪些可以升
-npm outdated
-
-# 安全漏洞
-npm audit
-npm audit fix
-
-# 交互式升级（推荐，能看清每个包跨了几个版本）
-npx npm-check-updates -i
+# git bisect：在 100 次提交里，7 次就能定位
+git bisect start
+git bisect bad                  # 当前版本有问题
+git bisect good v1.2.0          # 这个版本是好的
+# Git 会自动切到中间某次提交，你测试后告诉它 good 还是 bad
+git bisect good
+git bisect bad
+# ...重复几次
+git bisect reset
 </pre>
 </div>
 
-<p>更好的做法是让机器人来提醒你。GitHub 自带的 Dependabot 配一个文件就行：</p>
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="按层排查：每一层用什么工具">
+  <text class="ttl" x="20" y="22">一个请求经过五层，每一层都有专门的观察工具</text>
 
-<div class="code" data-lang="yaml" data-file=".github/dependabot.yml">
+  <rect class="bx-b" x="20" y="36" width="470" height="42" rx="8"/>
+  <text class="ttl on-b" x="36" y="62">① 浏览器</text>
+  <text class="sm" x="150" y="62">DOM 对吗？脚本报错了吗？</text>
+  <rect class="bx-d" x="502" y="36" width="238" height="42" rx="8"/>
+  <text class="sm" x="516" y="62">开发者工具 Console / Elements</text>
+
+  <rect class="bx-b" x="20" y="88" width="470" height="42" rx="8"/>
+  <text class="ttl on-b" x="36" y="114">② 网络</text>
+  <text class="sm" x="150" y="114">请求发出去了吗？状态码和响应头对吗？</text>
+  <rect class="bx-d" x="502" y="88" width="238" height="42" rx="8"/>
+  <text class="sm" x="516" y="114">Network 面板 · curl -v</text>
+
+  <rect class="bx-a" x="20" y="140" width="470" height="42" rx="8"/>
+  <text class="ttl on-a" x="36" y="166">③ 路由与中间件</text>
+  <text class="sm" x="180" y="166">匹配到哪条路由？哪些中间件跑了？</text>
+  <rect class="bx-d" x="502" y="140" width="238" height="42" rx="8"/>
+  <text class="sm" x="516" y="166">showRoutes() · c.req.routePath</text>
+
+  <rect class="bx-p" x="20" y="192" width="470" height="42" rx="8"/>
+  <text class="ttl on-p" x="36" y="218">④ 处理函数</text>
+  <text class="sm" x="150" y="218">变量的值是什么？走了哪个分支？</text>
+  <rect class="bx-d" x="502" y="192" width="238" height="42" rx="8"/>
+  <text class="sm" x="516" y="218">断点 · console.table</text>
+
+  <rect class="bx-g" x="20" y="244" width="470" height="42" rx="8"/>
+  <text class="ttl on-g" x="36" y="270">⑤ 数据与外部服务</text>
+  <text class="sm" x="200" y="270">查询返回了什么？第三方超时了吗？</text>
+  <rect class="bx-d" x="502" y="244" width="238" height="42" rx="8"/>
+  <text class="sm" x="516" y="270">SQL 客户端 · EXPLAIN · 日志</text>
+</svg>
+<figcaption>图 22-2　定位问题的第一步是判断「它坏在第几层」</figcaption>
+</figure>
+
+<h2 id="console">console 不只有 log</h2>
+
+<div class="code" data-lang="ts">
 <pre>
-version: 2
-updates:
-  - package-ecosystem: npm
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # 把小版本更新合并成一个 PR，减少噪音
-      minor-and-patch:
-        update-types: ["minor", "patch"]
+// 表格：看数组对象的神器
+console.table(vacations)
+// ┌─────────┬─────────┬──────────────────┬────────┐
+// │ (index) │   sku   │       name       │ price  │
+// ├─────────┼─────────┼──────────────────┼────────┤
+// │    0    │ 'HR199' │  '胡德河一日游'   │ 99.95  │
+// └─────────┴─────────┴──────────────────┴────────┘
+
+// 分组：让大量日志有层次
+console.group('处理订单 ' + orderId)
+console.log('用户：', userId)
+console.log('商品数：', items.length)
+console.groupEnd()
+
+// 计时
+console.time('查询数据库')
+const rows = await db.select().from(vacations)
+console.timeEnd('查询数据库')     // 查询数据库: 23.4ms
+
+// 断言：条件为假时才输出
+console.assert(total &gt; 0, '总价不应该是 0！', { cart })
+
+// 打印调用栈：搞清楚「这个函数是谁调的」
+console.trace('走到这里了')
+
+// 深层对象：默认只展开两层，这样能全部展开
+console.dir(config, { depth: null })
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 有测试，升级才敢点合并</div>
+  <div class="t">&#128161; 一个省时间的小技巧</div>
   <p>
-    Dependabot 开的 PR 会自动跑你的 CI。如果测试是绿的，
-    小版本更新基本可以直接合并；大版本更新则需要人工看 CHANGELOG。<br>
-    <strong>没有测试的项目，依赖更新只能靠祈祷。</strong>这是第 5 章那些测试的长期回报。
+    打印变量时用对象简写，这样输出里自带变量名：
   </p>
+  <div class="code" data-lang="ts"><pre>
+console.log(userId, cartTotal, itemCount)
+// → u_123 299.85 3        ← 哪个是哪个？
+
+console.log({ userId, cartTotal, itemCount })
+// → { userId: 'u_123', cartTotal: 299.85, itemCount: 3 }   ✓
+</pre></div>
 </div>
 
-<h3>Node 和运行时版本</h3>
+<h2 id="debugger">用调试器</h2>
 
 <p>
-  Node.js 的 LTS 版本大约 30 个月后停止支持。到期后不再有安全补丁 ——
-  这不是「可以拖一拖」的事。在 <code>package.json</code> 里声明你支持的版本，
-  并在日历上标好升级时间：
+  打印语句的问题是：你只能看到你想到要打印的东西。
+  调试器让你<strong>暂停程序，然后随便看任何变量</strong>。
 </p>
 
-<div class="code" data-lang="json">
+<div class="code" data-lang="bash">
+<pre>
+# 启动时开启调试端口
+node --inspect dist/server.js
+
+# 用 tsx 开发时
+npx tsx --inspect src/server.tsx
+
+# 在第一行就暂停（用于调试启动过程）
+node --inspect-brk dist/server.js
+</pre>
+</div>
+
+<p>然后打开 Chrome，访问 <code>chrome://inspect</code>，点击 「inspect」。</p>
+
+<p>更方便的是在 VS Code 里直接调试：</p>
+
+<div class="code" data-lang="json" data-file=".vscode/launch.json">
 <pre>
 {
-  "engines": { "node": "&gt;=20.0.0" }
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "调试 Hono 服务器",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "src/server.tsx"],
+      "console": "integratedTerminal",
+      "skipFiles": ["&lt;node_internals&gt;/**"],
+      "env": { "NODE_ENV": "development" }
+    },
+    {
+      "name": "调试当前测试文件",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vitest", "run", "${relativeFile}"],
+      "console": "integratedTerminal"
+    }
+  ]
 }
 </pre>
 </div>
 
-<h2 id="debt">技术债</h2>
+<div class="box key">
+  <div class="t">&#9733; 三种断点，各有用处</div>
+  <ul>
+    <li><strong>普通断点</strong> —— 点行号左边。程序跑到这里就停。</li>
+    <li><strong>条件断点</strong> —— 右键行号，输入条件。「只在 <code>sku === 'HR199'</code> 时停下」，
+        循环里调试必备。</li>
+    <li><strong>日志断点</strong> —— 右键选 Logpoint。不暂停，只打印一条消息。
+        相当于「临时加一行 <code>console.log</code>，但不用改代码，也不会忘了删」。</li>
+  </ul>
+</div>
 
-<p>
-  技术债不全是坏事。为了赶上线期而临时写的糙代码，是<strong>主动借的债</strong> ——
-  只要你记得它存在，并且打算还。
-</p>
+<h2 id="async">调试异步代码</h2>
 
 <div class="code" data-lang="ts">
 <pre>
-// TODO(2026-03): 支持多币种后要重构这里
-// FIXME: 大数据量下这个查询会超时，需要加分页。见 issue #142
-// HACK: 临时绕过第三方接口的 bug，对方修复后（预计 4 月）删掉这段
+// ❌ 忘了 await：错误堆栈里根本看不到这个函数
+async function handler(c) {
+  saveToDatabase(data)         // 返回的 Promise 没人管
+  return c.text('ok')
+}
+
+// ✅
+async function handler(c) {
+  await saveToDatabase(data)
+  return c.text('ok')
+}
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 不带上下文的 TODO 等于垃圾</div>
+  <div class="t">&#9888; 忘记 await 是最常见的异步 bug</div>
   <p>
-    <code>// TODO: 优化一下</code> —— 优化什么？谁写的？还需要吗？<br>
-    三年后没人敢删（万一有用呢），也没人会做（不知道要做什么）。<br>
-    <strong>每条 TODO 要包含：要做什么、为什么、什么时候、关联的 issue 编号。</strong>
-    做不到就别写，直接开个 issue。
+    症状五花八门：数据没保存但接口返回成功、日志顺序错乱、
+    偶发的「connection closed」、错误堆栈指向完全无关的地方。<br>
+    <strong>防御手段</strong>：开启 ESLint 的 <code>no-floating-promises</code> 规则
+    （需要 TypeScript 类型信息），它会在编译期就抓出所有没处理的 Promise。
   </p>
 </div>
 
-<h3>什么时候该还债</h3>
+<div class="code" data-lang="ts">
+<pre>
+// 让异步堆栈更完整
+process.on('unhandledRejection', (reason) =&gt; {
+  console.error('未处理的 Promise 拒绝：')
+  console.error(reason)
+})
+
+// 用 Error.cause 保留原始错误（不要把它吞掉）
+try {
+  await callExternalApi()
+} catch (err) {
+  throw new Error('获取天气数据失败', { cause: err })
+}
+</pre>
+</div>
+
+<h2 id="hono">Hono 专属排查</h2>
+
+<h3>看路由表</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+import { showRoutes } from 'hono/dev'
+
+if (process.env.NODE_ENV !== 'production') {
+  showRoutes(app, { verbose: true })
+}
+</pre>
+</div>
+
+<h3>看请求经过了哪些中间件</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 临时插在最外层
+app.use('*', async (c, next) =&gt; {
+  console.group(`&gt;&gt;&gt; ${c.req.method} ${c.req.path}`)
+  console.time('总耗时')
+  await next()
+  console.timeEnd('总耗时')
+  console.log('匹配的路由：', c.req.routePath)   // ← 关键：实际匹配到哪条
+  console.log('响应状态：', c.res.status)
+  console.groupEnd()
+})
+</pre>
+</div>
+
+<p>
+  <code>c.req.routePath</code> 特别有用：它告诉你<strong>实际匹配上的是哪条路由规则</strong>。
+  「我明明访问的是 <code>/vacations/new</code>，为什么走到了详情页」——
+  打印一下就会看到 <code>routePath</code> 是 <code>/vacations/:slug</code>，
+  于是知道是路由顺序问题（第 14 章）。
+</p>
+
+<h3>看真实的请求和响应</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# -v 显示完整的请求头和响应头
+curl -v http://localhost:3000/api/v1/vacations
+
+# 只看响应头
+curl -I http://localhost:3000/
+
+# 发 JSON
+curl -X POST http://localhost:3000/api/v1/vacations/HR199/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"a@example.com"}' -i
+
+# 带 Cookie
+curl -b 'sid=abc123' http://localhost:3000/account -i
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 分不清是前端还是后端的问题时，用 curl</div>
+  <p>
+    curl 绕过了浏览器的一切（缓存、Cookie、CORS、Service Worker、前端代码）。
+    如果 curl 结果正确而浏览器不对，问题一定在浏览器侧；反之在服务端。
+    <strong>一条命令就砍掉了一半的搜索范围。</strong>
+  </p>
+</div>
+
+<h2 id="cheatsheet">常见故障速查表</h2>
 
 <div class="tw">
 <table>
-  <tr><th>信号</th><th>说明</th></tr>
-  <tr><td>同一个地方反复出 bug</td><td>这里的设计有问题，不只是这次写错了</td></tr>
-  <tr><td>「改这个要小心，会牵一发动全身」</td><td>耦合太紧，该拆了</td></tr>
-  <tr><td>估一个小需求要三天</td><td>不是需求复杂，是代码在阻碍你</td></tr>
-  <tr><td>新人上手要两周</td><td>结构不清晰或文档缺失</td></tr>
-  <tr><td>没人敢碰某个文件</td><td>最危险的信号。它迟早会炸</td></tr>
+  <tr><th>症状</th><th>最可能的原因</th></tr>
+  <tr>
+    <td>中间件完全不生效</td>
+    <td>① 写在路由注册<strong>之后</strong>了；② 忘了调用工厂函数（<code>logger</code> 少了括号）；③ 路径模式不匹配</td>
+  </tr>
+  <tr>
+    <td>响应内容为空 / 请求挂住</td>
+    <td>处理函数忘了 <code>return</code>，或者中间件忘了 <code>await next()</code></td>
+  </tr>
+  <tr>
+    <td>「Body has already been read」</td>
+    <td>请求体读了两次。改成读一次存到变量里（第 6 章）</td>
+  </tr>
+  <tr>
+    <td>路由匹配错了</td>
+    <td>顺序问题。具体路径要写在通配和参数路由前面。用 <code>c.req.routePath</code> 确认（第 14 章）</td>
+  </tr>
+  <tr>
+    <td>写了路由但访问到静态文件</td>
+    <td><code>serveStatic</code> 在前面抢走了。检查 <code>public/</code> 里有没有同名文件（第 3 章）</td>
+  </tr>
+  <tr>
+    <td>浏览器报 CORS 错误</td>
+    <td>CORS 中间件没配、配在路由后面、或者 <code>origin</code> 写错了（第 15 章）</td>
+  </tr>
+  <tr>
+    <td>Cookie 设了但读不到</td>
+    <td><code>path</code> / <code>domain</code> 不匹配；本地开发时设了 <code>secure: true</code>；跨站被 <code>sameSite</code> 挡住（第 9 章）</td>
+  </tr>
+  <tr>
+    <td>Workers 上 <code>c.env</code> 是 undefined</td>
+    <td>在模块顶层访问了。必须在请求上下文里读（第 12 章）</td>
+  </tr>
+  <tr>
+    <td>本地好好的，线上 500</td>
+    <td>环境变量没配；用了 Node 独有 API；构建产物和源码不一致</td>
+  </tr>
+  <tr>
+    <td>JSX 报「找不到命名空间」</td>
+    <td><code>tsconfig.json</code> 里缺 <code>jsxImportSource: "hono/jsx"</code>；或文件后缀不是 <code>.tsx</code>（第 3 章）</td>
+  </tr>
+  <tr>
+    <td>RPC 客户端没有类型提示</td>
+    <td>路由不是链式定义的，类型信息丢了（第 14 章）</td>
+  </tr>
+  <tr>
+    <td>SPA 刷新子页面 404</td>
+    <td>服务端没配 SPA 回退（第 16 章）</td>
+  </tr>
 </table>
 </div>
 
-<div class="box key">
-  <div class="t">&#9733; 别搞「重构冲刺」</div>
-  <p>
-    「我们花两周专门重构」这种计划几乎总是失败：它没有产出可见价值，
-    第一个紧急需求来了就被砍掉，留下一堆半成品，比原来更乱。<br>
-    <strong>更有效的是「童子军规则」：每次经过一段代码，让它比你来的时候好一点点。</strong>
-    改 bug 时顺手补个测试，加功能时顺手拆掉一个太长的函数。积少成多，而且永远不会被砍。
-  </p>
-</div>
+<h2 id="prod">线上问题</h2>
 
-<h2 id="invisible">让隐形故障显形</h2>
-
-<p>
-  最危险的故障是那种「网站看起来一切正常」的故障：
-</p>
+<p>生产环境不能打断点，你只有三样东西：</p>
 
 <div class="cards">
   <div class="card">
-    <span class="ic">&#128231;</span><h4>邮件停了</h4>
-    <p>API Key 过期，发信全部失败，但代码里 catch 住了没抛出来。用户注册后收不到确认邮件，也没人报告。</p>
+    <span class="ic">&#128220;</span><h4>结构化日志</h4>
+    <p>带上请求 ID，就能把一个请求经过的所有日志串起来（第 12 章）。</p>
   </div>
   <div class="card">
-    <span class="ic">&#128179;</span><h4>支付回调失败</h4>
-    <p>用户付了钱，但你的系统没收到通知，订单一直是「待支付」。</p>
+    <span class="ic">&#128680;</span><h4>错误追踪</h4>
+    <p>Sentry 之类。带上堆栈、用户、请求上下文，比翻日志高效得多。</p>
   </div>
   <div class="card">
-    <span class="ic">&#128200;</span><h4>数据没同步</h4>
-    <p>定时任务在两个月前就悄悄失败了，报表数据一直停在那天。</p>
+    <span class="ic">&#128200;</span><h4>指标</h4>
+    <p>响应时间、错误率、依赖耗时。它们告诉你「什么时候开始变坏的」。</p>
   </div>
-  <div class="card">
-    <span class="ic">&#128190;</span><h4>备份停了</h4>
-    <p>存储桶权限变了，备份任务每次都失败。等到需要恢复时才发现。</p>
-  </div>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# Cloudflare Workers：实时看线上日志
+npx wrangler tail
+
+# 只看错误
+npx wrangler tail --status error
+</pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 解法：监控「应该发生的事」，而不只是「不该发生的事」</div>
+  <div class="t">&#9733; 每修一个 bug，问一句「怎么才能更早发现它」</div>
   <p>
-    错误监控只能发现「发生了错误」。但上面这些故障的特征是<strong>什么都没发生</strong>。
-    所以要反过来监控：
-  </p>
-  <ul>
-    <li><strong>心跳</strong>：定时任务每次成功后 ping 一个监控服务（如 Healthchecks.io）。
-        超时没收到 ping 就告警。</li>
-    <li><strong>业务指标</strong>：「过去一小时的订单数为 0」在半夜可能正常，在中午一定是出事了。</li>
-    <li><strong>合成监控</strong>：定期用脚本走一遍关键流程（注册 → 下单 → 收邮件），确认端到端是通的。</li>
-  </ul>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// 定时任务的心跳
-export async function syncDailyReports(env: Env) {
-  try {
-    await doTheWork()
-    // 成功了才 ping
-    await fetch(env.HEARTBEAT_URL)
-  } catch (err) {
-    reportToSentry(err)
-    throw err     // 让平台知道这次执行失败了
-  }
-}
-</pre>
-</div>
-
-<h2 id="reuse">提炼可复用的东西</h2>
-
-<p>
-  维护期最常做的一件事，是发现「这段逻辑我已经写第三遍了」。
-  Hono 里最自然的复用单位是<strong>中间件</strong>：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/middleware/pagination.ts">
-<pre>
-import { createMiddleware } from 'hono/factory'
-import { z } from 'zod'
-
-const schema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  perPage: z.coerce.number().int().min(1).max(100).default(20),
-})
-
-export const pagination = createMiddleware&lt;{
-  Variables: { pagination: { limit: number; offset: number } }
-}&gt;(async (c, next) =&gt; {
-  const parsed = schema.safeParse(c.req.query())
-  if (!parsed.success) {
-    return c.json({ error: { message: '分页参数不合法' } }, 400)
-  }
-
-  const { page, perPage } = parsed.data
-  c.set('pagination', { limit: perPage, offset: (page - 1) * perPage })
-
-  await next()
-})
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// 现在所有列表接口都能直接用
-app.get('/api/v1/vacations', pagination, async (c) =&gt; {
-  const { limit, offset } = c.get('pagination')
-  const data = await repo.list({ limit, offset })
-  return c.json({ data })
-})
-</pre>
-</div>
-
-<h3>什么时候抽出去</h3>
-
-<div class="box tip">
-  <div class="t">&#128161; 三次规则</div>
-  <p>
-    第一次写：就那么写。<br>
-    第二次写：注意到了，但还不动 —— 两处相似不代表它们会一直相似。<br>
-    <strong>第三次写：抽出来。</strong>这时候你已经见过三个变体，
-    知道哪些部分是真的通用，哪些应该做成参数。<br>
-    <em>过早抽象的代价，往往比重复更高。</em>
+    如果答案是「加个类型」「加个校验」「加个测试」「加条日志」，那就顺手加上。<br>
+    修 bug 只解决了这一个；改进发现机制能解决一整类。
+    这也是第 5 章说的「QA 计划是活文档」的意思。
   </p>
 </div>
-
-<h3>跨项目复用</h3>
-
-<p>
-  如果你有多个 Hono 项目共用同一套中间件，可以发成私有 npm 包：
-</p>
-
-<div class="code" data-lang="json" data-file="package.json">
-<pre>
-{
-  "name": "@meadowlark/hono-kit",
-  "version": "1.2.0",
-  "type": "module",
-  "exports": {
-    "./pagination": "./dist/pagination.js",
-    "./session": "./dist/session.js",
-    "./rate-limit": "./dist/rate-limit.js"
-  },
-  "peerDependencies": { "hono": "^4.0.0" }
-}
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; 注意 <code>peerDependencies</code></div>
-  <p>
-    共享库不应该把 <code>hono</code> 列进 <code>dependencies</code>，否则项目里会装两份 Hono，
-    导致类型不兼容和奇怪的运行时问题。用 <code>peerDependencies</code> 声明「我需要宿主项目提供 Hono」。
-  </p>
-</div>
-
-<h2 id="docs">文档</h2>
-
-<p>
-  文档不用多，但有几样是必须的。而且要放在<strong>代码仓库里</strong>，
-  这样它才会跟着代码一起演进：
-</p>
-
-<div class="tw">
-<table>
-  <tr><th>文件</th><th>回答什么问题</th></tr>
-  <tr><td><code>README.md</code></td><td>这是什么？怎么在本地跑起来？（新人第一天要看的）</td></tr>
-  <tr><td><code>CONTRIBUTING.md</code></td><td>怎么提交改动？分支怎么命名？提交信息什么格式？</td></tr>
-  <tr><td><code>docs/architecture.md</code></td><td>系统由哪几块组成？数据怎么流动？</td></tr>
-  <tr><td><code>docs/runbook.md</code></td><td><strong>半夜出故障时看的</strong>：怎么回滚？日志在哪？谁能联系上？</td></tr>
-  <tr><td><code>docs/decisions/</code></td><td>为什么选了 A 而不是 B？（避免三年后有人重新纠结同一个问题）</td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 记录「为什么」，而不是「是什么」</div>
-  <p>
-    「这里用了 Drizzle」—— 看代码就知道，不用写。<br>
-    「<strong>为什么</strong>用 Drizzle 而不是 Prisma：因为要跑在 Cloudflare Workers 上，
-    Prisma 当时的边缘支持还不成熟」—— 这个必须写。<br>
-    代码能表达「是什么」，只有文档能保存「为什么」。而「为什么」恰恰是最容易随人流失的东西。
-  </p>
-</div>
-
-<h2 id="routine">日常节奏</h2>
-
-<div class="box tip">
-  <div class="t">&#128161; 一个可执行的维护清单</div>
-  <p><strong>每周（15 分钟）</strong></p>
-  <ul>
-    <li>处理 Dependabot 的 PR</li>
-    <li>扫一眼错误监控里的新增错误</li>
-    <li>看一眼响应时间趋势有没有异常</li>
-  </ul>
-  <p><strong>每月（1 小时）</strong></p>
-  <ul>
-    <li><code>npm audit</code> 并处理高危项</li>
-    <li>检查证书、API Key、订阅的到期时间</li>
-    <li>看看日志里有没有反复出现但没人管的告警</li>
-  </ul>
-  <p><strong>每季度（半天）</strong></p>
-  <ul>
-    <li>做一次备份恢复演练</li>
-    <li>回顾技术债清单，挑一两项还掉</li>
-    <li>更新 README 和架构文档</li>
-    <li>检查运行时和主要依赖的大版本升级计划</li>
-  </ul>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="每周、每月、每季度的维护节奏">
-  <rect class="bx-g" x="20" y="20" width="230" height="240" rx="10"/>
-  <text class="ttl on-g" x="135" y="46" text-anchor="middle">每周 · 15 分钟</text>
-  <text class="sm" x="36" y="76">· 处理依赖更新 PR</text>
-  <text class="sm" x="36" y="98">· 扫一眼新增错误</text>
-  <text class="sm" x="36" y="120">· 看响应时间趋势</text>
-  <text class="sm on-g" x="36" y="158">目标：不让问题攒起来</text>
-  <text class="sm" x="36" y="196">花的是最便宜的时间：</text>
-  <text class="sm" x="36" y="216">此刻改一行，</text>
-  <text class="sm" x="36" y="236">胜过半年后改一百行</text>
-
-  <rect class="bx-b" x="266" y="20" width="230" height="240" rx="10"/>
-  <text class="ttl on-b" x="381" y="46" text-anchor="middle">每月 · 1 小时</text>
-  <text class="sm" x="282" y="76">· npm audit 并修高危</text>
-  <text class="sm" x="282" y="98">· 检查证书 / Key 到期</text>
-  <text class="sm" x="282" y="120">· 清理反复出现的告警</text>
-  <text class="sm on-b" x="282" y="158">目标：不被到期日偷袭</text>
-  <text class="sm" x="282" y="196">「证书忘了续」是</text>
-  <text class="sm" x="282" y="216">最愚蠢也最常见的</text>
-  <text class="sm" x="282" y="236">线上事故原因之一</text>
-
-  <rect class="bx-p" x="512" y="20" width="228" height="240" rx="10"/>
-  <text class="ttl on-p" x="626" y="46" text-anchor="middle">每季度 · 半天</text>
-  <text class="sm" x="528" y="76">· 备份恢复演练</text>
-  <text class="sm" x="528" y="98">· 还一两项技术债</text>
-  <text class="sm" x="528" y="120">· 更新文档</text>
-  <text class="sm" x="528" y="142">· 规划大版本升级</text>
-  <text class="sm on-p" x="528" y="180">目标：让系统不腐化</text>
-  <text class="sm" x="528" y="216">这是唯一会被</text>
-  <text class="sm" x="528" y="236">「更紧急的事」挤掉的一项</text>
-</svg>
-<figcaption>图 22-2　把维护变成日程，而不是靠想起来</figcaption>
-</figure>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>上线前就写清楚项目预期寿命和负责人。</li>
-  <li>依赖更新的成本是指数增长的，每周一点点远比两年一次便宜。</li>
-  <li>技术债要么带上下文记录下来，要么当场还掉。别写没有信息的 TODO。</li>
-  <li>用童子军规则代替重构冲刺。</li>
-  <li>监控「应该发生的事」，让隐形故障显形。</li>
-  <li>三次规则决定什么时候抽象；共享库用 <code>peerDependencies</code>。</li>
-  <li>文档记录「为什么」，尤其是运维手册和技术决策记录。</li>
+  <li>调试的核心是二分缩小范围，不是盯着代码猜。</li>
+  <li>先确保能稳定复现，再找最小复现；<code>git bisect</code> 能快速定位引入问题的提交。</li>
+  <li><code>console.table</code>、<code>console.time</code>、条件断点、日志断点都能省大量时间。</li>
+  <li>忘记 <code>await</code> 是最常见的异步 bug，用 lint 规则防住。</li>
+  <li><code>showRoutes()</code> 和 <code>c.req.routePath</code> 是 Hono 路由问题的照妖镜。</li>
+  <li>用 curl 排除浏览器因素，一步砍掉一半搜索范围。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>给项目配上 Dependabot，看看第一批 PR 里有哪些包已经落后了很多个版本。</li>
-    <li>跑 <code>npm audit</code>，把高危漏洞处理掉。如果某个漏洞暂时无法修复，写下原因和影响评估。</li>
-    <li>搜一遍代码里的 <code>TODO</code> 和 <code>FIXME</code>。有多少条你已经不记得是什么意思了？把它们补全或删掉。</li>
-    <li>写一份 <code>docs/runbook.md</code>：假设你今晚不在，同事要处理线上故障，他需要知道什么？</li>
-    <li>找出你项目里写了三遍以上的逻辑，把它抽成一个中间件。</li>
-    <li>给一个定时任务加上心跳监控，然后故意让它失败，确认你收到了告警。</li>
+    <li>配好 VS Code 的调试配置，在一个路由处理函数里打断点，观察 <code>c.req</code> 对象里到底有什么。</li>
+    <li>在一个循环里设置条件断点，只在特定的 sku 上停下来。</li>
+    <li>加上本章的调试中间件，访问几个不同路径，看 <code>routePath</code> 输出。故意制造一次路由遮蔽，观察它怎么暴露出来。</li>
+    <li>故意写一个忘了 <code>await</code> 的 bug，观察它的表现有多难懂。然后开启 <code>no-floating-promises</code> 规则，看它是否被抓住。</li>
+    <li>在你的项目里制造一个 bug，提交几次之后用 <code>git bisect</code> 把它找出来。</li>
   </ol>
 </div>
 

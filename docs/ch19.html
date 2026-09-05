@@ -158,6 +158,7 @@ export async function fetchJson&lt;T&gt;(url: string, opts: Options = {}): Promi
     <strong>幂等</strong>的操作（GET、PUT、DELETE）重试是安全的。<br>
     <strong>非幂等</strong>的操作（POST 创建订单、发起支付）重试可能导致重复下单。
     这类请求要么不重试，要么让对方支持「幂等键」（每次请求带一个唯一 ID，对方据此去重）。
+    反过来，<strong>你自己的接口也该支持幂等键</strong>，否则别人重试你时同样会出问题 —— 见第 20 章。
   </p>
 </div>
 
