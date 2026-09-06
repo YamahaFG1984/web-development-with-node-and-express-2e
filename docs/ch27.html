@@ -636,6 +636,7 @@ async function deliverWebhook(endpoint: Endpoint, event: OutgoingEvent) {
   <li>消息一定会丢，<strong>必须有定时对账兜底</strong>，且和 webhook 共用同一套处理函数。</li>
   <li>原样存档 payload —— 出事故时重放能救命。</li>
   <li>自己发 webhook 时，把接收方的痛点反过来做；并防住 SSRF。</li>
+  <li>支付是 webhook 最典型也最不容出错的场景 —— 见第 30 章。</li>
 </ul>
 
 <div class="exercise">

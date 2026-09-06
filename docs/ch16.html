@@ -659,7 +659,7 @@ app.get('/', (c) =&gt; c.redirect(`/${c.get('language')}/`, 302))
 const collator = new Intl.Collator('zh-CN', { sensitivity: 'base', numeric: true })
 names.sort(collator.compare)
 
-// numeric: true 让 "第2章" 排在 "第10章" 前面，而不是按字符串比较
+// numeric: true 让 "第 2 章" 排在 "第 10 章" 前面，而不是按字符串比较
 </pre>
 </div>
 
@@ -726,7 +726,7 @@ describe('日期边界', () =&gt; {
   <li>定时任务默认 UTC；「本地时间几点」的需求要每小时扫一遍 + 幂等保护。</li>
   <li>文案以整句为单位，复数用 <code>Intl.PluralRules</code>。</li>
   <li>公开页面的语言要放在 URL 路径里；语言重定向用 302 不是 301。</li>
-  <li>金额和币种一起存，用最小货币单位的整数。</li>
+  <li>金额和币种一起存，用最小货币单位的整数。第 30 章会真的用它来收钱。</li>
   <li>CI 跑在非整点偏移的时区下，能暴露一大类隐藏假设。</li>
 </ul>
 

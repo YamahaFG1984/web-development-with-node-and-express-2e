@@ -556,7 +556,7 @@ export async function rebuildSearchIndex(env: Bindings) {
     「先 <code>deleteAllDocuments()</code> 再重新导入」这个做法很直觉，但在重建的那几分钟里，
     <strong>所有用户搜索都是零结果</strong>。<br>
     正确做法是建一个新索引，导完之后<strong>原子地切换别名</strong>。
-    用户完全无感 —— 这和第 20 章「内容指纹」、第 31 章「零停机迁移」是同一个思路：
+    用户完全无感 —— 这和第 20 章「内容指纹」、第 32 章「零停机迁移」是同一个思路：
     <em>先准备好新的，再切换，最后清理旧的。</em>
   </p>
 </div>

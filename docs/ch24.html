@@ -773,6 +773,7 @@ await repo.update(sku, { remaining: v.remaining - 1 })
   <li>幂等键让重复请求安全；键必须由客户端生成并在重试时复用。</li>
   <li>能用数据库原子操作就别上分布式锁。</li>
   <li>用 <code>Promise.all</code> 写并发测试，用人为延迟放大竞态窗口。</li>
+  <li>这些技巧在第 30 章支付场景下不再是「最佳实践」，而是底线。</li>
   <li>缓存是一致性问题的另一个战场，下一章专门讲。</li>
 </ul>
 

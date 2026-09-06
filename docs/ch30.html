@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 30 章 · 调试 — Hono 全栈开发教程</title>
+<title>第 30 章 · 支付与订阅 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="30">
@@ -12,453 +12,794 @@
 <main>
 
 <span class="chapter-eyebrow">第 30 章</span>
-<h1>调试</h1>
+<h1>支付与订阅</h1>
 <p class="lede">
-  调试的核心不是工具，是方法。这一章先讲一条能用一辈子的原则，
-  再给出 Hono 项目里最常见故障的速查表。
+  这一章几乎不引入新概念 —— 它是前面几章的期末考试。
+  幂等、Webhook、队列、对账、审计日志、时区，这些你都学过了。
+  区别在于：<strong>在别的地方出错叫 bug，在这里出错叫少收了钱或者多扣了钱。</strong>
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>掌握「二分缩小范围」这个通用调试方法</li>
-    <li>用好 <code>console</code> 里那些你可能没用过的方法</li>
-    <li>用调试器打断点，而不是到处加打印</li>
-    <li>调试异步代码和中间件顺序问题</li>
-    <li>会用 Hono 的诊断工具定位路由问题</li>
+    <li>理解「不要碰卡号」这条底线，以及它如何简化你的合规负担</li>
+    <li>用状态机而不是布尔值表达支付和订阅</li>
+    <li>知道为什么<strong>永远不能相信客户端说「我付款成功了」</strong></li>
+    <li>处理订阅特有的难题：计费周期、升降级、宽限期、取消</li>
+    <li>把订阅状态映射成权限，并在状态不确定时做出正确选择</li>
+    <li>建立对账机制，处理退款与拒付</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="principle">第一原则：缩小范围</h2>
+<h2 id="dont-touch">第一条：不要碰卡号</h2>
 
 <p>
-  面对一个 bug，最没效率的做法是盯着代码想「哪里错了」。
-  最有效的做法是<strong>系统地把「可能出错的范围」一次次砍半</strong>，直到只剩几行。
+  处理信用卡数据受 <strong>PCI DSS</strong> 标准约束。如果卡号进过你的服务器 ——
+  哪怕只是内存里过一遍、哪怕立刻转发出去 —— 你的合规范围就会急剧扩大：
+  网络隔离、日志审计、渗透测试、年度认证。
 </p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="二分法缩小问题范围">
-  <rect class="bx-r" x="20" y="24" width="720" height="34" rx="6"/>
-  <text class="sm on-r" x="380" y="46" text-anchor="middle">「订单页面报错了」—— 可能出错的地方：整个应用</text>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="卡号是否经过你的服务器决定了合规范围">
+  <rect class="bx-r" x="20" y="20" width="350" height="106" rx="10"/>
+  <text class="ttl on-r" x="36" y="44">&#10060; 自己收卡号</text>
+  <text class="sm" x="36" y="68">&lt;input name="card_number"&gt; → 你的服务器</text>
+  <text class="sm on-r" x="36" y="92">合规范围覆盖整个系统</text>
+  <text class="sm on-r" x="36" y="112">一次数据泄露 = 灾难级后果</text>
 
-  <path class="ln-d" d="M380 62 V78" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="390" y="20" width="350" height="106" rx="10"/>
+  <text class="ttl on-g" x="406" y="44">&#9989; 用托管的收银组件</text>
+  <text class="sm" x="406" y="68">卡号从浏览器<tspan class="on-g">直接</tspan>发给支付平台</text>
+  <text class="sm" x="406" y="92">你只拿到一个不敏感的令牌</text>
+  <text class="sm on-g" x="406" y="112">合规范围缩到最小（SAQ A）</text>
 
-  <rect class="bx-a" x="120" y="82" width="520" height="34" rx="6"/>
-  <text class="sm on-a" x="380" y="104" text-anchor="middle">问：接口返回的数据对吗？→ 对。所以问题在前端渲染</text>
+  <path class="ln-b" d="M120 140 H300" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="20" y="150" width="100" height="40" rx="6"/>
+  <text class="sm" x="70" y="175" text-anchor="middle">浏览器</text>
+  <rect class="bx-g" x="304" y="150" width="140" height="40" rx="6"/>
+  <text class="sm" x="374" y="175" text-anchor="middle">支付平台</text>
+  <text class="sm on-b" x="210" y="134" text-anchor="middle">卡号（iframe 内，你的 JS 读不到）</text>
 
-  <path class="ln-d" d="M380 120 V136" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M304 190 H124" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="214" y="208" text-anchor="middle">返回令牌 pm_xxx</text>
 
-  <rect class="bx-b" x="200" y="140" width="360" height="34" rx="6"/>
-  <text class="sm on-b" x="380" y="162" text-anchor="middle">问：数据传进组件了吗？→ 传了，但 total 是 undefined</text>
-
-  <path class="ln-d" d="M380 178 V194" marker-end="url(#ar)"/>
-
-  <rect class="bx-g" x="270" y="198" width="220" height="34" rx="6"/>
-  <text class="sm on-g" x="380" y="220" text-anchor="middle">找到了：字段名拼成了 totle</text>
+  <path class="ln-a" d="M70 194 V226 H540" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="544" y="206" width="196" height="40" rx="6"/>
+  <text class="sm on-a" x="642" y="231" text-anchor="middle">你的服务器（只见令牌）</text>
 </svg>
-<figcaption>图 30-1　每一步都在把范围砍半，而不是随机猜测</figcaption>
+<figcaption>图 30-1　这个决定影响的不只是安全，还有你要不要每年做一次合规审计</figcaption>
 </figure>
 
 <div class="box key">
-  <div class="t">&#9733; 调试前先回答四个问题</div>
-  <ol>
-    <li><strong>能稳定复现吗？</strong>不能稳定复现的 bug，无法验证是否修好了。先花时间找到复现步骤。</li>
-    <li><strong>最小复现是什么？</strong>把无关的部分一点点删掉，直到删任何一行 bug 就消失。
-        这个过程本身经常就把原因暴露出来了。</li>
-    <li><strong>最后一次正常是什么时候？</strong><code>git bisect</code> 能在几十次提交里用几步定位到引入问题的那次提交。</li>
-    <li><strong>我假设了什么？</strong>Bug 几乎总是藏在你「觉得肯定没问题」的地方。把假设一条条验证。</li>
-  </ol>
+  <div class="t">&#9733; 这是本章最重要的一条</div>
+  <p>
+    用支付平台提供的托管收银页或嵌入式组件（Stripe Elements、Checkout 之类）。
+    卡号在一个跨域 iframe 里，<strong>连你自己的 JavaScript 都读不到</strong>。<br>
+    你拿到的是一个令牌，它只在你的账户下、只能用来发起收款 —— 泄露了也拿不去别处刷。<br>
+    <em>「我们自己做个表单，看起来更统一」是个非常昂贵的审美偏好。</em>
+  </p>
 </div>
 
-<div class="code" data-lang="bash">
-<pre>
-# git bisect：在 100 次提交里，7 次就能定位
-git bisect start
-git bisect bad                  # 当前版本有问题
-git bisect good v1.2.0          # 这个版本是好的
-# Git 会自动切到中间某次提交，你测试后告诉它 good 还是 bad
-git bisect good
-git bisect bad
-# ...重复几次
-git bisect reset
-</pre>
+<h2 id="state">用状态机，不要用布尔值</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 布尔值</div>
+    <div class="code" data-lang="ts"><pre>
+{ isPaid: boolean }
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      「正在支付中」是什么？「支付失败了」呢？<br>
+      「付了又退了」是 true 还是 false？<br>
+      每多一种情况就要加一个布尔值，然后组合爆炸。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 状态机</div>
+    <div class="code" data-lang="ts"><pre>
+type PaymentStatus =
+  | 'requires_payment'   // 待支付
+  | 'processing'          // 处理中
+  | 'succeeded'           // 已成功
+  | 'failed'              // 已失败
+  | 'refunded'            // 已退款
+  | 'disputed'            // 争议中
+</pre></div>
+  </div>
 </div>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="按层排查：每一层用什么工具">
-  <text class="ttl" x="20" y="22">一个请求经过五层，每一层都有专门的观察工具</text>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="一次性支付的状态机">
+  <rect class="bx-b" x="20" y="60" width="120" height="44" rx="8"/>
+  <text class="sm" x="80" y="87" text-anchor="middle">待支付</text>
 
-  <rect class="bx-b" x="20" y="36" width="470" height="42" rx="8"/>
-  <text class="ttl on-b" x="36" y="62">① 浏览器</text>
-  <text class="sm" x="150" y="62">DOM 对吗？脚本报错了吗？</text>
-  <rect class="bx-d" x="502" y="36" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="62">开发者工具 Console / Elements</text>
+  <path class="ln-b" d="M144 82 H200" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="204" y="60" width="120" height="44" rx="8"/>
+  <text class="sm on-a" x="264" y="87" text-anchor="middle">处理中</text>
 
-  <rect class="bx-b" x="20" y="88" width="470" height="42" rx="8"/>
-  <text class="ttl on-b" x="36" y="114">② 网络</text>
-  <text class="sm" x="150" y="114">请求发出去了吗？状态码和响应头对吗？</text>
-  <rect class="bx-d" x="502" y="88" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="114">Network 面板 · curl -v</text>
+  <path class="ln-g" d="M328 74 H388" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="392" y="52" width="120" height="44" rx="8"/>
+  <text class="sm on-g" x="452" y="79" text-anchor="middle">已成功</text>
 
-  <rect class="bx-a" x="20" y="140" width="470" height="42" rx="8"/>
-  <text class="ttl on-a" x="36" y="166">③ 路由与中间件</text>
-  <text class="sm" x="180" y="166">匹配到哪条路由？哪些中间件跑了？</text>
-  <rect class="bx-d" x="502" y="140" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="166">showRoutes() · c.req.routePath</text>
+  <path class="ln-r" d="M328 96 H388 V128" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="392" y="132" width="120" height="44" rx="8"/>
+  <text class="sm on-r" x="452" y="159" text-anchor="middle">已失败</text>
 
-  <rect class="bx-p" x="20" y="192" width="470" height="42" rx="8"/>
-  <text class="ttl on-p" x="36" y="218">④ 处理函数</text>
-  <text class="sm" x="150" y="218">变量的值是什么？走了哪个分支？</text>
-  <rect class="bx-d" x="502" y="192" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="218">断点 · console.table</text>
+  <path class="ln" d="M516 74 H576" marker-end="url(#ar)"/>
+  <rect class="bx" x="580" y="52" width="120" height="44" rx="8"/>
+  <text class="sm" x="640" y="79" text-anchor="middle">已退款</text>
 
-  <rect class="bx-g" x="20" y="244" width="470" height="42" rx="8"/>
-  <text class="ttl on-g" x="36" y="270">⑤ 数据与外部服务</text>
-  <text class="sm" x="200" y="270">查询返回了什么？第三方超时了吗？</text>
-  <rect class="bx-d" x="502" y="244" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="270">SQL 客户端 · EXPLAIN · 日志</text>
+  <path class="ln-r" d="M452 96 V116 H700 V96" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="590" y="112" text-anchor="middle">拒付争议</text>
+
+  <path class="ln-b" d="M452 176 V204 H80 V108" marker-end="url(#ar)"/>
+  <text class="sm" x="260" y="200" text-anchor="middle">用户可以重试（新建一笔，不是复用旧的）</text>
+
+  <rect class="bx-a" x="20" y="216" width="720" height="36" rx="8"/>
+  <text class="sm on-a" x="380" y="238" text-anchor="middle">规则：状态只能按箭头方向前进。<tspan>「已成功」永远不能变回「待支付」</tspan></text>
 </svg>
-<figcaption>图 30-2　定位问题的第一步是判断「它坏在第几层」</figcaption>
+<figcaption>图 30-2　把合法的状态转移写成代码，非法转移直接拒绝</figcaption>
 </figure>
 
-<h2 id="console">console 不只有 log</h2>
-
-<div class="code" data-lang="ts">
+<div class="code" data-lang="ts" data-file="src/lib/payment-state.ts">
 <pre>
-// 表格：看数组对象的神器
-console.table(vacations)
-// ┌─────────┬─────────┬──────────────────┬────────┐
-// │ (index) │   sku   │       name       │ price  │
-// ├─────────┼─────────┼──────────────────┼────────┤
-// │    0    │ 'HR199' │  '胡德河一日游'   │ 99.95  │
-// └─────────┴─────────┴──────────────────┴────────┘
+const ALLOWED: Record&lt;PaymentStatus, PaymentStatus[]&gt; = {
+  requires_payment: ['processing', 'failed'],
+  processing:       ['succeeded', 'failed'],
+  succeeded:        ['refunded', 'disputed'],
+  failed:           [],                        // 终态：重试要新建一笔
+  refunded:         ['disputed'],
+  disputed:         ['refunded', 'succeeded'], // 争议可能赢也可能输
+}
 
-// 分组：让大量日志有层次
-console.group('处理订单 ' + orderId)
-console.log('用户：', userId)
-console.log('商品数：', items.length)
-console.groupEnd()
+export function canTransition(from: PaymentStatus, to: PaymentStatus): boolean {
+  return ALLOWED[from].includes(to)
+}
 
-// 计时
-console.time('查询数据库')
-const rows = await db.select().from(vacations)
-console.timeEnd('查询数据库')     // 查询数据库: 23.4ms
+export async function applyPaymentStatus(
+  db: Db, paymentId: string, to: PaymentStatus, occurredAt: Date
+) {
+  const payment = await db.getPayment(paymentId)
+  if (!payment) return
 
-// 断言：条件为假时才输出
-console.assert(total &gt; 0, '总价不应该是 0！', { cart })
+  // 幂等：已经是这个状态了，直接返回（第 24 章）
+  if (payment.status === to) return
 
-// 打印调用栈：搞清楚「这个函数是谁调的」
-console.trace('走到这里了')
+  if (!canTransition(payment.status, to)) {
+    // 不是错误，通常是乱序到达的旧事件（第 27 章）
+    log('warn', 'invalid_payment_transition', {
+      paymentId, from: payment.status, to, occurredAt,
+    })
+    return
+  }
 
-// 深层对象：默认只展开两层，这样能全部展开
-console.dir(config, { depth: null })
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 一个省时间的小技巧</div>
-  <p>
-    打印变量时用对象简写，这样输出里自带变量名：
-  </p>
-  <div class="code" data-lang="ts"><pre>
-console.log(userId, cartTotal, itemCount)
-// → u_123 299.85 3        ← 哪个是哪个？
-
-console.log({ userId, cartTotal, itemCount })
-// → { userId: 'u_123', cartTotal: 299.85, itemCount: 3 }   ✓
-</pre></div>
-</div>
-
-<h2 id="debugger">用调试器</h2>
-
-<p>
-  打印语句的问题是：你只能看到你想到要打印的东西。
-  调试器让你<strong>暂停程序，然后随便看任何变量</strong>。
-</p>
-
-<div class="code" data-lang="bash">
-<pre>
-# 启动时开启调试端口
-node --inspect dist/server.js
-
-# 用 tsx 开发时
-npx tsx --inspect src/server.tsx
-
-# 在第一行就暂停（用于调试启动过程）
-node --inspect-brk dist/server.js
-</pre>
-</div>
-
-<p>然后打开 Chrome，访问 <code>chrome://inspect</code>，点击 「inspect」。</p>
-
-<p>更方便的是在 VS Code 里直接调试：</p>
-
-<div class="code" data-lang="json" data-file=".vscode/launch.json">
-<pre>
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "调试 Hono 服务器",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["tsx", "src/server.tsx"],
-      "console": "integratedTerminal",
-      "skipFiles": ["&lt;node_internals&gt;/**"],
-      "env": { "NODE_ENV": "development" }
-    },
-    {
-      "name": "调试当前测试文件",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["vitest", "run", "${relativeFile}"],
-      "console": "integratedTerminal"
-    }
-  ]
+  // 条件更新：只接受比当前更新的事件（第 27 章的乱序处理）
+  await db.update(payments)
+    .set({ status: to, statusUpdatedAt: occurredAt })
+    .where(and(
+      eq(payments.id, paymentId),
+      lt(payments.statusUpdatedAt, occurredAt)
+    ))
 }
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 三种断点，各有用处</div>
+  <div class="t">&#9733; 状态机同时解决了三个问题</div>
   <ul>
-    <li><strong>普通断点</strong> —— 点行号左边。程序跑到这里就停。</li>
-    <li><strong>条件断点</strong> —— 右键行号，输入条件。「只在 <code>sku === 'HR199'</code> 时停下」，
-        循环里调试必备。</li>
-    <li><strong>日志断点</strong> —— 右键选 Logpoint。不暂停，只打印一条消息。
-        相当于「临时加一行 <code>console.log</code>，但不用改代码，也不会忘了删」。</li>
+    <li><strong>乱序事件</strong>：「已成功」之后收到「处理中」，转移非法，自动忽略</li>
+    <li><strong>重复事件</strong>：状态已经对了就直接返回，天然幂等</li>
+    <li><strong>非法状态</strong>：不可能出现「已退款但从未成功」这种数据</li>
   </ul>
 </div>
 
-<h2 id="async">调试异步代码</h2>
+<h2 id="flow">支付流程：不要相信客户端</h2>
 
-<div class="code" data-lang="ts">
-<pre>
-// ❌ 忘了 await：错误堆栈里根本看不到这个函数
-async function handler(c) {
-  saveToDatabase(data)         // 返回的 Promise 没人管
-  return c.text('ok')
-}
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="支付的三方时序与两条确认路径">
+  <path class="ln-d" d="M110 40 V290"/>
+  <path class="ln-d" d="M390 40 V290"/>
+  <path class="ln-d" d="M660 40 V290"/>
+  <text class="ttl on-b" x="50" y="34">浏览器</text>
+  <text class="ttl on-a" x="335" y="34">你的服务器</text>
+  <text class="ttl on-g" x="615" y="34">支付平台</text>
 
-// ✅
-async function handler(c) {
-  await saveToDatabase(data)
-  return c.text('ok')
-}
-</pre>
-</div>
+  <path class="ln-b" d="M114 62 H386" marker-end="url(#ar)"/>
+  <text class="sm" x="250" y="56" text-anchor="middle">① 我要买 HR199</text>
+
+  <rect class="bx-a" x="290" y="70" width="200" height="40" rx="6"/>
+  <text class="sm on-a" x="390" y="88" text-anchor="middle">建订单（status=待支付）</text>
+  <text class="sm on-a" x="390" y="104" text-anchor="middle">价格由<tspan class="on-r">服务端</tspan>决定</text>
+
+  <path class="ln-a" d="M394 126 H656" marker-end="url(#ar-a)"/>
+  <text class="sm" x="530" y="120" text-anchor="middle">② 创建支付意图，金额取自数据库</text>
+
+  <path class="ln-g" d="M656 148 H118" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="142" text-anchor="middle">③ 返回 client_secret，前端唤起收银组件</text>
+
+  <path class="ln-b" d="M114 172 H656" marker-end="url(#ar)"/>
+  <text class="sm on-b" x="380" y="166" text-anchor="middle">④ 用户输入卡号 → 直接提交给支付平台</text>
+
+  <path class="ln-r" d="M656 200 H118" style="stroke:var(--red);stroke-dasharray:5 4" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="194" text-anchor="middle">⑤ 前端收到「成功」—— <tspan>这只是一个提示，不是凭据</tspan></text>
+
+  <path class="ln-g" d="M656 232 H394" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="530" y="226" text-anchor="middle">⑥ Webhook：payment.succeeded（第 27 章）</text>
+
+  <rect class="bx-g" x="290" y="240" width="200" height="40" rx="6"/>
+  <text class="sm on-g" x="390" y="258" text-anchor="middle">这才是唯一可信的来源</text>
+  <text class="sm on-g" x="390" y="274" text-anchor="middle">在这里发货 / 开通服务</text>
+</svg>
+<figcaption>图 30-3　第 ⑤ 步用来更新界面，第 ⑥ 步用来改数据。混淆这两者是最常见的支付漏洞</figcaption>
+</figure>
 
 <div class="box warn">
-  <div class="t">&#9888; 忘记 await 是最常见的异步 bug</div>
-  <p>
-    症状五花八门：数据没保存但接口返回成功、日志顺序错乱、
-    偶发的「connection closed」、错误堆栈指向完全无关的地方。<br>
-    <strong>防御手段</strong>：开启 ESLint 的 <code>no-floating-promises</code> 规则
-    （需要 TypeScript 类型信息），它会在编译期就抓出所有没处理的 Promise。
-  </p>
+  <div class="t">&#9888; 两个绝不能犯的错</div>
+  <ol>
+    <li>
+      <strong>金额由前端传上来。</strong>
+      <code>POST /checkout { sku: 'HR199', amount: 1 }</code> ——
+      攻击者把 9995 改成 1，你就一分钱卖了套餐。
+      <strong>金额永远在服务端根据 SKU 查出来。</strong>
+    </li>
+    <li>
+      <strong>前端说成功就发货。</strong>
+      浏览器里的「支付成功」回调可以被伪造、可以被重放，也可能因为用户网络中断而根本没执行。
+      <strong>只有 Webhook（或你主动查询的结果）才能改变订单状态。</strong>
+    </li>
+  </ol>
 </div>
 
 <div class="code" data-lang="ts">
 <pre>
-// 让异步堆栈更完整
-process.on('unhandledRejection', (reason) =&gt; {
-  console.error('未处理的 Promise 拒绝：')
-  console.error(reason)
+app.post('/api/v1/checkout', requireLogin, zValidator('json',
+  z.object({ sku: z.string() })     // ← 注意：没有 amount 字段
+), async (c) =&gt; {
+  const { sku } = c.req.valid('json')
+  const user = c.get('user')
+
+  // 价格从数据库取，不接受客户端传入
+  const vacation = await c.get('repo').findBySku(sku)
+  if (!vacation || !vacation.available) {
+    throw new HTTPException(404, { message: '这个套餐当前不可购买' })
+  }
+
+  const order = await c.get('db').createOrder({
+    userId: user.id,
+    sku,
+    amountMinor: Math.round(vacation.price * 100),   // 最小货币单位（第 16 章）
+    currency: 'CNY',
+    status: 'requires_payment',
+  })
+
+  const intent = await payments.createIntent({
+    amount: order.amountMinor,
+    currency: order.currency,
+    // 幂等键：网络重试不会创建两笔支付（第 24 章）
+    idempotencyKey: `order:${order.id}`,
+    metadata: { orderId: order.id, userId: user.id },
+  })
+
+  await c.get('db').attachIntent(order.id, intent.id)
+
+  return c.json({ orderId: order.id, clientSecret: intent.clientSecret })
 })
-
-// 用 Error.cause 保留原始错误（不要把它吞掉）
-try {
-  await callExternalApi()
-} catch (err) {
-  throw new Error('获取天气数据失败', { cause: err })
-}
-</pre>
-</div>
-
-<h2 id="hono">Hono 专属排查</h2>
-
-<h3>看路由表</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-import { showRoutes } from 'hono/dev'
-
-if (process.env.NODE_ENV !== 'production') {
-  showRoutes(app, { verbose: true })
-}
-</pre>
-</div>
-
-<h3>看请求经过了哪些中间件</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// 临时插在最外层
-app.use('*', async (c, next) =&gt; {
-  console.group(`&gt;&gt;&gt; ${c.req.method} ${c.req.path}`)
-  console.time('总耗时')
-  await next()
-  console.timeEnd('总耗时')
-  console.log('匹配的路由：', c.req.routePath)   // ← 关键：实际匹配到哪条
-  console.log('响应状态：', c.res.status)
-  console.groupEnd()
-})
-</pre>
-</div>
-
-<p>
-  <code>c.req.routePath</code> 特别有用：它告诉你<strong>实际匹配上的是哪条路由规则</strong>。
-  「我明明访问的是 <code>/vacations/new</code>，为什么走到了详情页」——
-  打印一下就会看到 <code>routePath</code> 是 <code>/vacations/:slug</code>，
-  于是知道是路由顺序问题（第 17 章）。
-</p>
-
-<h3>看真实的请求和响应</h3>
-
-<div class="code" data-lang="bash">
-<pre>
-# -v 显示完整的请求头和响应头
-curl -v http://localhost:3000/api/v1/vacations
-
-# 只看响应头
-curl -I http://localhost:3000/
-
-# 发 JSON
-curl -X POST http://localhost:3000/api/v1/vacations/HR199/notify \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"a@example.com"}' -i
-
-# 带 Cookie
-curl -b 'sid=abc123' http://localhost:3000/account -i
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 分不清是前端还是后端的问题时，用 curl</div>
+  <div class="t">&#128161; <code>metadata</code> 里放你自己的 ID</div>
   <p>
-    curl 绕过了浏览器的一切（缓存、Cookie、CORS、Service Worker、前端代码）。
-    如果 curl 结果正确而浏览器不对，问题一定在浏览器侧；反之在服务端。
-    <strong>一条命令就砍掉了一半的搜索范围。</strong>
+    支付平台允许你附加任意元数据。<strong>一定要把 <code>orderId</code> 放进去</strong> ——
+    这样 Webhook 到达时你能立刻定位到本地订单，不用反查。<br>
+    <em>但不要放敏感信息：metadata 会出现在支付平台的后台界面和导出文件里。</em>
   </p>
 </div>
 
-<h2 id="cheatsheet">常见故障速查表</h2>
+<h2 id="subscription">订阅：难度是一次性支付的十倍</h2>
+
+<p>
+  一次性支付是一个瞬间事件。订阅是一段<strong>持续的关系</strong>，
+  它会自己往前走、会失败、会被暂停、会变更 —— 而你的系统必须一直跟得上。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="订阅的状态机">
+  <rect class="bx-b" x="20" y="30" width="110" height="40" rx="8"/>
+  <text class="sm" x="75" y="55" text-anchor="middle">试用中</text>
+
+  <path class="ln-b" d="M134 50 H190" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="194" y="30" width="110" height="40" rx="8"/>
+  <text class="sm on-g" x="249" y="55" text-anchor="middle">生效中</text>
+
+  <path class="ln-r" d="M308 50 H370" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="339" y="42" text-anchor="middle">扣款失败</text>
+  <rect class="bx-r" x="374" y="30" width="120" height="40" rx="8"/>
+  <text class="sm on-r" x="434" y="55" text-anchor="middle">逾期未付</text>
+
+  <path class="ln-g" d="M434 74 V108 H249 V74" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="340" y="104" text-anchor="middle">重试成功 → 恢复</text>
+
+  <path class="ln-r" d="M498 50 H560" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="529" y="42" text-anchor="middle">重试耗尽</text>
+  <rect class="bx" x="564" y="30" width="120" height="40" rx="8"/>
+  <text class="sm" x="624" y="55" text-anchor="middle">已终止</text>
+
+  <path class="ln" d="M249 74 V140 H180 V166" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="120" y="170" width="160" height="40" rx="8"/>
+  <text class="sm on-a" x="200" y="188" text-anchor="middle">已取消（期末生效）</text>
+  <text class="sm" x="200" y="204" text-anchor="middle">在此之前仍可用</text>
+
+  <path class="ln" d="M280 190 H400" marker-end="url(#ar)"/>
+  <rect class="bx" x="404" y="170" width="120" height="40" rx="8"/>
+  <text class="sm" x="464" y="195" text-anchor="middle">已过期</text>
+
+  <path class="ln-g" d="M200 168 V140 H249" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="150" y="140">用户反悔 → 撤销取消</text>
+
+  <rect class="bx-d" x="20" y="234" width="720" height="56" rx="10"/>
+  <text class="ttl" x="380" y="256" text-anchor="middle">「逾期未付」这个状态是订阅系统的灵魂</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">用户的卡过期了，但他不是恶意的 —— 直接停服会流失一个本来愿意付钱的客户</text>
+</svg>
+<figcaption>图 30-4　订阅状态机。注意「逾期未付」不是终点，而是一段挽回窗口</figcaption>
+</figure>
+
+<h3>宽限期与挽回流程</h3>
+
+<div class="box key">
+  <div class="t">&#9733; 扣款失败大多不是「不想付」</div>
+  <p>
+    行业数据里，订阅流失有相当一部分是<strong>非自愿的</strong>：卡过期了、
+    额度不足、银行风控拦截、换了张卡忘了更新。<br>
+    直接停服等于把这些客户送走。正确做法是一套<strong>挽回流程（dunning）</strong>：
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+const DUNNING_SCHEDULE = [
+  { day: 0,  action: 'email', template: 'payment-failed-1' },
+  { day: 3,  action: 'retry' },
+  { day: 5,  action: 'email', template: 'payment-failed-2' },
+  { day: 7,  action: 'retry' },
+  { day: 10, action: 'email', template: 'payment-failed-final' },
+  { day: 14, action: 'downgrade' },      // 降级到免费版，而不是直接删数据
+]
+
+/** 每天跑一次（第 26 章的定时任务 + 队列） */
+export async function processDunning(env: Bindings) {
+  const overdue = await getSubscriptions(env.DB, { status: 'past_due' })
+
+  for (const sub of overdue) {
+    const days = daysSince(sub.pastDueSince)
+    const step = DUNNING_SCHEDULE.find((s) =&gt; s.day === days)
+    if (!step) continue
+
+    // 幂等：用 (subscriptionId, day) 做唯一键，重跑不会重复发信
+    await env.TASKS.send({
+      type: 'dunning-step',
+      subscriptionId: sub.id,
+      day: days,
+      step,
+    })
+  }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 「降级」优于「删除」</div>
+  <p>
+    宽限期结束后，把用户降到免费版并保留数据，而不是关停账号。<br>
+    ① 他随时可能回来付费（数据还在，回归成本为零）；
+    ② 直接删数据在很多地区有法律风险；
+    ③ 客服工单会少很多。<br>
+    <em>真要清理数据，也应该是「降级 N 个月后」的独立流程，并提前邮件通知。</em>
+  </p>
+</div>
+
+<h3>升级、降级与按比例计费</h3>
 
 <div class="tw">
 <table>
-  <tr><th>症状</th><th>最可能的原因</th></tr>
+  <tr><th>场景</th><th>常见处理</th><th>要注意</th></tr>
   <tr>
-    <td>中间件完全不生效</td>
-    <td>① 写在路由注册<strong>之后</strong>了；② 忘了调用工厂函数（<code>logger</code> 少了括号）；③ 路径模式不匹配</td>
+    <td>升级（月付 → 年付、基础 → 专业）</td>
+    <td>立即生效，按剩余天数抵扣差价</td>
+    <td>用户期望「马上能用」。抵扣金额要在界面上说清楚，否则会有工单</td>
   </tr>
   <tr>
-    <td>响应内容为空 / 请求挂住</td>
-    <td>处理函数忘了 <code>return</code>，或者中间件忘了 <code>await next()</code></td>
+    <td>降级</td>
+    <td><strong>期末生效</strong>，不退差价</td>
+    <td>立即降级会导致「已经用掉的额度怎么算」的死结</td>
   </tr>
   <tr>
-    <td>「Body has already been read」</td>
-    <td>请求体读了两次。改成读一次存到变量里（第 6 章）</td>
+    <td>数量变更（席位数）</td>
+    <td>增加立即计费，减少期末生效</td>
+    <td>同上：减少席位时要处理「多出来的人怎么办」</td>
   </tr>
   <tr>
-    <td>路由匹配错了</td>
-    <td>顺序问题。具体路径要写在通配和参数路由前面。用 <code>c.req.routePath</code> 确认（第 17 章）</td>
-  </tr>
-  <tr>
-    <td>写了路由但访问到静态文件</td>
-    <td><code>serveStatic</code> 在前面抢走了。检查 <code>public/</code> 里有没有同名文件（第 3 章）</td>
-  </tr>
-  <tr>
-    <td>浏览器报 CORS 错误</td>
-    <td>CORS 中间件没配、配在路由后面、或者 <code>origin</code> 写错了（第 18 章）</td>
-  </tr>
-  <tr>
-    <td>Cookie 设了但读不到</td>
-    <td><code>path</code> / <code>domain</code> 不匹配；本地开发时设了 <code>secure: true</code>；跨站被 <code>sameSite</code> 挡住（第 9 章）</td>
-  </tr>
-  <tr>
-    <td>Workers 上 <code>c.env</code> 是 undefined</td>
-    <td>在模块顶层访问了。必须在请求上下文里读（第 12 章）</td>
-  </tr>
-  <tr>
-    <td>本地好好的，线上 500</td>
-    <td>环境变量没配；用了 Node 独有 API；构建产物和源码不一致</td>
-  </tr>
-  <tr>
-    <td>JSX 报「找不到命名空间」</td>
-    <td><code>tsconfig.json</code> 里缺 <code>jsxImportSource: "hono/jsx"</code>；或文件后缀不是 <code>.tsx</code>（第 3 章）</td>
-  </tr>
-  <tr>
-    <td>RPC 客户端没有类型提示</td>
-    <td>路由不是链式定义的，类型信息丢了（第 17 章）</td>
-  </tr>
-  <tr>
-    <td>SPA 刷新子页面 404</td>
-    <td>服务端没配 SPA 回退（第 19 章）</td>
+    <td>取消</td>
+    <td>期末生效，期间仍可用</td>
+    <td>提供「撤销取消」。相当一部分人会反悔</td>
   </tr>
 </table>
 </div>
 
-<h2 id="prod">线上问题</h2>
-
-<p>生产环境不能打断点，你只有三样东西：</p>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128220;</span><h4>结构化日志</h4>
-    <p>带上请求 ID，就能把一个请求经过的所有日志串起来（第 12 章）。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128680;</span><h4>错误追踪</h4>
-    <p>Sentry 之类。带上堆栈、用户、请求上下文，比翻日志高效得多。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128200;</span><h4>指标</h4>
-    <p>响应时间、错误率、依赖耗时。它们告诉你「什么时候开始变坏的」。</p>
-  </div>
+<div class="box warn">
+  <div class="t">&#9888; 按比例计费的账要让支付平台去算</div>
+  <p>
+    「用了 17 天的月付套餐，升级到年付，应该抵扣多少」——
+    这个计算涉及时区、月份天数、税率、货币精度，自己算几乎一定会有分歧。<br>
+    主流支付平台都提供 proration 计算接口，<strong>调它，并把结果原样展示给用户确认</strong>。
+    你负责展示和记录，不负责计算。
+  </p>
 </div>
 
-<div class="code" data-lang="bash">
-<pre>
-# Cloudflare Workers：实时看线上日志
-npx wrangler tail
+<h3>计费周期与时区</h3>
 
-# 只看错误
-npx wrangler tail --status error
+<div class="box warn">
+  <div class="t">&#9888; 1 月 31 日订阅，2 月几号扣款？</div>
+  <p>
+    这个问题没有「正确」答案，只有「一致」的答案。主流做法是<strong>取当月最后一天</strong>
+    （2 月 28 日），然后<strong>回到 31 日</strong>（3 月 31 日）——
+    而不是从此永远变成 28 日。<br>
+    <em>不要自己实现这个逻辑。</em>让支付平台管理周期，你只负责响应它发来的事件。<br>
+    另外：计费周期的「一天」按哪个时区算？这是第 16 章的问题 ——
+    <strong>统一按 UTC，并在界面上明确标注时区</strong>，否则用户会觉得你早扣了一天钱。
+  </p>
+</div>
+
+<h2 id="entitlement">把订阅状态变成权限</h2>
+
+<p>
+  应用里到处都要判断「这个用户能用这个功能吗」。
+  <strong>这个判断绝不能实时去问支付平台</strong> —— 太慢、有配额、而且对方挂了你就全挂。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="订阅状态到本地权限的映射">
+  <rect class="bx-g" x="20" y="30" width="160" height="50" rx="8"/>
+  <text class="sm" x="100" y="52" text-anchor="middle">支付平台</text>
+  <text class="sm" x="100" y="70" text-anchor="middle">订阅状态变化</text>
+
+  <path class="ln-g" d="M184 55 H250" marker-end="url(#ar)"/>
+  <text class="sm" x="217" y="48" text-anchor="middle">Webhook</text>
+
+  <rect class="bx-a" x="254" y="30" width="200" height="50" rx="8"/>
+  <text class="sm on-a" x="354" y="52" text-anchor="middle">映射成本地 entitlement</text>
+  <text class="sm on-a" x="354" y="70" text-anchor="middle">写进你自己的数据库</text>
+
+  <path class="ln-a" d="M458 55 H524" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-b" x="528" y="30" width="212" height="50" rx="8"/>
+  <text class="mono sm" x="634" y="50" text-anchor="middle">{ plan: 'pro',</text>
+  <text class="mono sm" x="634" y="68" text-anchor="middle">  seats: 10, validUntil: … }</text>
+
+  <path class="ln-b" d="M634 84 V116" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="454" y="120" width="286" height="44" rx="8"/>
+  <text class="sm on-b" x="597" y="140" text-anchor="middle">应用里判断权限时只读这张本地表</text>
+  <text class="sm" x="597" y="158" text-anchor="middle">零延迟，支付平台挂了也不影响</text>
+
+  <rect class="bx-d" x="20" y="180" width="720" height="52" rx="10"/>
+  <text class="ttl" x="380" y="202" text-anchor="middle">entitlement 表是支付系统和业务系统之间的<tspan class="on-a">防火墙</tspan></text>
+  <text class="sm" x="380" y="224" text-anchor="middle">换支付服务商时，只要重新填充这张表，业务代码一行不用改（第 13 章抽象层的同一个思路）</text>
+</svg>
+<figcaption>图 30-5　业务代码只认 entitlement，不认识任何支付平台的概念</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+export const entitlements = sqliteTable('entitlements', {
+  tenantId: text('tenant_id').primaryKey(),
+  plan: text('plan', { enum: ['free', 'pro', 'enterprise'] }).notNull(),
+  seats: integer('seats').notNull().default(1),
+  // 有效期终点：宽限期也算在内
+  validUntil: integer('valid_until', { mode: 'timestamp' }).notNull(),
+  // 来源信息只用于排查，业务逻辑不读它
+  source: text('source'),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+})
+
+/** 业务代码只用这一个函数（第 22 章的权限判断） */
+export async function hasFeature(db: Db, tenantId: string, feature: Feature) {
+  const ent = await db.getEntitlement(tenantId)
+  if (!ent) return FEATURES.free.includes(feature)
+
+  // 过期了就按免费版算
+  if (ent.validUntil &lt; new Date()) return FEATURES.free.includes(feature)
+
+  return FEATURES[ent.plan].includes(feature)
+}
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 每修一个 bug，问一句「怎么才能更早发现它」</div>
+  <div class="t">&#9733; 状态不确定时，宽容一点</div>
   <p>
-    如果答案是「加个类型」「加个校验」「加个测试」「加条日志」，那就顺手加上。<br>
-    修 bug 只解决了这一个；改进发现机制能解决一整类。
-    这也是第 5 章说的「QA 计划是活文档」的意思。
+    Webhook 迟到了几分钟、对账还没跑、支付平台在维护 ——
+    这些时候你不确定用户到底付没付。<br>
+    <strong>此时应该让他继续用。</strong>理由很简单：<br>
+    ① 错误地<em>放行</em>一个已过期用户，代价是几小时的服务成本；<br>
+    ② 错误地<em>拦截</em>一个付了钱的用户，代价是一张愤怒的工单、一条差评，可能还有退款。<br>
+    <em>做法：<code>validUntil</code> 在真实到期时间上再加一段缓冲。</em>
   </p>
+</div>
+
+<h2 id="refund">退款与拒付</h2>
+
+<div class="tw">
+<table>
+  <tr><th></th><th>退款 Refund</th><th>拒付 Chargeback</th></tr>
+  <tr><td>谁发起</td><td>你（通常应客户要求）</td><td>持卡人直接找发卡行</td></tr>
+  <tr><td>你的控制权</td><td>完全可控</td><td><strong>几乎没有</strong>，钱先被扣走再让你申辩</td></tr>
+  <tr><td>成本</td><td>退回本金（手续费通常不退）</td><td>本金 + 一笔不低的争议处理费</td></tr>
+  <tr><td>时限</td><td>有窗口期（通常几个月）</td><td>你申辩的时限很短，通常只有几天</td></tr>
+  <tr><td>后果</td><td>无</td><td>拒付率过高会被支付平台限制甚至关停账户</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 主动退款几乎总是比被拒付划算</div>
+  <p>
+    用户投诉要求退款时，直接退掉通常是最优解：省下争议处理费、避免拒付率上升、
+    还可能挽回一个客户。<br>
+    <strong>而且拒付率是支付平台评估你的核心指标</strong> —— 它超标的后果远比几笔退款严重。
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/api/v1/orders/:id/refund', requirePermission('order:refund'), async (c) =&gt; {
+  const order = await c.get('db').findOrderById(c.req.param('id'))   // 已含租户条件（第 22 章）
+  if (!order) return c.notFound()
+
+  if (order.status !== 'succeeded') {
+    throw new HTTPException(409, { message: '只有已成功的订单可以退款' })
+  }
+
+  const refund = await payments.createRefund({
+    paymentIntentId: order.intentId,
+    amount: order.amountMinor,
+    // 幂等键防止重复退款 —— 这里出错是真金白银
+    idempotencyKey: `refund:${order.id}`,
+  })
+
+  // 注意：不在这里改状态。等 Webhook 确认后再改（唯一可信来源）
+  await c.get('db').recordRefundRequested(order.id, refund.id)
+
+  // 审计日志：谁在什么时候退了谁的款（第 22 章）
+  await writeAudit(c, { action: 'order.refund', resourceId: order.id,
+                        changes: { amountMinor: order.amountMinor } })
+
+  return c.json({ ok: true, refundId: refund.id })
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 争议来了，你需要证据</div>
+  <p>
+    发卡行会要求你在几天内提交材料证明这笔交易是真实的：
+    <strong>用户是谁、什么时候下的单、从哪个 IP、服务有没有真的交付、有没有服务条款同意记录。</strong><br>
+    这些必须<em>事先</em>就在记录，事后补不出来。第 22 章的审计日志和第 29 章的结构化日志
+    在这个场景下的价值是直接可以用钱衡量的。
+  </p>
+</div>
+
+<h2 id="reconcile">对账</h2>
+
+<p>
+  第 27 章说过：只靠 Webhook 的系统一定会漏。在支付场景下，漏掉一个事件的意思是
+  <strong>用户付了钱但没拿到服务</strong>，或者反过来。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="双向对账">
+  <rect class="bx-a" x="60" y="30" width="240" height="50" rx="8"/>
+  <text class="sm on-a" x="180" y="52" text-anchor="middle">你的数据库</text>
+  <text class="sm" x="180" y="70" text-anchor="middle">今日成功订单</text>
+
+  <rect class="bx-g" x="460" y="30" width="240" height="50" rx="8"/>
+  <text class="sm on-g" x="580" y="52" text-anchor="middle">支付平台</text>
+  <text class="sm" x="580" y="70" text-anchor="middle">今日成功收款</text>
+
+  <path class="ln-a" d="M304 46 H456" marker-end="url(#ar-a)"/>
+  <text class="sm on-r" x="380" y="40" text-anchor="middle">我这边有，对方没有？</text>
+  <path class="ln-g" d="M456 66 H308" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="84" text-anchor="middle">对方有，我这边没有？</text>
+
+  <rect class="bx-r" x="20" y="106" width="350" height="80" rx="10"/>
+  <text class="ttl on-r" x="36" y="128">我有、对方没有</text>
+  <text class="sm" x="36" y="150">本地误标成功，或者事件张冠李戴</text>
+  <text class="sm on-r" x="36" y="172">用户白拿了服务 —— 收入漏损</text>
+
+  <rect class="bx-r" x="390" y="106" width="350" height="80" rx="10"/>
+  <text class="ttl on-r" x="406" y="128">对方有、我没有</text>
+  <text class="sm" x="406" y="150">Webhook 丢了或处理失败</text>
+  <text class="sm on-r" x="406" y="172">用户<tspan>付了钱没拿到服务</tspan> —— 最严重</text>
+
+  <rect class="bx-g" x="120" y="198" width="520" height="34" rx="8"/>
+  <text class="sm on-g" x="380" y="220" text-anchor="middle">每天跑一次，差异清单发给人看。<tspan>差异数不为零就该有人跟进</tspan></text>
+</svg>
+<figcaption>图 30-6　对账是「双向」的：两边都要查，方向不同代表的问题也不同</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+/** 每天凌晨对账昨天的数据 */
+export async function reconcilePayments(env: Bindings, day: string) {
+  const remote = await payments.listCharges({ day })       // 支付平台的
+  const local = await getSuccessfulOrders(env.DB, day)     // 我们的
+
+  const remoteById = new Map(remote.map((r) =&gt; [r.metadata.orderId, r]))
+  const localById = new Map(local.map((o) =&gt; [o.id, o]))
+
+  const mismatches: Mismatch[] = []
+
+  // 方向一：对方有，我没有 —— 用户付了钱没拿到服务，最严重
+  for (const [orderId, charge] of remoteById) {
+    if (!localById.has(orderId)) {
+      mismatches.push({ type: 'missing_locally', orderId, amount: charge.amount })
+      // 走和 Webhook 完全相同的处理逻辑，保证幂等（第 27 章）
+      await env.TASKS.send({ type: 'apply-payment-status', orderId, status: 'succeeded' })
+    }
+  }
+
+  // 方向二：我有，对方没有 —— 收入漏损或数据错误
+  for (const [orderId, order] of localById) {
+    if (!remoteById.has(orderId)) {
+      mismatches.push({ type: 'missing_remotely', orderId, amount: order.amountMinor })
+    }
+  }
+
+  // 金额也要逐笔核对
+  for (const [orderId, charge] of remoteById) {
+    const order = localById.get(orderId)
+    if (order &amp;&amp; order.amountMinor !== charge.amount) {
+      mismatches.push({ type: 'amount_mismatch', orderId,
+                        local: order.amountMinor, remote: charge.amount })
+    }
+  }
+
+  log('info', 'reconciliation', { day, checked: remote.length, mismatches: mismatches.length })
+
+  // 差异不为零就告警 —— 这是必须有人看的那类告警（第 29 章）
+  if (mismatches.length &gt; 0) await alertFinance(day, mismatches)
+}
+</pre>
+</div>
+
+<h2 id="test">测试</h2>
+
+<div class="tw">
+<table>
+  <tr><th>要测什么</th><th>怎么测</th></tr>
+  <tr><td>状态机的每条转移</td><td>纯单元测试，不需要任何网络。<strong>性价比最高</strong></td></tr>
+  <tr><td>非法转移被拒绝</td><td>断言「已成功」收到「处理中」事件后状态不变</td></tr>
+  <tr><td>Webhook 重复投递</td><td>同一个事件发两次，断言只发货一次（第 27 章）</td></tr>
+  <tr><td>各种失败卡</td><td>支付平台提供测试卡号：余额不足、被拒、需要 3DS 验证</td></tr>
+  <tr><td>金额不能被篡改</td><td>请求体里塞 <code>amount: 1</code>，断言实际收款仍是真实价格</td></tr>
+  <tr><td>对账能发现差异</td><td>手工制造一条本地缺失的记录，跑对账，断言它被发现</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+describe('支付状态机', () =&gt; {
+  it('乱序到达的旧事件被忽略', async () =&gt; {
+    const p = await createPayment({ status: 'succeeded', statusUpdatedAt: t(10) })
+
+    // 一个更早发生的「处理中」事件迟到了
+    await applyPaymentStatus(db, p.id, 'processing', t(5))
+
+    expect((await getPayment(p.id)).status).toBe('succeeded')   // 没有被回退
+  })
+
+  it('重复的成功事件只发一次货', async () =&gt; {
+    const p = await createPayment({ status: 'processing' })
+    await handleWebhook(succeededEvent(p.id))
+    await handleWebhook(succeededEvent(p.id))     // 同一个事件重投
+
+    expect(await countFulfillments(p.id)).toBe(1)
+  })
+
+  it('客户端传的金额被忽略', async () =&gt; {
+    const res = await app.request('/api/v1/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ sku: 'HR199', amount: 1 }),   // 试图篡改
+    })
+    const { orderId } = await res.json()
+    expect((await getOrder(orderId)).amountMinor).toBe(9995)   // 真实价格
+  })
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 生产密钥和测试密钥要在结构上隔离</div>
+  <p>
+    「不小心用生产密钥跑了测试」是真实发生过的事故 —— 给真实用户扣了钱。<br>
+    对策：<br>
+    ① 密钥名区分明显（<code>sk_test_</code> / <code>sk_live_</code>），启动时校验环境与密钥前缀是否匹配；<br>
+    ② 测试环境的密钥根本不配置生产的那份（第 12 章的环境隔离）。
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 启动时快速失败（第 9 章的配置校验）
+if (isProduction &amp;&amp; !config.PAYMENT_SECRET_KEY.startsWith('sk_live_')) {
+  throw new Error('生产环境配置了非生产支付密钥')
+}
+if (!isProduction &amp;&amp; config.PAYMENT_SECRET_KEY.startsWith('sk_live_')) {
+  throw new Error('非生产环境配置了生产支付密钥 —— 拒绝启动')
+}
+</pre>
+</div>
+
+<h2 id="observe">该盯哪些指标</h2>
+
+<div class="tw">
+<table>
+  <tr><th>指标</th><th>为什么</th></tr>
+  <tr><td><strong>支付成功率</strong></td><td>突然下降通常意味着风控规则变了或某个渠道故障</td></tr>
+  <tr><td><strong>成功订单数 = 0</strong></td><td>第 29 章讲过：技术指标全绿但没人下单，就是故障</td></tr>
+  <tr><td>Webhook 处理失败数</td><td>死信队列非空必须告警（第 26 章）</td></tr>
+  <tr><td>对账差异数</td><td>不为零就要有人跟进</td></tr>
+  <tr><td>逾期未付订阅数</td><td>突增可能是某个银行批量拒绝，不是用户问题</td></tr>
+  <tr><td>拒付率</td><td>支付平台的核心考核指标，超标会被限制</td></tr>
+</table>
+</div>
+
+<h2 id="pitfalls">常见坑清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 上线前逐条确认</div>
+  <ul>
+    <li>☐ 卡号从不经过你的服务器</li>
+    <li>☐ 金额永远从服务端取，不接受客户端传入</li>
+    <li>☐ 只有 Webhook / 主动查询能改变订单状态，前端回调只用于更新界面</li>
+    <li>☐ 创建支付和退款都带幂等键</li>
+    <li>☐ 状态机拒绝非法转移，条件更新处理乱序事件</li>
+    <li>☐ 金额用最小货币单位的整数存，且币种寸步不离（第 16 章）</li>
+    <li>☐ 有 entitlement 表，业务代码不直接查支付平台</li>
+    <li>☐ 状态不确定时倾向于放行</li>
+    <li>☐ 扣款失败有挽回流程，宽限期结束是降级不是删除</li>
+    <li>☐ 每日对账，双向核对，差异有人跟进</li>
+    <li>☐ 退款、状态变更都有审计日志（第 22 章）</li>
+    <li>☐ 测试密钥与生产密钥在启动时校验</li>
+    <li>☐ 支付相关日志不含卡号、CVV 等任何敏感信息（第 29 章）</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>调试的核心是二分缩小范围，不是盯着代码猜。</li>
-  <li>先确保能稳定复现，再找最小复现；<code>git bisect</code> 能快速定位引入问题的提交。</li>
-  <li><code>console.table</code>、<code>console.time</code>、条件断点、日志断点都能省大量时间。</li>
-  <li>忘记 <code>await</code> 是最常见的异步 bug，用 lint 规则防住。</li>
-  <li><code>showRoutes()</code> 和 <code>c.req.routePath</code> 是 Hono 路由问题的照妖镜。</li>
-  <li>用 curl 排除浏览器因素，一步砍掉一半搜索范围。</li>
+  <li><strong>不要碰卡号</strong>：用托管收银组件，把合规范围缩到最小。</li>
+  <li>用状态机而不是布尔值；状态只能前进，非法转移直接拒绝。</li>
+  <li><strong>金额在服务端算，状态由 Webhook 定</strong> —— 前端说什么都不算数。</li>
+  <li>订阅的难点在「逾期未付」这段挽回窗口，以及升降级的按比例计费（让平台算）。</li>
+  <li>用 entitlement 表隔离支付系统和业务系统；状态不确定时倾向于放行。</li>
+  <li>主动退款通常比被拒付划算；争议需要的证据必须事先就在记录。</li>
+  <li>Webhook 会丢，<strong>每日双向对账是必需品</strong>，不是加分项。</li>
+  <li>状态机的单元测试性价比最高；生产与测试密钥要在启动时校验。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>配好 VS Code 的调试配置，在一个路由处理函数里打断点，观察 <code>c.req</code> 对象里到底有什么。</li>
-    <li>在一个循环里设置条件断点，只在特定的 sku 上停下来。</li>
-    <li>加上本章的调试中间件，访问几个不同路径，看 <code>routePath</code> 输出。故意制造一次路由遮蔽，观察它怎么暴露出来。</li>
-    <li>故意写一个忘了 <code>await</code> 的 bug，观察它的表现有多难懂。然后开启 <code>no-floating-promises</code> 规则，看它是否被抓住。</li>
-    <li>在你的项目里制造一个 bug，提交几次之后用 <code>git bisect</code> 把它找出来。</li>
+    <li>用支付平台的测试模式做一笔完整支付：创建订单 → 唤起收银 → 接收 Webhook → 改状态。全程用测试卡号。</li>
+    <li>在请求体里塞 <code>amount: 1</code>，确认实际收款金额仍是数据库里的价格。</li>
+    <li>把同一个 <code>payment.succeeded</code> 事件手动重投三次，确认只发货一次。</li>
+    <li>实现 <code>canTransition</code>，为每一条合法和非法转移各写一个测试。这是本章投入产出比最高的部分。</li>
+    <li>用测试卡号触发一次扣款失败，走一遍挽回流程的第一步（发邮件）。</li>
+    <li>手工在数据库里删掉一条已成功的订单，跑对账脚本，确认它被识别为「对方有、我没有」并触发了补偿。</li>
+    <li>做一张 entitlement 表，把至少一个功能开关改成读它，然后把订阅状态改成过期，确认功能被关闭。</li>
   </ol>
 </div>
 
