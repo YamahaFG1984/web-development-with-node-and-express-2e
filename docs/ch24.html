@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 24 章 · 缓存架构 — Hono 全栈开发教程</title>
+<title>第 24 章 · 并发与数据一致性 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="24">
@@ -12,639 +12,779 @@
 <main>
 
 <span class="chapter-eyebrow">第 24 章</span>
-<h1>缓存架构</h1>
+<h1>并发与数据一致性</h1>
 <p class="lede">
-  第 19 章讲的是 HTTP 缓存 —— 浏览器和 CDN 那一层。这一章讲应用内部的缓存：
-  查询结果、计算结果、外部调用结果。它能把响应时间降一个数量级，
-  也能制造出一整类<strong>只在高并发下才出现</strong>的故障。
+  第 13 章教了怎么读写数据库。这一章要问一个它没问的问题：
+  <strong>如果两个请求在同一毫秒到达，会发生什么？</strong>
+  超卖、重复扣款、丢失更新 —— 线上事故的大头都藏在这里，而它们在本地几乎不可能复现。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>看清缓存的四个层次，知道每层该放什么</li>
-    <li>掌握 cache-aside 模式和它的失效顺序问题</li>
-    <li>识别并解决三大经典故障：穿透、击穿、雪崩</li>
-    <li>设计不会串数据的缓存键</li>
-    <li>知道什么<strong>不该</strong>缓存，以及怎么监控缓存是否真的有用</li>
+    <li>看懂竞态条件是怎么产生的，以及为什么本地测不出来</li>
+    <li>掌握事务和隔离级别，知道「读到了脏数据」到底是怎么回事</li>
+    <li>会用乐观锁和悲观锁，知道各自的适用场景</li>
+    <li>用原子更新和数据库约束兜底</li>
+    <li>实现幂等，让重复请求不造成重复后果</li>
+    <li>写出能<strong>真的复现</strong>竞态的测试</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="layers">缓存的四层</h2>
+<h2 id="why">为什么本地测不出来</h2>
+
+<p>
+  你一个人点页面，请求是一个接一个的。线上有一千个人同时点，请求是<strong>交错</strong>的。
+  这是两种完全不同的世界。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// 看起来完全正常的「秒杀」代码
+app.post('/vacations/:sku/book', async (c) =&gt; {
+  const sku = c.req.param('sku')
+
+  const v = await repo.findBySku(sku)            // ① 读
+  if (v.remaining &lt;= 0) {                        // ② 判断
+    return c.json({ error: '已售罄' }, 409)
+  }
+
+  await repo.update(sku, { remaining: v.remaining - 1 })   // ③ 写
+  await repo.createOrder({ sku, userId })
+
+  return c.json({ ok: true })
+})
+</pre>
+</div>
+
+<p>这段代码有个致命问题。把两个请求的执行时刻画在一条时间轴上就看清楚了：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="从浏览器到数据库的四层缓存">
-  <rect class="bx-b" x="20" y="20" width="720" height="52" rx="8"/>
-  <text class="ttl on-b" x="36" y="42">① 浏览器缓存</text>
-  <text class="sm" x="220" y="42">Cache-Control · ETag（第 19 章）</text>
-  <text class="sm on-g" x="520" y="42">最快：零网络请求</text>
-  <text class="sm" x="36" y="62">每个用户独立，你无法主动清除 —— 所以带指纹的资源才敢设 immutable</text>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="两个请求交错执行导致超卖">
+  <text class="ttl" x="20" y="22">库存 remaining = 1，两个用户同时下单</text>
 
-  <path class="ln-d" d="M380 74 V84" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M120 40 V270"/>
+  <path class="ln-d" d="M420 40 V270"/>
+  <text class="sm" x="60" y="56">时间 ↓</text>
 
-  <rect class="bx-b" x="20" y="88" width="720" height="52" rx="8"/>
-  <text class="ttl on-b" x="36" y="110">② CDN / 边缘缓存</text>
-  <text class="sm" x="220" y="110">全球节点共享（第 19 章）</text>
-  <text class="sm on-g" x="520" y="110">很快：不回源</text>
-  <text class="sm" x="36" y="130">所有用户共享同一份 —— 千万不要缓存带个人信息的响应</text>
+  <text class="ttl on-b" x="150" y="56">请求 A</text>
+  <text class="ttl on-p" x="450" y="56">请求 B</text>
+  <text class="ttl on-g" x="640" y="56">数据库</text>
 
-  <path class="ln-d" d="M380 142 V152" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="140" y="70" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="90" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="640" y="90" text-anchor="middle">remaining = 1</text>
 
-  <rect class="bx-a" x="20" y="156" width="720" height="52" rx="8"/>
-  <text class="ttl on-a" x="36" y="178">③ 应用缓存　←　本章重点</text>
-  <text class="sm" x="260" y="178">Redis / KV / 进程内存</text>
-  <text class="sm on-a" x="520" y="178">毫秒级</text>
-  <text class="sm" x="36" y="198">缓存的是查询结果、计算结果、外部 API 结果 —— 由你完全控制</text>
+  <rect class="bx-p" x="440" y="108" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="128" text-anchor="middle">① 读到 remaining = 1</text>
+  <text class="mono sm on-g" x="700" y="128" text-anchor="middle">1</text>
 
-  <path class="ln-d" d="M380 210 V220" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="140" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
 
-  <rect class="bx-g" x="20" y="224" width="720" height="52" rx="8"/>
-  <text class="ttl on-g" x="36" y="246">④ 数据库缓存</text>
-  <text class="sm" x="220" y="246">查询计划缓存、缓冲池</text>
-  <text class="sm" x="520" y="246">数据库自己管，你管不着</text>
-  <text class="sm" x="36" y="266">别忘了：数据库本身也在缓存。「加缓存」之前先确认瓶颈真的在查询</text>
+  <rect class="bx-p" x="440" y="146" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="166" text-anchor="middle">② 1 &gt; 0，可以下单</text>
 
-  <text class="sm on-r" x="380" y="294" text-anchor="middle">每往下一层，延迟增加一个数量级，但数据新鲜度提高</text>
+  <rect class="bx-r" x="140" y="184" width="200" height="30" rx="6"/>
+  <text class="sm" x="240" y="204" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="204" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="440" y="222" width="200" height="30" rx="6"/>
+  <text class="sm" x="540" y="242" text-anchor="middle">③ 写入 remaining = 0</text>
+  <text class="mono sm on-g" x="700" y="242" text-anchor="middle">0</text>
+
+  <rect class="bx-r" x="120" y="264" width="520" height="30" rx="6"/>
+  <text class="sm on-r" x="380" y="284" text-anchor="middle">结果：库存只有 1 份，却卖出了 2 单。而且库存数字看起来是「对」的</text>
 </svg>
-<figcaption>图 24-1　缓存不是一个东西，是一条链。问题往往出在层与层之间</figcaption>
+<figcaption>图 24-1　「读 → 判断 → 写」这个模式只要不是原子的，就一定会出问题</figcaption>
 </figure>
 
-<div class="box warn">
-  <div class="t">&#9888; 先测量，再加缓存</div>
+<div class="box key">
+  <div class="t">&#9733; 记住这个模式的名字</div>
   <p>
-    「这里有点慢，加个缓存吧」是最常见的错误决策顺序。加缓存之前先回答：
+    <strong>check-then-act</strong>（先检查再行动）—— 先读一个值，根据它做判断，然后基于判断去写。
+    只要「读」和「写」之间有任何间隙，另一个请求就可能挤进来，让你的判断在写入时已经过期了。
   </p>
+  <p>
+    这个模式在代码里到处都是：检查库存再扣减、检查邮箱是否已注册再插入、
+    检查余额是否够再扣款、检查文件是否存在再创建。<strong>它们全都有同一个 bug。</strong>
+  </p>
+</div>
+
+<h3>为什么开发时发现不了</h3>
+
+<div class="tw">
+<table>
+  <tr><th>本地开发</th><th>生产环境</th></tr>
+  <tr><td>你一个人手动点击</td><td>成百上千用户同时操作</td></tr>
+  <tr><td>请求间隔以秒计</td><td>请求间隔以毫秒计，甚至完全重叠</td></tr>
+  <tr><td>一个进程</td><td>多个实例 / 多个边缘节点</td></tr>
+  <tr><td>数据库在本机，延迟 0.1 ms</td><td>网络延迟 5–50 ms，「间隙」被放大几百倍</td></tr>
+  <tr><td>测试是串行跑的</td><td>—</td></tr>
+</table>
+</div>
+
+<p>
+  最后一行尤其关键：<strong>你写的单元测试和集成测试默认都是串行的</strong>，
+  它们永远不会触发竞态。除非你专门去写并发测试（本章最后会讲）。
+</p>
+
+<h2 id="scenarios">四种经典事故</h2>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128230;</span><h4>超卖</h4>
+    <p>库存 1 份卖出 2 单。上面刚演示过。同类：限量优惠券被多领、活动名额超出。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128184;</span><h4>重复扣款</h4>
+    <p>用户网络卡顿点了两次提交，或者客户端自动重试了一次。两笔订单，两次扣钱。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128260;</span><h4>丢失更新</h4>
+    <p>两个管理员同时编辑同一篇文章，后保存的人把前一个人的修改整个覆盖掉了，而且<strong>双方都没收到任何提示</strong>。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128100;</span><h4>重复注册</h4>
+    <p>同一邮箱同时提交两次，两条 <code>SELECT</code> 都说「没注册过」，于是插入了两个账号。</p>
+  </div>
+</div>
+
+<h2 id="transaction">事务</h2>
+
+<p>
+  事务把多个操作打包成一个「全成功或全失败」的单元。这是数据库给你的第一件武器。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { drizzle } from 'drizzle-orm/d1'
+import { eq, sql } from 'drizzle-orm'
+
+await db.transaction(async (tx) =&gt; {
+  // 从 A 账户扣钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} - ${amount}` })
+    .where(eq(accounts.id, fromId))
+
+  // 给 B 账户加钱
+  await tx.update(accounts)
+    .set({ balance: sql`${accounts.balance} + ${amount}` })
+    .where(eq(accounts.id, toId))
+
+  // 记一笔流水
+  await tx.insert(transfers).values({ fromId, toId, amount })
+
+  // 任何一步抛异常 → 整个事务回滚，前面的操作全部撤销
+})
+</pre>
+</div>
+
+<h3>ACID 是什么</h3>
+
+<div class="tw">
+<table>
+  <tr><th>字母</th><th>含义</th><th>白话</th></tr>
+  <tr><td><strong>A</strong>tomicity 原子性</td><td>要么全做，要么全不做</td><td>不会出现「钱扣了但没到账」</td></tr>
+  <tr><td><strong>C</strong>onsistency 一致性</td><td>事务前后数据都满足约束</td><td>余额不会变成负数（如果你定义了 CHECK 约束）</td></tr>
+  <tr><td><strong>I</strong>solation 隔离性</td><td>并发事务互不干扰</td><td><strong>本章的重点，也是最容易误解的一个</strong></td></tr>
+  <tr><td><strong>D</strong>urability 持久性</td><td>提交后即使断电也不丢</td><td>数据库替你保证</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 事务 ≠ 解决了并发问题</div>
+  <p>
+    这是最常见的误解。把上面那段超卖代码包进事务里，<strong>它照样超卖</strong>。<br>
+    因为默认的隔离级别下，两个事务可以同时读到 <code>remaining = 1</code>，
+    各自判断「够」，然后各自写入 0。事务保证的是「你这几步要么全成要么全败」，
+    <em>不保证「别人不会在中间插队」</em>。
+  </p>
+</div>
+
+<h3>隔离级别</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="四种隔离级别与它们各自允许的异常现象">
+  <text class="ttl" x="20" y="22">隔离级别越高越安全，但并发性能越差</text>
+
+  <rect class="bx-r" x="20" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-r" x="107" y="58" text-anchor="middle">读未提交</text>
+  <text class="sm" x="107" y="76" text-anchor="middle">Read Uncommitted</text>
+  <text class="sm on-r" x="34" y="102">✗ 脏读</text>
+  <text class="sm on-r" x="34" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="34" y="142">✗ 幻读</text>
+
+  <rect class="bx-a" x="205" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-a" x="292" y="58" text-anchor="middle">读已提交</text>
+  <text class="sm" x="292" y="76" text-anchor="middle">Read Committed</text>
+  <text class="sm on-g" x="219" y="102">✓ 无脏读</text>
+  <text class="sm on-r" x="219" y="122">✗ 不可重复读</text>
+  <text class="sm on-r" x="219" y="142">✗ 幻读</text>
+
+  <rect class="bx-b" x="390" y="36" width="175" height="120" rx="10"/>
+  <text class="ttl on-b" x="477" y="58" text-anchor="middle">可重复读</text>
+  <text class="sm" x="477" y="76" text-anchor="middle">Repeatable Read</text>
+  <text class="sm on-g" x="404" y="102">✓ 无脏读</text>
+  <text class="sm on-g" x="404" y="122">✓ 可重复读</text>
+  <text class="sm on-r" x="404" y="142">✗ 幻读（部分实现有）</text>
+
+  <rect class="bx-g" x="575" y="36" width="165" height="120" rx="10"/>
+  <text class="ttl on-g" x="657" y="58" text-anchor="middle">串行化</text>
+  <text class="sm" x="657" y="76" text-anchor="middle">Serializable</text>
+  <text class="sm on-g" x="589" y="102">✓ 全都没有</text>
+  <text class="sm on-r" x="589" y="128">代价：并发低，</text>
+  <text class="sm on-r" x="589" y="146">冲突时事务被中止</text>
+
+  <rect class="bx-d" x="20" y="172" width="720" height="98" rx="10"/>
+  <text class="ttl" x="36" y="194">三种异常现象</text>
+  <text class="sm" x="36" y="216">脏读：读到了别人还没提交的数据，而对方随后回滚了 —— 你读到的是从未存在过的值</text>
+  <text class="sm" x="36" y="238">不可重复读：同一个事务里读两次同一行，值不一样（中间被别人改了并提交）</text>
+  <text class="sm" x="36" y="260">幻读：同一个查询执行两次，第二次多出了几行（中间被别人插入了）</text>
+</svg>
+<figcaption>图 24-2　PostgreSQL 和 MySQL 的默认级别都挡不住丢失更新</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 各数据库的默认级别</div>
   <ul>
-    <li>慢的是<strong>哪一段</strong>？（第 28 章的 trace 会告诉你）</li>
-    <li>是不是<strong>缺个索引</strong>就解决了？（第 13 章）</li>
-    <li>是不是 <strong>N+1 查询</strong>？（第 13 章）</li>
+    <li><strong>PostgreSQL</strong>：Read Committed</li>
+    <li><strong>MySQL (InnoDB)</strong>：Repeatable Read</li>
+    <li><strong>SQLite / Cloudflare D1</strong>：Serializable（因为它本质上串行执行写操作）</li>
   </ul>
   <p>
-    <strong>缓存是用「数据可能是旧的」换性能。</strong>如果加个索引就能解决，
-    那你白白引入了一整类一致性问题。
+    注意 D1 那一行 —— 如果你的应用只跑在 D1 上，很多并发问题会自动消失。
+    但这不是可以不理解它们的理由：一旦换成 Postgres，或者你的逻辑跨了数据库和 KV，问题立刻回来。
   </p>
 </div>
 
-<h2 id="aside">Cache-Aside 模式</h2>
+<h2 id="atomic">最好的办法：让数据库来判断</h2>
 
-<p>最常用的模式，逻辑很简单：先查缓存，没有就查库并回填。</p>
+<p>
+  在讲锁之前，先说一个更简单也更该优先考虑的思路：
+  <strong>把「读—判断—写」压缩成一条 SQL，让判断发生在数据库内部。</strong>
+</p>
 
-<div class="code" data-lang="ts">
-<pre>
-async function getVacation(sku: string, env: Bindings): Promise&lt;Vacation | null&gt; {
-  const key = `vacation:v1:${sku}`
-
-  // 1. 查缓存
-  const cached = await env.CACHE.get&lt;Vacation&gt;(key, 'json')
-  if (cached) return cached
-
-  // 2. 未命中，查数据库
-  const vacation = await db.findBySku(sku)
-  if (!vacation) return null
-
-  // 3. 回填，设置过期时间
-  await env.CACHE.put(key, JSON.stringify(vacation), { expirationTtl: 300 })
-
-  return vacation
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 在应用里判断</div>
+    <div class="code" data-lang="ts"><pre>
+const v = await repo.findBySku(sku)
+if (v.remaining &lt;= 0) {
+  return c.json({ error: '已售罄' }, 409)
 }
-</pre>
-</div>
-
-<h3>写入时怎么办：删除还是更新？</h3>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="缓存失效顺序导致的脏数据">
-  <text class="ttl on-r" x="20" y="22">先删缓存，再更新数据库　—— 有并发窗口</text>
-
-  <path class="ln-d" d="M150 34 V150"/>
-  <path class="ln-d" d="M450 34 V150"/>
-  <text class="sm on-b" x="90" y="48">写请求 A</text>
-  <text class="sm on-p" x="390" y="48">读请求 B</text>
-  <text class="sm on-g" x="620" y="48">状态</text>
-
-  <rect class="bx-b" x="170" y="56" width="180" height="24" rx="4"/>
-  <text class="sm" x="260" y="73" text-anchor="middle">① 删除缓存</text>
-  <text class="sm" x="620" y="73">缓存空</text>
-
-  <rect class="bx-p" x="470" y="84" width="180" height="24" rx="4"/>
-  <text class="sm" x="560" y="101" text-anchor="middle">② 未命中，查库读到<tspan class="on-r">旧值</tspan></text>
-
-  <rect class="bx-b" x="170" y="112" width="180" height="24" rx="4"/>
-  <text class="sm" x="260" y="129" text-anchor="middle">③ 更新数据库</text>
-  <text class="sm" x="620" y="129">库=新值</text>
-
-  <rect class="bx-r" x="470" y="140" width="180" height="24" rx="4"/>
-  <text class="sm on-r" x="560" y="157" text-anchor="middle">④ 把旧值写回缓存</text>
-
-  <rect class="bx-r" x="150" y="172" width="500" height="26" rx="6"/>
-  <text class="sm on-r" x="400" y="190" text-anchor="middle">结果：缓存里是旧值，而且要等到 TTL 过期才会自愈</text>
-
-  <rect class="bx-g" x="20" y="212" width="720" height="76" rx="10"/>
-  <text class="ttl on-g" x="380" y="234" text-anchor="middle">实践中的做法</text>
-  <text class="sm" x="40" y="256">① <tspan class="on-g">先更新数据库，再删除缓存</tspan>（不是更新缓存）—— 窗口小得多，是通用默认解</text>
-  <text class="sm" x="40" y="276">② 关键数据再加一道「延迟双删」：更新后立刻删一次，几百毫秒后再删一次</text>
-</svg>
-<figcaption>图 24-2　缓存失效的顺序问题 —— 这是第 23 章竞态在缓存上的翻版</figcaption>
-</figure>
-
-<div class="code" data-lang="ts">
-<pre>
-export async function updateVacation(sku: string, patch: Partial&lt;Vacation&gt;, env: Bindings) {
-  // ① 先写库（这是唯一的真相来源）
-  const updated = await db.update(sku, patch)
-
-  // ② 再删缓存 —— 删除而不是更新
-  await env.CACHE.delete(`vacation:v1:${sku}`)
-
-  // ③ 关联缓存也要清（最容易漏的一步）
-  await env.CACHE.delete(`vacation-list:v1:available`)
-
-  return updated
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 为什么是「删除」而不是「更新」</div>
-  <ul>
-    <li><strong>删除是幂等的</strong>，重复执行没有副作用；写入不是（可能写回旧值）。</li>
-    <li><strong>删除让下次读取自然拉到最新值</strong>，不需要你在写入路径上重新组装完整对象。</li>
-    <li><strong>如果这条数据之后没人读，你就白算了一次</strong> —— 删除是惰性的，更省。</li>
-  </ul>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 关联缓存是最容易漏的</div>
-  <p>
-    改了一个度假套餐，你记得删 <code>vacation:HR199</code>。<br>
-    但 <code>vacation-list:available</code>、<code>search:海岸</code>、
-    <code>homepage:featured</code> 里也有这条数据的副本 —— 它们全都过期了，而你不知道。<br>
-    这就是下面「版本化键」要解决的问题。
-  </p>
-</div>
-
-<h2 id="three">三大经典故障</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="缓存穿透、击穿、雪崩三种故障">
-  <rect class="bx-r" x="20" y="20" width="232" height="140" rx="10"/>
-  <text class="ttl on-r" x="136" y="44" text-anchor="middle">穿透</text>
-  <text class="sm" x="36" y="68">查一个<tspan class="on-r">根本不存在</tspan>的 key</text>
-  <text class="sm" x="36" y="90">缓存永远不命中</text>
-  <text class="sm" x="36" y="112">每次都打到数据库</text>
-  <text class="sm on-r" x="36" y="138">攻击者循环请求</text>
-  <text class="sm on-r" x="36" y="154">不存在的 ID 就能打垮你</text>
-
-  <rect class="bx-r" x="264" y="20" width="232" height="140" rx="10"/>
-  <text class="ttl on-r" x="380" y="44" text-anchor="middle">击穿</text>
-  <text class="sm" x="280" y="68">一个<tspan class="on-r">热点 key</tspan> 过期的瞬间</text>
-  <text class="sm" x="280" y="90">1000 个并发请求同时未命中</text>
-  <text class="sm" x="280" y="112">同时去查同一条数据</text>
-  <text class="sm on-r" x="280" y="138">数据库瞬间被 1000 个</text>
-  <text class="sm on-r" x="280" y="154">一模一样的查询压垮</text>
-
-  <rect class="bx-r" x="508" y="20" width="232" height="140" rx="10"/>
-  <text class="ttl on-r" x="624" y="44" text-anchor="middle">雪崩</text>
-  <text class="sm" x="524" y="68"><tspan class="on-r">大批 key 同时过期</tspan></text>
-  <text class="sm" x="524" y="90">（比如启动时统一写入，</text>
-  <text class="sm" x="524" y="112">TTL 都是 300 秒）</text>
-  <text class="sm on-r" x="524" y="138">或者缓存服务整个挂了</text>
-  <text class="sm on-r" x="524" y="154">全部流量直击数据库</text>
-
-  <rect class="bx-g" x="20" y="176" width="232" height="130" rx="10"/>
-  <text class="ttl on-g" x="136" y="198" text-anchor="middle">解法</text>
-  <text class="sm" x="36" y="222">· 缓存「空结果」，</text>
-  <text class="sm" x="36" y="240">　用短 TTL（30–60 秒）</text>
-  <text class="sm" x="36" y="262">· 布隆过滤器预判</text>
-  <text class="sm" x="36" y="284">· 参数格式校验：</text>
-  <text class="sm" x="36" y="300">　不合法的 ID 直接拒</text>
-
-  <rect class="bx-g" x="264" y="176" width="232" height="130" rx="10"/>
-  <text class="ttl on-g" x="380" y="198" text-anchor="middle">解法</text>
-  <text class="sm" x="280" y="222">· <tspan class="on-g">单飞</tspan>：同一个 key</text>
-  <text class="sm" x="280" y="240">　只让一个请求去查库，</text>
-  <text class="sm" x="280" y="258">　其余等它的结果</text>
-  <text class="sm" x="280" y="282">· 提前刷新：快过期时</text>
-  <text class="sm" x="280" y="300">　后台异步续期</text>
-
-  <rect class="bx-g" x="508" y="176" width="232" height="130" rx="10"/>
-  <text class="ttl on-g" x="624" y="198" text-anchor="middle">解法</text>
-  <text class="sm" x="524" y="222">· TTL 加<tspan class="on-g">随机抖动</tspan></text>
-  <text class="sm" x="524" y="240">　300 → 240~360 秒</text>
-  <text class="sm" x="524" y="262">· 缓存挂了要能降级，</text>
-  <text class="sm" x="524" y="280">　不能整个服务跟着挂</text>
-  <text class="sm" x="524" y="300">· 给数据库加限流兜底</text>
-</svg>
-<figcaption>图 24-3　三者都只在「高并发 + 特定时机」下出现，本地永远测不出来</figcaption>
-</figure>
-
-<h3>穿透：缓存空结果</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-const NOT_FOUND = '__nf__'
-
-async function getVacation(sku: string, env: Bindings) {
-  const key = `vacation:v1:${sku}`
-  const cached = await env.CACHE.get(key)
-
-  if (cached === NOT_FOUND) return null        // 命中「确实不存在」
-  if (cached) return JSON.parse(cached)
-
-  const vacation = await db.findBySku(sku)
-
-  if (!vacation) {
-    // 关键：把「不存在」也缓存起来，但 TTL 要短
-    // 太长的话，这条数据真被创建出来时用户要等很久才能看到
-    await env.CACHE.put(key, NOT_FOUND, { expirationTtl: 60 })
-    return null
-  }
-
-  await env.CACHE.put(key, JSON.stringify(vacation), { expirationTtl: 300 })
-  return vacation
-}
-</pre>
-</div>
-
-<h3>击穿：单飞</h3>
-
-<div class="code" data-lang="ts" data-file="src/lib/singleflight.ts">
-<pre>
-/**
- * 同一时刻对同一个 key 只执行一次 fn，其余调用共享同一个 Promise。
- * 第 20 章那个 withCache 里已经用过这个思路，这里把它独立出来。
- */
-export function createSingleflight&lt;T&gt;() {
-  const inflight = new Map&lt;string, Promise&lt;T&gt;&gt;()
-
-  return function run(key: string, fn: () =&gt; Promise&lt;T&gt;): Promise&lt;T&gt; {
-    const existing = inflight.get(key)
-    if (existing) return existing              // 已经有人在查了，跟着他
-
-    const p = fn().finally(() =&gt; inflight.delete(key))
-    inflight.set(key, p)
-    return p
-  }
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-const sf = createSingleflight&lt;Vacation | null&gt;()
-
-async function getVacation(sku: string, env: Bindings) {
-  const key = `vacation:v1:${sku}`
-  const cached = await env.CACHE.get&lt;Vacation&gt;(key, 'json')
-  if (cached) return cached
-
-  // 1000 个并发请求走到这里，只有 1 个真的去查库
-  return sf(key, async () =&gt; {
-    const v = await db.findBySku(sku)
-    if (v) await env.CACHE.put(key, JSON.stringify(v), { expirationTtl: 300 })
-    return v
+await repo.update(sku, {
+  remaining: v.remaining - 1
+})
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 让数据库判断</div>
+    <div class="code" data-lang="ts"><pre>
+const rows = await db
+  .update(vacations)
+  .set({
+    remaining: sql`${vacations.remaining} - 1`
   })
+  .where(and(
+    eq(vacations.sku, sku),
+    gt(vacations.remaining, 0)   // ← 关键
+  ))
+  .returning({ left: vacations.remaining })
+
+if (rows.length === 0) {
+  return c.json({ error: '已售罄' }, 409)
 }
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 单飞只在<strong>单个进程内</strong>有效</div>
-  <p>
-    跑 10 个实例的话，最坏情况是 10 个请求同时打到数据库 —— 比 1000 个好得多，
-    但不是 1 个。<br>
-    要做到全局单飞，需要分布式锁 —— 但第 23 章说过，<strong>分布式锁的复杂度往往不值得</strong>。
-    通常「把并发从 1000 降到 10」已经足够了。
-  </p>
-</div>
-
-<h3>雪崩：TTL 加抖动</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-/** 在基准 TTL 上下浮动 20%，避免大批 key 在同一秒集体过期 */
-function jitteredTtl(baseSeconds: number): number {
-  const delta = baseSeconds * 0.2
-  return Math.round(baseSeconds - delta + Math.random() * delta * 2)
-}
-
-await env.CACHE.put(key, value, { expirationTtl: jitteredTtl(300) })
-</pre>
+</pre></div>
+  </div>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 抖动这个手法你已经见过三次了</div>
+  <div class="t">&#9733; 为什么这样就安全了</div>
   <p>
-    第 20 章的重试退避、第 27 章的 WebSocket 重连、这里的 TTL —— 全都要加随机抖动。<br>
-    <strong>原理是同一个：任何「大量客户端在同一时刻做同一件事」的设计，都会制造尖峰。</strong>
-    把时刻打散，尖峰就变成了平缓的曲线。
+    单条 <code>UPDATE</code> 在数据库内部是<strong>原子</strong>的 ——
+    数据库会对这一行加锁，判断和写入之间没有任何间隙可以插队。<br>
+    <code>WHERE remaining &gt; 0</code> 不成立时，这条语句<strong>影响 0 行</strong>，
+    <code>returning</code> 返回空数组，你据此判断「抢完了」。<br>
+    两个请求同时执行，数据库会让它们排队：第一个把 1 改成 0，第二个的 <code>WHERE</code> 不成立，
+    影响 0 行。<strong>不会超卖。</strong>
   </p>
 </div>
 
-<h3>缓存挂了要能活</h3>
+<h3>约束是最后一道防线</h3>
+
+<div class="code" data-lang="sql">
+<pre>
+-- 库存不能为负，写进表定义里
+ALTER TABLE vacations ADD CONSTRAINT remaining_non_negative
+  CHECK (remaining &gt;= 0);
+
+-- 一个邮箱只能注册一次
+CREATE UNIQUE INDEX idx_users_email ON users (lower(email));
+
+-- 同一个用户对同一个套餐只能有一条「到季通知」
+CREATE UNIQUE INDEX idx_listener ON in_season_listeners (email, sku);
+</pre>
+</div>
+
+<p>有了唯一约束，「先查再插」的竞态就变成了一个可以捕获的错误：</p>
 
 <div class="code" data-lang="ts">
 <pre>
-async function getFromCache&lt;T&gt;(env: Bindings, key: string): Promise&lt;T | null&gt; {
-  try {
-    return await env.CACHE.get&lt;T&gt;(key, 'json')
-  } catch (err) {
-    // 缓存不可用不该让请求失败 —— 降级成直接查库
-    log('warn', 'cache_unavailable', { key, error: String(err) })
-    return null
+// ❌ 有竞态：两个请求可能同时通过检查
+const existing = await db.select().from(users).where(eq(users.email, email))
+if (existing.length) return c.json({ error: '邮箱已注册' }, 409)
+await db.insert(users).values({ email, ... })
+
+// ✅ 直接插，让数据库拒绝重复
+try {
+  await db.insert(users).values({ email, ... })
+} catch (err) {
+  if (isUniqueViolation(err)) {
+    return c.json({ error: '邮箱已注册' }, 409)
   }
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 但要小心「降级」变成「压垮」</div>
-  <p>
-    缓存挂掉后所有流量直击数据库，很可能把数据库也拖死 —— 故障扩散了。<br>
-    真正稳妥的做法是<strong>降级 + 限流</strong>：缓存不可用时，
-    对数据库的并发查询数设一个上限，超出的请求快速失败或返回降级内容，
-    <em>保住数据库，牺牲一部分请求</em>。这是第 20 章熔断思路的延伸。
-  </p>
-</div>
-
-<h2 id="keys">缓存键设计</h2>
-
-<div class="tw">
-<table>
-  <tr><th>要素</th><th>为什么</th><th>例子</th></tr>
-  <tr><td>命名空间</td><td>区分不同类型的数据，方便按前缀批量清理</td><td><code>vacation:</code></td></tr>
-  <tr><td><strong>版本号</strong></td><td>数据结构变了时，改版本号即可让所有旧缓存自然失效</td><td><code>v2:</code></td></tr>
-  <tr><td><strong>租户标识</strong></td><td>多租户下漏掉它就是跨租户数据泄露（第 21 章）</td><td><code>t:{tenantId}:</code></td></tr>
-  <tr><td>唯一标识</td><td>具体是哪条数据</td><td><code>HR199</code></td></tr>
-  <tr><td>影响结果的参数</td><td>语言、货币、权限等级都会改变返回内容</td><td><code>:zh:CNY</code></td></tr>
-</table>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// ❌ 危险：不同租户、不同语言的用户会拿到彼此的数据
-const key = `vacation:${sku}`
-
-// ✅
-const key = `t:${tenantId}:vacation:v2:${sku}:${locale}:${currency}`
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 版本号解决了「关联缓存漏删」的问题</div>
-  <p>
-    改了数据结构（比如给 Vacation 加了个字段）之后，你不需要去清理成千上万个旧键 ——
-    <strong>把代码里的 <code>v1</code> 改成 <code>v2</code>，所有旧缓存瞬间"失效"</strong>
-    （它们还在，但再也不会被读到，等 TTL 到了自然消失）。<br>
-    这和第 19 章的「内容指纹」、第 14 章的「索引别名切换」是同一个模式：
-    <em>不修改旧的，而是换一个新的名字。</em>
-  </p>
-</div>
-
-<h3>用「版本键」批量失效</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-/**
- * 列表类缓存最难精确失效。技巧：用一个「代」计数器嵌进键里。
- * 任何一条数据变化时，把计数器 +1，所有旧列表缓存一次性作废。
- */
-async function getVacationList(env: Bindings, filter: string) {
-  const gen = (await env.CACHE.get(`gen:vacations`)) ?? '0'
-  const key = `vacation-list:v1:g${gen}:${filter}`
-
-  const cached = await env.CACHE.get(key, 'json')
-  if (cached) return cached
-
-  const list = await db.list(filter)
-  await env.CACHE.put(key, JSON.stringify(list), { expirationTtl: jitteredTtl(300) })
-  return list
+  throw err
 }
 
-/** 任何写操作之后调用 */
-async function bumpVacationGeneration(env: Bindings) {
-  const cur = Number((await env.CACHE.get('gen:vacations')) ?? '0')
-  await env.CACHE.put('gen:vacations', String(cur + 1))
-  // 旧的 g0 键还在，但再也没人会用这个键去查了，TTL 到了自己消失
-}
+// ✅ 或者用 upsert 语义，完全不需要判断
+await db.insert(inSeasonListeners)
+  .values({ email, sku })
+  .onConflictDoNothing()
 </pre>
-</div>
-
-<h2 id="what">什么该缓存，什么不该</h2>
-
-<div class="tw">
-<table>
-  <tr><th>适合缓存</th><th>不该缓存</th></tr>
-  <tr><td>读多写少的数据（商品、文章、配置）</td><td>每次都在变的数据（实时库存、余额）</td></tr>
-  <tr><td>计算昂贵的结果（统计报表、推荐列表）</td><td>本来就很快的查询（主键取单条，几毫秒）</td></tr>
-  <tr><td>外部 API 结果（第 20 章的天气）</td><td><strong>涉及正确性的判断</strong>（权限、库存扣减）</td></tr>
-  <tr><td>渲染好的 HTML 片段</td><td>用户隐私数据（除非键里有用户标识且存储可信）</td></tr>
-  <tr><td>会话数据（第 9 章）</td><td>一次性的东西（验证码用完即弃，不是缓存是状态）</td></tr>
-</table>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 绝对不要缓存权限判断结果</div>
-  <p>
-    「把 <code>can(user, 'order:delete')</code> 的结果缓存 5 分钟」看起来很合理 ——
-    直到你把一个员工降权或者移出团队，<strong>他还能继续操作 5 分钟</strong>。<br>
-    权限相关的判断要么不缓存，要么在权限变更时<em>立即</em>主动失效。
-    <em>同理，第 21 章说的「离职后会话要立即失效」也是这个道理。</em>
-  </p>
-</div>
-
-<h2 id="local">进程内缓存 vs 共享缓存</h2>
-
-<div class="tw">
-<table>
-  <tr><th></th><th>进程内（Map）</th><th>共享（Redis / KV）</th></tr>
-  <tr><td>延迟</td><td>0 —— 就是内存读取</td><td>1–10 ms（网络往返）</td></tr>
-  <tr><td>一致性</td><td><strong>差</strong>：N 个实例 N 份，各自过期</td><td>好：所有实例看到同一份</td></tr>
-  <tr><td>失效</td><td><strong>没法主动失效其他实例的</strong></td><td>删一次全局生效</td></tr>
-  <tr><td>容量</td><td>受实例内存限制</td><td>可以很大</td></tr>
-  <tr><td>重启</td><td>全部丢失（冷启动尖峰）</td><td>保留</td></tr>
-  <tr><td>适合</td><td>不常变的配置、编译好的模板、路由表</td><td>业务数据</td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 两级缓存：又快又一致（大部分时候）</div>
-  <p>
-    进程内缓存放非常短的 TTL（几秒），后面挡着共享缓存。<br>
-    这样热点数据的大部分请求在内存里就返回了，同时「数据最多旧几秒」是可接受的。<br>
-    <em>但要清楚地知道：你接受了「最长 N 秒的不一致」这个代价。</em>
-  </p>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-const local = new Map&lt;string, { value: unknown; expiresAt: number }&gt;()
-
-async function twoTier&lt;T&gt;(env: Bindings, key: string, load: () =&gt; Promise&lt;T&gt;): Promise&lt;T&gt; {
-  const now = Date.now()
-
-  // L1：进程内，5 秒
-  const hit = local.get(key)
-  if (hit &amp;&amp; hit.expiresAt &gt; now) return hit.value as T
-
-  // L2：共享缓存
-  const shared = await env.CACHE.get&lt;T&gt;(key, 'json')
-  if (shared) {
-    local.set(key, { value: shared, expiresAt: now + 5000 })
-    return shared
-  }
-
-  // L3：数据源
-  const fresh = await load()
-  await env.CACHE.put(key, JSON.stringify(fresh), { expirationTtl: jitteredTtl(300) })
-  local.set(key, { value: fresh, expiresAt: now + 5000 })
-  return fresh
-}
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 进程内缓存要设上限</div>
-  <p>
-    <code>new Map()</code> 会无限增长 —— 每个不同的 key 都往里塞一条，
-    <strong>这就是内存泄漏</strong>。必须用 LRU 之类的有界结构，或者定期清理过期项。<br>
-    <em>「本地跑得好好的，线上跑几天就 OOM」，这是最常见的原因之一。</em>
-  </p>
-</div>
-
-<h2 id="monitor">监控</h2>
-
-<div class="box key">
-  <div class="t">&#9733; 没有监控的缓存，你不知道它有没有用</div>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-async function cachedGet&lt;T&gt;(env: Bindings, key: string, load: () =&gt; Promise&lt;T&gt;, c: Context) {
-  const start = Date.now()
-  const cached = await env.CACHE.get&lt;T&gt;(key, 'json')
-
-  if (cached) {
-    c.get('log')('info', 'cache', {
-      result: 'hit',
-      // 用键的前缀分组，别把完整 key 当维度 —— 高基数问题（第 28 章）
-      namespace: key.split(':')[0],
-      durationMs: Date.now() - start,
-    })
-    return cached
-  }
-
-  const value = await load()
-  await env.CACHE.put(key, JSON.stringify(value), { expirationTtl: jitteredTtl(300) })
-
-  c.get('log')('info', 'cache', {
-    result: 'miss',
-    namespace: key.split(':')[0],
-    durationMs: Date.now() - start,
-  })
-  return value
-}
-</pre>
-</div>
-
-<div class="tw">
-<table>
-  <tr><th>指标</th><th>怎么解读</th></tr>
-  <tr><td><strong>命中率</strong></td><td>低于 50% 说明缓存基本没起作用 —— 要么 TTL 太短，要么键设计太细碎</td></tr>
-  <tr><td>命中/未命中的耗时差</td><td>如果差距不大，说明这个缓存不值得存在</td></tr>
-  <tr><td>缓存层错误率</td><td>突然上升 = 缓存服务有问题，准备承受回源流量</td></tr>
-  <tr><td>内存使用 / 淘汰率</td><td>淘汰率高说明容量不够，热点数据被挤出去了</td></tr>
-</table>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 命中率 100% 也可能是坏事</div>
+  <div class="t">&#128161; 这个思路叫「乐观执行」</div>
   <p>
-    它可能意味着 TTL 太长，用户一直在看过期的数据。<br>
-    健康的命中率取决于业务 —— 商品详情页 95% 很正常，用户个人页 60% 可能就够了。
-    <strong>关键是你要知道这个数字，并且知道它为什么是这个值。</strong>
+    与其小心翼翼地先检查再动手（检查结果随时可能过期），不如<strong>直接动手，让数据库告诉你行不行</strong>。
+    代码更短，而且没有竞态窗口。<br>
+    应用层的检查仍然有价值 —— 用来给出友好的错误提示 —— 但它<strong>不能作为正确性的依据</strong>。
+    真正的保证必须在数据库层。
   </p>
 </div>
 
-<h2 id="invalidation">那句名言</h2>
+<h2 id="locks">两种锁</h2>
 
-<blockquote style="border-left:3px solid var(--line-2);margin:20px 0;padding:8px 18px;color:var(--fg-soft)">
-  计算机科学只有两件难事：缓存失效和命名。
-  <br><span style="font-size:13px">—— Phil Karlton</span>
-</blockquote>
+<p>
+  原子更新解决不了所有问题。当一次操作要读出数据、在应用里做复杂计算、再写回去时，
+  就需要锁了。
+</p>
 
-<p>这不只是个玩笑。缓存失效难，是因为它的难度不在写代码，而在<strong>知道该在什么时候失效什么</strong>：</p>
+<h3>乐观锁：假设不会冲突，冲突了就重试</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="乐观锁的版本号机制">
+  <text class="ttl on-g" x="20" y="22">乐观锁：每行带一个版本号，写入时检查版本没变过</text>
+
+  <rect class="bx-b" x="20" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-b" x="130" y="62" text-anchor="middle">编辑者 A</text>
+  <text class="sm" x="36" y="86">读出文章，version = 7</text>
+  <text class="sm" x="36" y="106">修改标题</text>
+  <text class="sm on-g" x="36" y="124">保存：WHERE version = 7 ✓</text>
+
+  <rect class="bx-p" x="280" y="40" width="220" height="90" rx="8"/>
+  <text class="ttl on-p" x="390" y="62" text-anchor="middle">编辑者 B</text>
+  <text class="sm" x="296" y="86">读出文章，version = 7</text>
+  <text class="sm" x="296" y="106">修改正文</text>
+  <text class="sm on-r" x="296" y="124">保存：WHERE version = 7 ✗</text>
+
+  <rect class="bx-g" x="540" y="40" width="200" height="90" rx="8"/>
+  <text class="ttl on-g" x="640" y="62" text-anchor="middle">数据库</text>
+  <text class="mono sm" x="556" y="88">version: 7</text>
+  <path class="ln-g" d="M600 96 V108" marker-end="url(#ar)"/>
+  <text class="mono sm on-g" x="556" y="124">version: 8（A 写入后）</text>
+
+  <path class="ln-b" d="M130 132 V152 H600 V152" marker-end="url(#ar)"/>
+  <path class="ln-r" d="M390 132 V172 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="20" y="188" width="720" height="62" rx="10"/>
+  <text class="ttl on-r" x="380" y="210" text-anchor="middle">B 的更新影响 0 行 —— 数据库告诉他「你手上的版本已经旧了」</text>
+  <text class="sm" x="380" y="232" text-anchor="middle">此时可以：提示用户「内容已被他人修改，请刷新」，或者自动重新读取并重试</text>
+</svg>
+<figcaption>图 24-3　乐观锁把「静默覆盖」变成了「明确的冲突」</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+export const articles = sqliteTable('articles', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  version: integer('version').notNull().default(1),   // ← 版本号
+})
+
+export async function updateArticle(
+  id: string,
+  patch: { title?: string; body?: string },
+  expectedVersion: number
+) {
+  const rows = await db
+    .update(articles)
+    .set({ ...patch, version: expectedVersion + 1 })
+    .where(and(
+      eq(articles.id, id),
+      eq(articles.version, expectedVersion)   // ← 版本必须没变
+    ))
+    .returning()
+
+  if (rows.length === 0) {
+    throw new HTTPException(409, {
+      message: '这篇文章已被他人修改，请刷新后重试',
+    })
+  }
+  return rows[0]
+}
+</pre>
+</div>
+
+<p>表单里把版本号带上，提交时一起发回来：</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+&lt;form method="POST" action={`/articles/${article.id}`}&gt;
+  &lt;input type="hidden" name="version" value={article.version} /&gt;
+  &lt;input name="title" value={article.title} /&gt;
+  &lt;textarea name="body"&gt;{article.body}&lt;/textarea&gt;
+  &lt;button type="submit"&gt;保存&lt;/button&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<h3>悲观锁：先占住，别人等着</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+await db.transaction(async (tx) =&gt; {
+  // FOR UPDATE：锁住这一行，直到事务结束
+  const [account] = await tx
+    .select()
+    .from(accounts)
+    .where(eq(accounts.id, id))
+    .for('update')
+
+  // 在应用里做复杂计算（这段时间别人读这一行会被阻塞）
+  const fee = calculateComplexFee(account, request)
+
+  if (account.balance &lt; fee) {
+    throw new HTTPException(400, { message: '余额不足' })
+  }
+
+  await tx.update(accounts)
+    .set({ balance: account.balance - fee })
+    .where(eq(accounts.id, id))
+})
+</pre>
+</div>
 
 <div class="tw">
 <table>
-  <tr><th>难点</th><th>表现</th></tr>
-  <tr><td>依赖关系不显式</td><td>改了商品价格，谁知道首页推荐、搜索结果、购物车里都缓存了它？</td></tr>
-  <tr><td>失效是「负空间」</td><td>忘了失效不会报错、不会崩溃 —— 只是数据悄悄错了几分钟</td></tr>
-  <tr><td>很难测试</td><td>单元测试里缓存通常是关掉的；集成测试很少覆盖「改完之后立刻读」</td></tr>
-  <tr><td>问题延迟出现</td><td>用户看到旧价格 → 下单 → 客服工单 → 三天后才追查到是缓存问题</td></tr>
+  <tr><th></th><th>乐观锁</th><th>悲观锁</th></tr>
+  <tr><td>假设</td><td>冲突很少见</td><td>冲突很常见</td></tr>
+  <tr><td>做法</td><td>写入时检查版本，冲突了报错/重试</td><td>读取时就加锁，别人排队等</td></tr>
+  <tr><td>适合</td><td>后台文章编辑、用户资料修改</td><td>秒杀、账户余额、票务座位</td></tr>
+  <tr><td>优点</td><td>不阻塞，吞吐高</td><td>不会失败，逻辑简单</td></tr>
+  <tr><td>缺点</td><td>冲突时用户要重做</td><td>并发低；<strong>有死锁风险</strong>；持锁期间不能干慢活</td></tr>
+  <tr><td>边缘环境</td><td>可用</td><td>需要真正的事务型数据库，KV 上做不了</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 持锁的时候绝不能做这三件事</div>
+  <ol>
+    <li><strong>调用外部 API。</strong>对方慢 5 秒，你就锁了 5 秒，所有等这一行的请求全部堆积。</li>
+    <li><strong>等待用户输入。</strong>「锁住座位等他填完表单」—— 用户去泡了杯咖啡，锁就一直在。</li>
+    <li><strong>按不同顺序锁多行。</strong>A 先锁 1 再锁 2，B 先锁 2 再锁 1 → <strong>死锁</strong>。
+        规则：<em>永远按同一个固定顺序加锁</em>（比如按主键升序）。</li>
+  </ol>
+</div>
+
+<h2 id="idempotency">幂等：重复请求不造成重复后果</h2>
+
+<p>
+  上面讲的都是「多个不同用户同时操作」。还有另一类问题：<strong>同一个请求被发了两次</strong>。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>为什么会重复</th><th>说明</th></tr>
+  <tr><td>用户双击提交按钮</td><td>最常见，前端禁用按钮能挡住大部分但不是全部</td></tr>
+  <tr><td>用户网络卡了刷新页面</td><td>如果没用第 8 章的 303 重定向，浏览器会重新提交</td></tr>
+  <tr><td>客户端自动重试</td><td>第 23 章讲过：响应超时了，但服务器其实处理成功了</td></tr>
+  <tr><td>第三方 webhook 重投</td><td>支付平台没收到你的 200，就会一直重发</td></tr>
+  <tr><td>队列的重试</td><td>下一章会讲：至少一次投递意味着可能投递多次</td></tr>
 </table>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 三条降低难度的原则</div>
-  <ol>
-    <li><strong>能用 TTL 就别用主动失效。</strong>「最多旧 5 分钟」如果业务能接受，
-        就不要去维护复杂的失效逻辑。TTL 是自愈的，主动失效是会漏的。</li>
-    <li><strong>用版本号代替精确失效。</strong>改一个计数器让一整类缓存作废，
-        比追踪每一条依赖关系可靠得多。</li>
-    <li><strong>把缓存收拢到数据访问层。</strong>和第 21 章的租户隔离同一个思路：
-        如果读写都必须经过 <code>VacationRepo</code>，那失效逻辑就只有一个地方要维护。</li>
-  </ol>
+  <div class="t">&#9733; 幂等的定义</div>
+  <p>
+    一个操作执行一次和执行 N 次，<strong>对系统状态的影响相同</strong>。<br>
+    <code>SET balance = 100</code> 是幂等的。<code>balance = balance - 10</code> <strong>不是</strong>。<br>
+    注意「幂等」说的是<em>结果</em>，不是<em>不执行</em>。重复请求可以照常返回成功，
+    只是不能产生第二笔订单。
+  </p>
 </div>
+
+<h3>幂等键</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="幂等键的处理流程">
+  <rect class="bx-b" x="20" y="24" width="180" height="46" rx="8"/>
+  <text class="sm" x="110" y="44" text-anchor="middle">客户端生成唯一键</text>
+  <text class="mono sm" x="110" y="60" text-anchor="middle">Idempotency-Key: abc-123</text>
+
+  <path class="ln-b" d="M204 47 H280" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="284" y="24" width="200" height="46" rx="8"/>
+  <text class="sm on-a" x="384" y="52" text-anchor="middle">查这个键处理过吗？</text>
+
+  <path class="ln-g" d="M384 74 V104" marker-end="url(#ar)"/>
+  <text class="sm on-g" x="330" y="94">没有</text>
+
+  <path class="ln-a" d="M488 47 H600" marker-end="url(#ar)"/>
+  <text class="sm on-a" x="544" y="40" text-anchor="middle">有</text>
+  <rect class="bx-p" x="604" y="24" width="136" height="46" rx="8"/>
+  <text class="sm on-p" x="672" y="44" text-anchor="middle">直接返回</text>
+  <text class="sm on-p" x="672" y="60" text-anchor="middle">上次的结果</text>
+
+  <rect class="bx-g" x="264" y="108" width="240" height="46" rx="8"/>
+  <text class="sm on-g" x="384" y="128" text-anchor="middle">在同一个事务里：</text>
+  <text class="sm on-g" x="384" y="146" text-anchor="middle">插入幂等键 + 执行业务</text>
+
+  <path class="ln-g" d="M384 158 V186" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="264" y="190" width="240" height="40" rx="8"/>
+  <text class="sm" x="384" y="214" text-anchor="middle">保存结果，返回</text>
+
+  <rect class="bx-d" x="60" y="244" width="640" height="30" rx="6"/>
+  <text class="sm" x="380" y="264" text-anchor="middle">关键：幂等键的插入和业务操作必须在同一个事务里，否则中间崩溃会留下不一致的状态</text>
+</svg>
+<figcaption>图 24-4　幂等键让「重试」变成一件安全的事</figcaption>
+</figure>
 
 <div class="code" data-lang="ts">
 <pre>
-// 缓存和失效都在数据访问层内部，业务代码完全不知道缓存的存在
-export function createCachedVacationRepo(db: DrizzleDb, cache: KVNamespace): VacationRepo {
-  const base = createVacationRepo(db)
+export const idempotencyKeys = sqliteTable('idempotency_keys', {
+  key: text('key').primaryKey(),
+  userId: text('user_id').notNull(),
+  responseBody: text('response_body', { mode: 'json' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
 
-  return {
-    async findBySku(sku) {
-      return cachedGet(cache, `vacation:v2:${sku}`, () =&gt; base.findBySku(sku))
-    },
-
-    async update(sku, patch) {
-      const result = await base.update(sku, patch)
-      // 失效逻辑只在这一处，不会散落到十个 handler 里
-      await cache.delete(`vacation:v2:${sku}`)
-      await bumpGeneration(cache, 'vacations')
-      return result
-    },
+app.post('/api/v1/orders', async (c) =&gt; {
+  const key = c.req.header('Idempotency-Key')
+  if (!key) {
+    throw new HTTPException(400, { message: '缺少 Idempotency-Key 请求头' })
   }
-}
+
+  const userId = c.get('user').id
+
+  // 1. 这个键处理过吗？
+  const [seen] = await db.select().from(idempotencyKeys)
+    .where(and(eq(idempotencyKeys.key, key), eq(idempotencyKeys.userId, userId)))
+
+  if (seen) {
+    // 处理过了，原样返回上次的结果
+    return c.json(seen.responseBody as object, 200, { 'Idempotent-Replay': 'true' })
+  }
+
+  // 2. 没处理过：业务 + 记键，同一个事务
+  const body = await c.req.json()
+
+  try {
+    const result = await db.transaction(async (tx) =&gt; {
+      const order = await createOrderIn(tx, userId, body)
+      await tx.insert(idempotencyKeys).values({
+        key, userId,
+        responseBody: { orderId: order.id },
+        createdAt: new Date(),
+      })
+      return { orderId: order.id }
+    })
+    return c.json(result, 201)
+  } catch (err) {
+    // 两个请求同时到达时，慢的那个会在这里撞上主键冲突
+    if (isUniqueViolation(err)) {
+      const [now] = await db.select().from(idempotencyKeys)
+        .where(eq(idempotencyKeys.key, key))
+      return c.json(now.responseBody as object, 200)
+    }
+    throw err
+  }
+})
 </pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 键从哪来</div>
+  <p>
+    <strong>客户端生成</strong>，用 <code>crypto.randomUUID()</code>，并且在<strong>重试时使用同一个键</strong>
+    —— 这是关键。如果每次重试都换个新键，幂等就失效了。<br>
+    表单场景可以在渲染页面时生成一个键放进隐藏字段，这样用户刷新重复提交也能被识别。<br>
+    别忘了给这张表加过期清理（比如保留 24 小时），否则它会无限增长。
+  </p>
+</div>
+
+<h2 id="distributed">多实例带来的额外麻烦</h2>
+
+<p>
+  上面的方案都依赖数据库来做仲裁。一旦状态跑到数据库之外，事情就变复杂了。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 这些「优化」会悄悄破坏正确性</div>
+  <ul>
+    <li><strong>进程内缓存。</strong>「我把库存缓存在内存里减少查询」—— 三个实例三份缓存，
+        全都是过期的（第 12 章讲过）。</li>
+    <li><strong>进程内的锁。</strong>JavaScript 里用一个 <code>Map</code> 记「这个 sku 正在处理中」——
+        只对当前进程有效，另外两个实例根本不知道。</li>
+    <li><strong>KV 上做计数器。</strong>Cloudflare KV 是最终一致的，
+        <code>get</code> 到的值可能是几秒前的。用它做「限量 100 个」必然超发。</li>
+  </ul>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>需求</th><th>用什么</th></tr>
+  <tr><td>强一致的计数、余额、库存</td><td>关系型数据库的原子更新 / 事务</td></tr>
+  <tr><td>Cloudflare 上的强一致状态</td><td>Durable Objects（每个对象全球单实例，天然串行）</td></tr>
+  <tr><td>限流计数（可以差一点点）</td><td>Redis <code>INCR</code>，或 Cloudflare Rate Limiting</td></tr>
+  <tr><td>分布式锁</td><td>Redis 的 <code>SET key val NX EX 30</code>；<strong>但先想想能不能不用</strong></td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 分布式锁比你想的难</div>
+  <p>
+    自己实现的分布式锁几乎总是有 bug：持锁的进程崩了怎么办（要有超时）？
+    超时了但它其实还活着，两个进程同时以为自己持锁怎么办？释放锁时，
+    怎么保证你释放的是自己那把而不是别人的？<br>
+    <strong>结论：能用数据库的原子操作解决，就别上分布式锁。</strong>
+    单条 <code>UPDATE ... WHERE</code> 能解决的问题，不要用一百行锁代码去解决。
+  </p>
+</div>
+
+<h2 id="test">怎么把竞态测出来</h2>
+
+<p>
+  这是本章最实用的一节。竞态之所以难缠，是因为普通测试碰不到它。
+  但你可以<strong>主动制造并发</strong>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/booking.test.ts">
+<pre>
+import { describe, it, expect, beforeEach } from 'vitest'
+
+describe('库存扣减', () =&gt; {
+  beforeEach(async () =&gt; {
+    await resetDb()
+    await seedVacation({ sku: 'HR199', remaining: 1 })   // 只有 1 份
+  })
+
+  it('20 个并发请求只能成功 1 个', async () =&gt; {
+    // 关键：同时发出，而不是 for 循环里 await
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =&gt;
+        app.request('/vacations/HR199/book', { method: 'POST' })
+      )
+    )
+
+    const ok = results.filter((r) =&gt; r.status === 200).length
+    const soldOut = results.filter((r) =&gt; r.status === 409).length
+
+    expect(ok).toBe(1)          // ← 有竞态的实现会得到 2、3 甚至 20
+    expect(soldOut).toBe(19)
+
+    // 更重要：验证数据库最终状态
+    const v = await repo.findBySku('HR199')
+    expect(v.remaining).toBe(0)
+    expect(await countOrders('HR199')).toBe(1)
+  })
+
+  it('重复的幂等键只创建一个订单', async () =&gt; {
+    const key = crypto.randomUUID()
+    const send = () =&gt;
+      app.request('/api/v1/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: JSON.stringify({ sku: 'HR199' }),
+      })
+
+    const [a, b] = await Promise.all([send(), send()])
+
+    const bodyA = await a.json()
+    const bodyB = await b.json()
+    expect(bodyA.orderId).toBe(bodyB.orderId)     // 同一个订单
+    expect(await countOrders('HR199')).toBe(1)
+  })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 让竞态窗口变大，更容易复现</div>
+  <p>
+    如果并发测试偶尔通过偶尔失败，说明窗口太窄。在「读」和「写」之间人为插一个延迟，
+    可以让 bug 稳定复现：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+const v = await repo.findBySku(sku)
+
+// 只在测试环境生效的「竞态放大器」
+if (process.env.RACE_DELAY) {
+  await new Promise((r) =&gt; setTimeout(r, Number(process.env.RACE_DELAY)))
+}
+
+await repo.update(sku, { remaining: v.remaining - 1 })
+</pre></div>
+  <p>
+    修好之后再跑一遍：<strong>正确的实现加了延迟也应该通过</strong>。
+    这是验证「你是真修好了」还是「只是把窗口变窄了」的好办法。
+  </p>
+</div>
+
+<h2 id="checklist">自查清单</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 在代码里找这些模式</div>
+  <ul>
+    <li>☐ 有没有「先 <code>SELECT</code> 判断，再 <code>INSERT</code>/<code>UPDATE</code>」的地方？
+        → 改成原子更新或依赖唯一约束</li>
+    <li>☐ 有没有 <code>x = x + 1</code> 形式的读改写？
+        → 改成 <code>SET x = x + 1</code> 让数据库算</li>
+    <li>☐ 表单编辑有没有可能静默覆盖别人的修改？→ 加版本号</li>
+    <li>☐ 创建订单、扣款、发消息的接口，重复调用会怎样？→ 加幂等键</li>
+    <li>☐ 有没有状态存在进程内存里？→ 挪到数据库或共享存储</li>
+    <li>☐ 关键的业务约束（余额非负、唯一性）有没有写进数据库约束？</li>
+    <li>☐ 持有锁的代码块里有没有网络调用？</li>
+    <li>☐ 有没有至少一个并发测试？</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>加缓存之前先确认瓶颈 —— 缺索引和 N+1 不该用缓存来掩盖。</li>
-  <li>Cache-aside：<strong>先更新数据库，再删除缓存</strong>（删除而非更新）。</li>
-  <li>穿透 → 缓存空结果（短 TTL）；击穿 → 单飞；雪崩 → TTL 加抖动 + 降级限流。</li>
-  <li>缓存键必须包含：命名空间、<strong>版本号</strong>、<strong>租户标识</strong>、影响结果的参数。</li>
-  <li>版本号和「代计数器」让批量失效变得可靠，避免追踪每一条依赖。</li>
-  <li>不要缓存权限判断和涉及正确性的数据。</li>
-  <li>进程内缓存要设容量上限，否则就是内存泄漏。</li>
-  <li>必须监控命中率 —— 否则你不知道这个缓存有没有用。</li>
-  <li>能用 TTL 就别用主动失效；把缓存收拢到数据访问层。</li>
+  <li><strong>check-then-act</strong> 是所有竞态的根源：读和写之间的间隙会被别人插队。</li>
+  <li>事务保证「全成或全败」，<strong>不保证「别人不插队」</strong>—— 两者是不同的问题。</li>
+  <li>优先用<strong>原子更新</strong>（<code>UPDATE ... WHERE 条件</code>）把判断交给数据库。</li>
+  <li>数据库约束（UNIQUE、CHECK）是最后一道防线，应用层检查只负责友好提示。</li>
+  <li>乐观锁适合冲突少的编辑场景，悲观锁适合冲突多的抢占场景；持锁期间不做慢操作。</li>
+  <li>幂等键让重复请求安全；键必须由客户端生成并在重试时复用。</li>
+  <li>能用数据库原子操作就别上分布式锁。</li>
+  <li>用 <code>Promise.all</code> 写并发测试，用人为延迟放大竞态窗口。</li>
+  <li>缓存是一致性问题的另一个战场，下一章专门讲。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>给第 13 章的 <code>findBySku</code> 加上 cache-aside，用日志统计命中率。刷新页面几十次，看看命中率是多少。</li>
-    <li>制造一次缓存穿透：循环请求 1000 个不存在的 SKU，观察数据库查询次数。然后加上「缓存空结果」再测一遍。</li>
-    <li>制造一次击穿：让缓存过期，然后用 <code>Promise.all</code> 同时发 100 个请求，数一数数据库被查了几次。接上单飞后再数。</li>
-    <li>把 TTL 固定成 60 秒，一次性写入 100 个键，观察 60 秒后是否出现请求尖峰。加上抖动再看。</li>
-    <li>在多租户场景下故意写一个不含 <code>tenantId</code> 的缓存键，用两个租户的账号访问同一个资源，确认能复现数据串号。（然后修好它。）</li>
-    <li>改一条数据后立刻读取，确认拿到的是新值。再把「删缓存」那行注释掉，确认能复现脏数据。</li>
+    <li>给云雀旅行加一个「限量套餐」：<code>remaining</code> 字段初始为 1。先用有竞态的写法实现下单，然后写一个 20 并发的测试，看着它失败。</li>
+    <li>改成原子更新，让测试通过。再加上 <code>RACE_DELAY=50</code> 跑一次，确认仍然通过。</li>
+    <li>给文章编辑加乐观锁：两个浏览器窗口打开同一篇文章，都修改，先后保存。确认第二个人收到的是明确的冲突提示，而不是静默覆盖。</li>
+    <li>给下单接口加幂等键。用同一个键连发两次 <code>curl</code>，确认只创建了一个订单，且两次响应内容相同。</li>
+    <li>给 <code>vacations.remaining</code> 加上 <code>CHECK (remaining &gt;= 0)</code> 约束，然后故意写一段会扣成负数的代码，看数据库怎么拒绝你。</li>
+    <li>翻一遍你自己项目的代码，按上面的自查清单找一遍。找到几处？</li>
   </ol>
 </div>
 

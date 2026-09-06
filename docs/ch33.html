@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 33 章 · 更多资源 — Hono 全栈开发教程</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="33">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 33 章</span>
+<h1>更多资源</h1>
+<p class="lede">
+  三十二章走下来，你已经从「Hello World」做到了一个能上线、能维护、
+  并且在出问题时能自己说出哪里不对的完整应用。
+  这一章给出继续深入的方向、值得收藏的资料，以及一份帮你巩固的复习地图。
+</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="recap">你学到了什么</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="全书知识地图：HTTP 基础、Hono 核心、工程实践、安全、数据与集成、并发与异步">
+  <rect class="bx-a" x="290" y="16" width="180" height="42" rx="10"/>
+  <text class="ttl on-a" x="380" y="42" text-anchor="middle">Hono 应用</text>
+
+  <path class="ln-d" d="M330 60 L130 96"/>
+  <path class="ln-d" d="M360 60 L300 96"/>
+  <path class="ln-d" d="M400 60 L460 96"/>
+  <path class="ln-d" d="M430 60 L630 96"/>
+
+  <rect class="bx-b" x="20" y="100" width="220" height="96" rx="10"/>
+  <text class="ttl on-b" x="34" y="122">HTTP 基础</text>
+  <text class="sm" x="34" y="142">URL 结构 · 方法 · 状态码</text>
+  <text class="sm" x="34" y="160">请求头 / 响应头 · 可访问性</text>
+  <text class="sm" x="34" y="178">Cookie · 会话 · 缓存</text>
+  <text class="sm" x="34" y="192">第 6、9、20 章</text>
+
+  <rect class="bx-p" x="252" y="100" width="220" height="96" rx="10"/>
+  <text class="ttl on-p" x="266" y="122">Hono 核心</text>
+  <text class="sm" x="266" y="142">路由 · Context · 中间件</text>
+  <text class="sm" x="266" y="160">JSX 渲染 · 校验器</text>
+  <text class="sm" x="266" y="178">RPC · 测试客户端</text>
+  <text class="sm" x="266" y="192">第 3、7、10、17、18 章</text>
+
+  <rect class="bx-g" x="484" y="100" width="256" height="96" rx="10"/>
+  <text class="ttl on-g" x="498" y="122">工程实践</text>
+  <text class="sm" x="498" y="142">测试 · 类型 · 分层</text>
+  <text class="sm" x="498" y="160">日志 · 监控 · CI/CD</text>
+  <text class="sm" x="498" y="178">可观测性 · 依赖管理</text>
+  <text class="sm" x="498" y="192">第 4、5、12、29、30、32 章</text>
+
+  <rect class="bx-r" x="20" y="212" width="232" height="100" rx="10"/>
+  <text class="ttl on-r" x="34" y="234">安全</text>
+  <text class="sm" x="34" y="256">HTTPS · CSP · CSRF · XSS</text>
+  <text class="sm" x="34" y="274">密码哈希 · JWT · OAuth</text>
+  <text class="sm" x="34" y="292">输入校验 · 多租户隔离</text>
+  <text class="sm" x="34" y="306">第 8、21、22 章</text>
+
+  <rect class="bx" x="264" y="212" width="232" height="100" rx="10"/>
+  <text class="ttl" x="278" y="234">数据与集成</text>
+  <text class="sm" x="278" y="256">SQL · ORM · 迁移 · 索引</text>
+  <text class="sm" x="278" y="274">对象存储 · 文件 · 时区</text>
+  <text class="sm" x="278" y="292">搜索 · 第三方 API · 熔断</text>
+  <text class="sm" x="278" y="306">第 13–16、23 章</text>
+
+  <rect class="bx-a" x="508" y="212" width="232" height="100" rx="10"/>
+  <text class="ttl on-a" x="522" y="234">并发 · 缓存 · 异步</text>
+  <text class="sm" x="522" y="256">竞态 · 事务 · 锁 · 幂等</text>
+  <text class="sm" x="522" y="274">队列 · 重试 · Webhook</text>
+  <text class="sm" x="522" y="292">缓存一致性 · SSE · 广播</text>
+  <text class="sm" x="522" y="306">第 24–28 章</text>
+</svg>
+<figcaption>图 33-1　这些知识里，只有中间那一块是 Hono 专属的</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 最值钱的部分不会过时</div>
+  <p>
+    HTTP 的工作方式、缓存的原理、安全的攻防、分层的思路、测试的方法 ——
+    这些和框架无关。哪天你换到别的语言、别的框架，它们照样带得走。<br>
+    Hono 只是一个特别顺手的容器，让你能把注意力放在这些真正重要的东西上。
+  </p>
+</div>
+
+<h2 id="official">官方资料</h2>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128218;</span><h4>hono.dev</h4>
+    <p>官方文档。写得非常好，而且每个 API 都有可运行的例子。有中文版。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128187;</span><h4>github.com/honojs/hono</h4>
+    <p>源码。核心不到一万行，读起来比你想的容易。想搞懂中间件怎么串起来的，直接看 <code>compose.ts</code>。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#129513;</span><h4>github.com/honojs/middleware</h4>
+    <p>所有 <code>@hono/*</code> 官方扩展都在这里：zod-validator、zod-openapi、oauth-providers、swagger-ui 等。</p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128172;</span><h4>Discord 社区</h4>
+    <p>官方 Discord，维护者很活跃。提问前先搜一下，很多问题有人问过了。</p>
+  </div>
+</div>
+
+<h2 id="mdn">Web 基础（比框架文档更值得读）</h2>
+
+<div class="tw">
+<table>
+  <tr><th>资源</th><th>为什么值得读</th></tr>
+  <tr>
+    <td><strong>MDN Web Docs</strong></td>
+    <td>Fetch API、Request、Response、Headers、URL、FormData、Web Crypto ——
+        Hono 的一切都建立在这些之上。<strong>读 MDN 就是在读 Hono 的底层。</strong></td>
+  </tr>
+  <tr>
+    <td><strong>MDN HTTP 指南</strong></td>
+    <td>缓存、CORS、Cookie、安全响应头的权威解释。本教程第 6、9、18、20、21 章的内容在这里有更完整的版本</td>
+  </tr>
+  <tr>
+    <td><strong>web.dev</strong></td>
+    <td>性能优化、Core Web Vitals、可访问性。前端和后端的交界地带</td>
+  </tr>
+  <tr>
+    <td><strong>OWASP Top 10</strong></td>
+    <td>Web 安全的必读清单。第 21 章覆盖了其中大部分，但值得读原文</td>
+  </tr>
+  <tr>
+    <td><strong>HTTP RFC（9110 / 9111）</strong></td>
+    <td>枯燥但权威。遇到「到底该返回哪个状态码」的争论时，这里有答案</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="ecosystem">生态里值得认识的工具</h2>
+
+<div class="tw">
+<table>
+  <tr><th>领域</th><th>工具</th><th>用途</th></tr>
+  <tr><td>校验</td><td>Zod / Valibot / ArkType</td><td>Valibot 体积更小，适合边缘部署</td></tr>
+  <tr><td>数据库</td><td>Drizzle / Prisma / Kysely</td><td>Kysely 是「带类型的 SQL 构造器」，介于原生 SQL 和 ORM 之间</td></tr>
+  <tr><td>认证</td><td>Lucia / better-auth / Auth.js</td><td>不想自己实现会话和 OAuth 时</td></tr>
+  <tr><td>全栈框架</td><td>HonoX</td><td>文件路由 + 孤岛架构，第 19 章介绍过</td></tr>
+  <tr><td>测试</td><td>Vitest / Playwright / MSW</td><td>MSW 用于拦截和模拟外部 HTTP 请求</td></tr>
+  <tr><td>代码质量</td><td>Biome / ESLint + Prettier</td><td>Biome 一个工具搞定检查和格式化</td></tr>
+  <tr><td>可观测性</td><td>Sentry / Axiom / Baselime</td><td>后两个对边缘环境支持较好</td></tr>
+  <tr><td>队列与定时</td><td>Cloudflare Queues / Cron Triggers</td><td>把慢操作移出请求路径</td></tr>
+</table>
+</div>
+
+<h2 id="next">接下来做什么</h2>
+
+<p>看完教程最容易发生的事是「学了但没用上，两个月后忘光」。避免的办法只有一个：<strong>做点东西。</strong></p>
+
+<h3>三个练手项目，难度递增</h3>
+
+<div class="cards">
+  <div class="card">
+    <span class="ic">&#128279;</span><h4>短链接服务</h4>
+    <p>
+      涉及：路由、KV 存储、重定向、防滥用限流、点击统计。<br>
+      <strong>一个周末</strong>能做完，而且真的能用。
+    </p>
+  </div>
+  <div class="card">
+    <span class="ic">&#128221;</span><h4>带认证的记事本</h4>
+    <p>
+      涉及：注册登录、会话、数据库 CRUD、权限（只能看自己的）、表单校验、分页。<br>
+      <strong>覆盖本教程八成内容。</strong>
+    </p>
+  </div>
+  <div class="card">
+    <span class="ic">&#127760;</span><h4>API + SPA 全栈应用</h4>
+    <p>
+      涉及：REST 设计、RPC 类型共享、React 前端、文件上传、第三方登录、部署流水线。<br>
+      <strong>接近真实产品的复杂度。</strong>
+    </p>
+  </div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 做项目时逼自己做这三件事</div>
+  <ol>
+    <li><strong>真的部署上去。</strong>本地能跑和线上能跑之间隔着一整章（第 31 章）的坑。</li>
+    <li><strong>真的写测试。</strong>哪怕只有五个。你会立刻发现哪些代码难测 —— 那通常也是设计有问题的地方。</li>
+    <li><strong>三个月后回来加个功能。</strong>这时你才会真正体会到第 4 章的分层、第 32 章的文档值多少钱。</li>
+  </ol>
+</div>
+
+<h2 id="ask">怎么问出好问题</h2>
+
+<p>
+  卡住时，问问题的质量直接决定你多久能被解答。一个好问题包含：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+【环境】
+Hono 4.6.3 · Node 20.11 · 部署在 Cloudflare Workers
+
+【我想做什么】
+在中间件里读会话，然后在路由处理函数中用 c.get('user')
+
+【实际发生了什么】
+c.get('user') 永远是 undefined，中间件里的 console.log 确实打印了用户对象
+
+【最小复现代码】
+（20 行以内，能直接跑起来的）
+
+【我已经试过】
+- 确认中间件注册在路由之前
+- 确认 c.set 确实被调用了
+- 查了文档的 Variables 一节，但没找到相关说明
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 「橡皮鸭效应」</div>
+  <p>
+    很多人在写完最小复现代码的过程中就自己找到了原因 ——
+    因为把问题精确表达出来，本身就是一次严格的排查。<br>
+    <strong>所以就算最后没发出去，写下来也不亏。</strong>
+  </p>
+</div>
+
+<h2 id="contribute">参与开源</h2>
+
+<p>Hono 是个欢迎新人的项目。如果你想回馈：</p>
+
+<ul>
+  <li><strong>改文档。</strong>发现文档里有错、有过时的例子、或者某处让你困惑 —— 提个 PR。
+      这是门槛最低也最受欢迎的贡献。</li>
+  <li><strong>提有质量的 issue。</strong>带最小复现的 bug 报告，对维护者的价值极高。</li>
+  <li><strong>回答别人的问题。</strong>你刚踩过的坑，正是别人现在踩的。</li>
+  <li><strong>写中间件。</strong>做了个通用的东西？发到 npm，或者提交到官方 middleware 仓库。</li>
+  <li><strong>写文章。</strong>把你解决某个问题的过程写出来。搜索引擎会替你把它送到需要的人面前。</li>
+</ul>
+
+<h2 id="last">最后几句</h2>
+
+<div class="box key">
+  <div class="t">&#9733; 三个会一直有用的判断</div>
+  <ol>
+    <li>
+      <strong>「这个响应能给另一个用户看吗？」</strong><br>
+      这一个问题同时决定了：能不能缓存（第 20 章）、能不能放 CDN、
+      有没有数据泄露风险（第 21 章）。
+    </li>
+    <li>
+      <strong>「如果现在同时跑三个实例，会出什么问题？」</strong><br>
+      它会立刻暴露出所有藏在内存里的状态（第 12 章）。
+    </li>
+    <li>
+      <strong>「这个依赖挂了，我的应用会怎样？」</strong><br>
+      数据库、第三方 API、邮件服务 —— 每一个都会挂。想清楚降级方案（第 23 章）。
+    </li>
+  </ol>
+</div>
+
+<p>
+  最后回到第 1 章那句话：<strong>Hono 应用就是一个 <code>(Request) =&gt; Response</code> 的函数，
+  中间件是包在它外面的一层层洋葱皮。</strong>
+</p>
+
+<p>
+  三十三章过去，这句话应该已经从一句抽象的描述，变成了你脑子里一幅具体的图像：
+  请求进来，穿过日志、安全头、会话、认证一层层中间件，
+  到达处理函数，读参数、查数据库、渲染视图，
+  然后响应带着结果原路返回，沿途被压缩、被加上缓存头、被记录耗时。
+</p>
+
+<p>
+  剩下的，就是去写点什么了。
+</p>
+
+<div class="exercise">
+  <h3>最后一个练习</h3>
+  <ol>
+    <li>从上面三个练手项目里挑一个，今天就把仓库建起来，写出第一个路由。</li>
+    <li>给它配好第 5 章的测试和第 31 章的部署流水线 —— 在项目还小的时候做，成本几乎为零。</li>
+    <li>把它部署到线上，发给一个朋友看。</li>
+    <li>在 README 里写清楚：这是什么、怎么跑、你为什么做它。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

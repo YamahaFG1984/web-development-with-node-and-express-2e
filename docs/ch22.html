@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 22 章 · 集成第三方 API — Hono 全栈开发教程</title>
+<title>第 22 章 · 多租户与权限 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="22">
@@ -12,278 +12,207 @@
 <main>
 
 <span class="chapter-eyebrow">第 22 章</span>
-<h1>集成第三方 API</h1>
+<h1>多租户与权限</h1>
 <p class="lede">
-  天气、地图、支付、短信、AI —— 现代应用的很大一部分能力来自别人的服务。
-  这一章讲怎么调用它们，以及更重要的：<strong>怎么在它们出问题时不被拖垮</strong>。
+  第 21 章讲了「你是谁」和「你能做什么」。这一章讲一个更具体也更危险的问题：
+  <strong>怎么保证 A 公司的用户永远看不到 B 公司的数据。</strong>
+  这类漏洞不需要任何攻击技巧 —— 改一个 URL 里的数字就够了。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>在服务端用 <code>fetch</code> 调外部 API，处理超时和重试</li>
-    <li>给云雀旅行的天气组件接上真实数据</li>
-    <li>用缓存把外部调用次数降下来</li>
-    <li>做地理编码并在页面上显示地图</li>
-    <li>用降级和熔断保证「第三方挂了，我不挂」</li>
+    <li>认识 IDOR：最常见也最容易写出来的越权漏洞</li>
+    <li>选择多租户的隔离级别，理解各自的代价</li>
+    <li>把权限检查从「记得写」变成「想漏都漏不掉」的结构性保证</li>
+    <li>选择合适的权限模型：RBAC / ABAC / ReBAC</li>
+    <li>给权限写测试，并留下审计日志</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="where">在哪里调：前端还是后端</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="前端直连与后端代理两种方式">
-  <rect class="bx-r" x="20" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-r" x="192" y="44" text-anchor="middle">浏览器直接调第三方</text>
-  <text class="sm" x="36" y="72">浏览器 → api.weather.gov</text>
-  <text class="sm on-r" x="36" y="102">&#10007; API Key 会暴露在前端代码里</text>
-  <text class="sm on-r" x="36" y="124">&#10007; 每个用户都消耗一次配额</text>
-  <text class="sm on-r" x="36" y="146">&#10007; 对方不支持 CORS 就调不通</text>
-  <text class="sm on-r" x="36" y="168">&#10007; 没法缓存，没法统一处理错误</text>
-  <text class="sm on-g" x="36" y="198">&#10003; 唯一合适的情况：地图 SDK 这类</text>
-  <text class="sm on-g" x="36" y="216">&nbsp;&nbsp;&nbsp;本来就为前端设计、Key 可域名限制的</text>
-
-  <rect class="bx-g" x="395" y="20" width="345" height="210" rx="10"/>
-  <text class="ttl on-g" x="567" y="44" text-anchor="middle">后端代理（推荐）</text>
-  <text class="sm" x="411" y="72">浏览器 → 你的 Hono → api.weather.gov</text>
-  <text class="sm on-g" x="411" y="102">&#10003; Key 留在服务端，永不外泄</text>
-  <text class="sm on-g" x="411" y="124">&#10003; 一次调用可以服务成千上万用户</text>
-  <text class="sm on-g" x="411" y="146">&#10003; 没有 CORS 问题</text>
-  <text class="sm on-g" x="411" y="168">&#10003; 能缓存、能重试、能降级</text>
-  <text class="sm on-g" x="411" y="190">&#10003; 能把对方的数据格式转成你想要的</text>
-  <text class="sm" x="411" y="216">代价：多一跳延迟（缓存后可忽略）</text>
-</svg>
-<figcaption>图 22-1　默认走后端代理，除非有明确理由</figcaption>
-</figure>
-
-<div class="box warn">
-  <div class="t">&#9888; API Key 放前端 = 公开你的信用卡</div>
-  <p>
-    「打包压缩之后看不出来」是错觉 —— 打开浏览器的 Network 面板，
-    Key 就明晃晃写在请求头或 URL 里。有人写过爬虫专门扫 GitHub 和网页找泄露的 Key。
-    <strong>能计费的 Key 一律不进前端。</strong>
-  </p>
-</div>
-
-<h2 id="fetch">服务端的 fetch</h2>
-
-<p>
-  Hono 的运行时都内置了 <code>fetch</code>，不用装 axios 之类的库。但直接裸用有几个问题：
-</p>
+<h2 id="idor">从一个五行代码的漏洞说起</h2>
 
 <div class="code" data-lang="ts">
 <pre>
-// ❌ 三个隐患
-const res = await fetch(url)      // ① 对方不响应就永远挂着
-const data = await res.json()     // ② 返回 500 时 res.ok 是 false，但这里不会抛错
+app.get('/api/v1/orders/:id', requireLogin, async (c) =&gt; {
+  const order = await db.select().from(orders)
+    .where(eq(orders.id, c.req.param('id')))
+  return c.json(order[0])
+})
 </pre>
 </div>
-
-<p>写一个带超时、重试和错误检查的封装：</p>
-
-<div class="code" data-lang="ts" data-file="src/lib/http.ts">
-<pre>
-export class HttpError extends Error {
-  constructor(public status: number, public url: string, message: string) {
-    super(message)
-  }
-}
-
-type Options = RequestInit &amp; {
-  timeoutMs?: number
-  retries?: number
-}
-
-export async function fetchJson&lt;T&gt;(url: string, opts: Options = {}): Promise&lt;T&gt; {
-  const { timeoutMs = 5000, retries = 2, ...init } = opts
-
-  for (let attempt = 0; attempt &lt;= retries; attempt++) {
-    // AbortSignal.timeout 是标准 API，所有运行时都有
-    const signal = AbortSignal.timeout(timeoutMs)
-
-    try {
-      const res = await fetch(url, {
-        ...init,
-        signal,
-        headers: {
-          'User-Agent': 'MeadowlarkTravel/1.0 (contact@meadowlarktravel.com)',
-          Accept: 'application/json',
-          ...init.headers,
-        },
-      })
-
-      // 4xx 是我们的问题，重试没用，直接抛
-      if (res.status &gt;= 400 &amp;&amp; res.status &lt; 500) {
-        throw new HttpError(res.status, url, `客户端错误 ${res.status}`)
-      }
-
-      // 5xx 和 429 可以重试
-      if (!res.ok) {
-        throw new HttpError(res.status, url, `服务端错误 ${res.status}`)
-      }
-
-      return (await res.json()) as T
-    } catch (err) {
-      const isLast = attempt === retries
-      const notRetryable = err instanceof HttpError &amp;&amp; err.status &lt; 500 &amp;&amp; err.status !== 429
-
-      if (isLast || notRetryable) throw err
-
-      // 指数退避 + 随机抖动，避免所有实例同时重试
-      const delay = 2 ** attempt * 200 + Math.random() * 200
-      await new Promise((r) =&gt; setTimeout(r, delay))
-    }
-  }
-
-  throw new Error('unreachable')
-}
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 为什么要「指数退避 + 抖动」</div>
-  <p>
-    对方服务过载时，如果所有客户端都在固定 1 秒后重试，就会形成一波又一波的冲击，
-    让它永远缓不过来 —— 这叫<strong>惊群效应</strong>。<br>
-    每次等待时间翻倍（200ms、400ms、800ms）给对方喘息时间；
-    再加一点随机抖动，把重试时刻打散。
-  </p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 不是所有请求都能重试</div>
-  <p>
-    <strong>幂等</strong>的操作（GET、PUT、DELETE）重试是安全的。<br>
-    <strong>非幂等</strong>的操作（POST 创建订单、发起支付）重试可能导致重复下单。
-    这类请求要么不重试，要么让对方支持「幂等键」（每次请求带一个唯一 ID，对方据此去重）。
-    反过来，<strong>你自己的接口也该支持幂等键</strong>，否则别人重试你时同样会出问题 —— 见第 23 章。
-  </p>
-</div>
-
-<h2 id="weather">给天气组件接上真数据</h2>
 
 <p>
-  第 7 章我们做了一个天气组件，用的是假数据。现在换成美国国家气象局的真实 API
-  （它免费、不需要 Key，正好用来演示）。
+  这段代码看起来完全正常：有登录检查，有参数绑定，没有 SQL 注入。
+  但它有一个致命问题 —— <strong>它检查了「你登录了吗」，没检查「这是你的订单吗」。</strong>
 </p>
 
-<div class="code" data-lang="ts" data-file="src/lib/weather.ts">
-<pre>
-import { fetchJson } from './http'
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="IDOR 越权访问的过程">
+  <rect class="bx-b" x="20" y="24" width="220" height="70" rx="8"/>
+  <text class="sm" x="130" y="48" text-anchor="middle">小李登录后看自己的订单</text>
+  <text class="mono sm" x="130" y="70" text-anchor="middle">GET /api/v1/orders/1042</text>
+  <text class="sm on-g" x="130" y="86" text-anchor="middle">✓ 正常返回</text>
 
-export type Forecast = {
-  name: string
-  weather: string
-  temp: string
-  iconUrl: string
-  forecastUrl: string
-}
+  <path class="ln-r" d="M244 60 H320" style="stroke:var(--red)" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="282" y="52" text-anchor="middle">改个数字</text>
 
-const LOCATIONS = [
-  { name: '波特兰', lat: 45.5155, lng: -122.6793 },
-  { name: '本德',   lat: 44.0582, lng: -121.3153 },
-  { name: '曼扎尼塔', lat: 45.7184, lng: -123.9351 },
-]
+  <rect class="bx-r" x="324" y="24" width="220" height="70" rx="8"/>
+  <text class="sm on-r" x="434" y="48" text-anchor="middle">同一个登录态</text>
+  <text class="mono sm" x="434" y="70" text-anchor="middle">GET /api/v1/orders/1041</text>
+  <text class="sm on-r" x="434" y="86" text-anchor="middle">✗ 返回了别人的订单</text>
 
-async function fetchOne(loc: (typeof LOCATIONS)[number]): Promise&lt;Forecast&gt; {
-  // 第一步：用经纬度换到预报接口地址
-  const points = await fetchJson&lt;{ properties: { forecast: string } }&gt;(
-    `https://api.weather.gov/points/${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
-  )
+  <rect class="bx-r" x="568" y="24" width="172" height="70" rx="8"/>
+  <text class="sm on-r" x="654" y="48" text-anchor="middle">写个循环</text>
+  <text class="sm on-r" x="654" y="70" text-anchor="middle">1 到 100000</text>
+  <text class="sm on-r" x="654" y="86" text-anchor="middle">全站订单拖库</text>
 
-  // 第二步：取预报
-  const data = await fetchJson&lt;{
-    properties: {
-      periods: {
-        shortForecast: string
-        temperature: number
-        temperatureUnit: string
-        icon: string
-      }[]
-    }
-  }&gt;(points.properties.forecast)
-
-  const now = data.properties.periods[0]
-
-  return {
-    name: loc.name,
-    weather: now.shortForecast,
-    temp: `${now.temperature} °${now.temperatureUnit}`,
-    iconUrl: now.icon,
-    forecastUrl: points.properties.forecast,
-  }
-}
-
-export async function getForecasts(): Promise&lt;Forecast[]&gt; {
-  // 并发请求，而不是一个接一个
-  const results = await Promise.allSettled(LOCATIONS.map(fetchOne))
-
-  // 部分失败不影响其他，只是少显示一个城市
-  return results
-    .filter((r): r is PromiseFulfilledResult&lt;Forecast&gt; =&gt; r.status === 'fulfilled')
-    .map((r) =&gt; r.value)
-}
-</pre>
-</div>
+  <rect class="bx-a" x="20" y="112" width="720" height="116" rx="10"/>
+  <text class="ttl on-a" x="380" y="136" text-anchor="middle">IDOR（不安全的直接对象引用）</text>
+  <text class="sm" x="40" y="162">· 不需要任何攻击工具，浏览器地址栏就能做</text>
+  <text class="sm" x="40" y="184">· 常年位居 OWASP 榜首（「失效的访问控制」）</text>
+  <text class="sm" x="40" y="206">· 自动化扫描器很难发现 —— 因为每个请求单看都是「合法的已登录请求」</text>
+  <text class="sm on-r" x="40" y="224">· 用 UUID 代替自增 ID 只是提高了猜测难度，<tspan>不是修复</tspan></text>
+</svg>
+<figcaption>图 22-1　认证通过了，不代表这条数据是你的</figcaption>
+</figure>
 
 <div class="box key">
-  <div class="t">&#9733; <code>Promise.allSettled</code> 还是 <code>Promise.all</code></div>
+  <div class="t">&#9733; 正确的写法：把归属写进查询条件</div>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 查完再判断</div>
+    <div class="code" data-lang="ts"><pre>
+const order = await getOrder(id)
+if (order.userId !== user.id) {
+  throw new HTTPException(403)
+}
+return c.json(order)
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      能用，但依赖你<strong>每次都记得写</strong>那个 if。
+      十个接口里漏一个就是漏洞。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 归属是查询的一部分</div>
+    <div class="code" data-lang="ts"><pre>
+const [order] = await db.select().from(orders)
+  .where(and(
+    eq(orders.id, id),
+    eq(orders.userId, user.id)   // ←
+  ))
+
+if (!order) return c.notFound()
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      查不到就是查不到。<strong>不存在「查到了但不该给你」这个中间状态。</strong>
+    </div>
+  </div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 返回 404 还是 403？</div>
   <p>
-    <code>Promise.all</code>：任何一个失败，整个都失败。适合「缺一不可」的场景。<br>
-    <code>Promise.allSettled</code>：等所有的都结束，分别报告成败。<br>
-    天气组件里，一个城市取不到不该让整个组件消失 —— 所以用 <code>allSettled</code>。
+    403 等于告诉对方「这个 ID 是存在的，只是不属于你」—— 这本身就是信息泄露，
+    攻击者可以用它枚举出系统里有哪些 ID。<br>
+    <strong>对「不属于你的资源」返回 404 更安全</strong>：从外部看，
+    「不存在」和「不是你的」应该完全无法区分。<br>
+    <em>例外：团队协作类产品里，403 加上「联系管理员申请权限」的提示体验更好。
+    这是安全和体验的权衡，要有意识地做选择。</em>
   </p>
 </div>
 
-<h2 id="cache">缓存：最重要的一步</h2>
+<h2 id="isolation">多租户的三种隔离级别</h2>
 
 <p>
-  上面的代码每次页面渲染都会打 6 次外部请求。一千个用户访问首页就是 6000 次 ——
-  又慢、又可能被对方限流、还可能产生费用。天气数据 15 分钟更新一次就够了。
+  当你的产品服务多个组织（公司、团队、工作区）时，「数据隔离」从一个功能变成了架构决策。
 </p>
 
-<div class="code" data-lang="ts" data-file="src/lib/cached.ts">
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="三种多租户隔离方案">
+  <rect class="bx-g" x="20" y="20" width="232" height="140" rx="10"/>
+  <text class="ttl on-g" x="136" y="44" text-anchor="middle">独立数据库</text>
+  <rect class="bx" x="36" y="56" width="60" height="26" rx="4"/><text class="sm" x="66" y="74" text-anchor="middle">A 公司</text>
+  <rect class="bx" x="104" y="56" width="60" height="26" rx="4"/><text class="sm" x="134" y="74" text-anchor="middle">B 公司</text>
+  <rect class="bx" x="172" y="56" width="60" height="26" rx="4"/><text class="sm" x="202" y="74" text-anchor="middle">C 公司</text>
+  <text class="sm on-g" x="36" y="102">隔离最强，物理上不可能串</text>
+  <text class="sm on-g" x="36" y="120">可以单独备份、单独迁移</text>
+  <text class="sm on-r" x="36" y="142">迁移要跑 N 次，成本随租户线性增长</text>
+
+  <rect class="bx-b" x="264" y="20" width="232" height="140" rx="10"/>
+  <text class="ttl on-b" x="380" y="44" text-anchor="middle">独立 schema</text>
+  <text class="sm" x="280" y="70">一个库，每个租户一套表</text>
+  <text class="sm" x="280" y="92">（Postgres 的 schema）</text>
+  <text class="sm on-g" x="280" y="118">隔离较强，资源共享</text>
+  <text class="sm on-r" x="280" y="140">schema 多了之后连接和迁移都变麻烦</text>
+
+  <rect class="bx-a" x="508" y="20" width="232" height="140" rx="10"/>
+  <text class="ttl on-a" x="624" y="44" text-anchor="middle">共享表 + tenant_id</text>
+  <text class="sm" x="524" y="70">所有租户的数据在同一张表</text>
+  <text class="sm" x="524" y="92">靠一个列区分</text>
+  <text class="sm on-g" x="524" y="118">最省资源，迁移只跑一次</text>
+  <text class="sm on-r" x="524" y="140">隔离最弱：<tspan class="on-r">漏一个 WHERE 就是事故</tspan></text>
+
+  <rect class="bx-d" x="20" y="176" width="720" height="60" rx="10"/>
+  <text class="ttl" x="380" y="198" text-anchor="middle">绝大多数 SaaS 从「共享表」开始</text>
+  <text class="sm" x="380" y="220" text-anchor="middle">因为它最简单最省钱。代价是隔离要靠代码纪律 —— 而纪律是会失效的</text>
+
+  <rect class="bx-r" x="20" y="248" width="720" height="60" rx="10"/>
+  <text class="ttl on-r" x="380" y="270" text-anchor="middle">所以这一章剩下的重点是：</text>
+  <text class="sm" x="380" y="292" text-anchor="middle">怎么让「忘写 tenant_id」这件事在共享表方案下<tspan class="on-g">变得不可能发生</tspan></text>
+</svg>
+<figcaption>图 22-2　隔离强度和运维成本成正比，多数团队会选最右边然后想办法补强</figcaption>
+</figure>
+
+<h2 id="structural">让漏写变得不可能</h2>
+
+<p>
+  「每次查询都记得加 <code>tenant_id</code>」是一条<strong>纪律</strong>。
+  纪律在赶工期、新人入职、复制粘贴时都会失效。我们要把它变成<strong>结构</strong>。
+</p>
+
+<h3>方案一：数据访问层强制注入</h3>
+
+<div class="code" data-lang="ts" data-file="src/db/tenant-db.ts">
 <pre>
-type Entry&lt;T&gt; = { value: T; expiresAt: number }
+import { and, eq, type SQL } from 'drizzle-orm'
 
 /**
- * 把一个异步函数包装成带缓存的版本。
- * 关键特性：缓存过期后如果刷新失败，会继续返回旧数据（stale-while-error）
+ * 租户作用域的数据访问层。
+ * 关键设计：构造时必须传 tenantId，之后所有方法自动带上它。
+ * 业务代码拿不到「不带租户条件」的查询入口。
  */
-export function withCache&lt;T&gt;(
-  fn: () =&gt; Promise&lt;T&gt;,
-  ttlMs: number
-): () =&gt; Promise&lt;T&gt; {
-  let entry: Entry&lt;T&gt; | null = null
-  let inflight: Promise&lt;T&gt; | null = null
+export function createTenantDb(db: DrizzleDb, tenantId: string) {
+  return {
+    async findOrders(extra?: SQL) {
+      return db.select().from(orders)
+        .where(extra ? and(eq(orders.tenantId, tenantId), extra)
+                     : eq(orders.tenantId, tenantId))
+    },
 
-  return async () =&gt; {
-    const now = Date.now()
+    async findOrderById(id: string) {
+      const [row] = await db.select().from(orders)
+        .where(and(eq(orders.tenantId, tenantId), eq(orders.id, id)))
+        .limit(1)
+      return row ?? null
+    },
 
-    // 缓存有效，直接返回
-    if (entry &amp;&amp; entry.expiresAt &gt; now) return entry.value
+    async createOrder(data: NewOrder) {
+      // 写入时也强制打上租户标记，而且不接受调用方传入
+      return db.insert(orders).values({ ...data, tenantId }).returning()
+    },
 
-    // 已经有一个请求在路上了，跟着它就行（避免并发时打出多个请求）
-    if (inflight) return inflight
-
-    inflight = fn()
-      .then((value) =&gt; {
-        entry = { value, expiresAt: Date.now() + ttlMs }
-        return value
-      })
-      .catch((err) =&gt; {
-        // 刷新失败：有旧数据就先用旧的，总比页面报错强
-        if (entry) {
-          console.warn('刷新失败，继续使用过期数据', err)
-          return entry.value
-        }
-        throw err
-      })
-      .finally(() =&gt; { inflight = null })
-
-    return inflight
+    async updateOrder(id: string, patch: Partial&lt;Order&gt;) {
+      const { tenantId: _ignored, ...safe } = patch as never   // 禁止改租户归属
+      return db.update(orders).set(safe)
+        .where(and(eq(orders.tenantId, tenantId), eq(orders.id, id)))
+        .returning()
+    },
   }
 }
 </pre>
@@ -291,313 +220,478 @@ export function withCache&lt;T&gt;(
 
 <div class="code" data-lang="ts">
 <pre>
-export const getCachedForecasts = withCache(getForecasts, 15 * 60 * 1000)
-</pre>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="缓存把外部请求量降下来">
-  <rect class="bx-r" x="20" y="20" width="345" height="80" rx="10"/>
-  <text class="ttl on-r" x="192" y="44" text-anchor="middle">没有缓存</text>
-  <text class="sm" x="36" y="68">1000 次页面访问 → 6000 次外部请求</text>
-  <text class="sm on-r" x="36" y="88">每次页面渲染都要等 300–800 ms</text>
-
-  <rect class="bx-g" x="395" y="20" width="345" height="80" rx="10"/>
-  <text class="ttl on-g" x="567" y="44" text-anchor="middle">15 分钟缓存</text>
-  <text class="sm" x="411" y="68">1000 次页面访问 → 最多 6 次外部请求</text>
-  <text class="sm on-g" x="411" y="88">除了第一次，之后都是 0 ms</text>
-
-  <text class="ttl" x="20" y="130">进程内缓存 vs 共享缓存</text>
-  <rect class="bx-b" x="20" y="142" width="345" height="70" rx="10"/>
-  <text class="sm on-b" x="36" y="164">进程内（上面的实现）</text>
-  <text class="sm" x="36" y="184">简单、零延迟，但每个实例一份</text>
-  <text class="sm" x="36" y="202">10 个实例 = 10 倍外部请求</text>
-
-  <rect class="bx-p" x="395" y="142" width="345" height="70" rx="10"/>
-  <text class="sm on-p" x="411" y="164">共享缓存（KV / Redis）</text>
-  <text class="sm" x="411" y="184">所有实例共用一份，请求量真正降到最低</text>
-  <text class="sm" x="411" y="202">边缘环境必须用这种（实例极多且短命）</text>
-</svg>
-<figcaption>图 22-2　实例越多，共享缓存越重要</figcaption>
-</figure>
-
-<div class="code" data-lang="ts">
-<pre>
-// 边缘环境的版本：用 KV 做共享缓存
-export async function getForecastsFromKV(kv: KVNamespace): Promise&lt;Forecast[]&gt; {
-  const cached = await kv.get&lt;Forecast[]&gt;('weather:forecasts', 'json')
-  if (cached) return cached
-
-  const fresh = await getForecasts()
-  await kv.put('weather:forecasts', JSON.stringify(fresh), { expirationTtl: 900 })
-  return fresh
-}
-</pre>
-</div>
-
-<div class="code" data-lang="tsx">
-<pre>
-// 在中间件里注入，让所有页面都能用（第 7 章的 partial 现在有真数据了）
-app.use('*', async (c, next) =&gt; {
-  c.set('forecasts', await getForecastsFromKV(c.env.CACHE))
+// 中间件里构造，业务代码只能通过它访问数据
+app.use('/app/*', requireLogin, async (c, next) =&gt; {
+  const tenantId = c.get('user').tenantId
+  c.set('db', createTenantDb(rawDb, tenantId))
   await next()
 })
-</pre>
-</div>
 
-<h2 id="geocode">地理编码与地图</h2>
-
-<p>
-  <strong>地理编码</strong>就是把「俄勒冈州胡德河市」这样的地址转成经纬度。
-  这类接口通常按调用次数收费，所以更要缓存 —— 而且是<strong>永久缓存</strong>：
-  一个地址的坐标基本不会变。
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-export async function geocode(address: string, apiKey: string) {
-  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json')
-  url.searchParams.set('address', address)
-  url.searchParams.set('key', apiKey)
-
-  const data = await fetchJson&lt;{
-    status: string
-    results: { geometry: { location: { lat: number; lng: number } } }[]
-  }&gt;(url.toString())
-
-  if (data.status !== 'OK' || data.results.length === 0) return null
-
-  return data.results[0].geometry.location
-}
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="scripts/geocode-vacations.ts">
-<pre>
-// 一次性脚本：把坐标写进数据库，之后再也不用调这个 API
-const rows = await db.select().from(vacations).where(isNull(vacations.lat))
-
-for (const v of rows) {
-  const loc = await geocode(v.locationSearch, process.env.GOOGLE_API_KEY!)
-  if (!loc) {
-    console.warn(`地理编码失败：${v.sku} · ${v.locationSearch}`)
-    continue
-  }
-
-  await db.update(vacations)
-    .set({ lat: loc.lat, lng: loc.lng })
-    .where(eq(vacations.sku, v.sku))
-
-  console.log(`${v.name} → ${loc.lat}, ${loc.lng}`)
-  await new Promise((r) =&gt; setTimeout(r, 200))   // 尊重对方的速率限制
-}
+app.get('/app/orders/:id', async (c) =&gt; {
+  // 不可能忘记租户条件 —— 这个入口根本不提供「查全部」的能力
+  const order = await c.get('db').findOrderById(c.req.param('id'))
+  if (!order) return c.notFound()
+  return c.json(order)
+})
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 分清「一次性」和「每次请求」</div>
+  <div class="t">&#9733; 关键在于「不给出危险的入口」</div>
   <p>
-    地理编码属于<strong>数据准备</strong>，应该在录入数据时做一次，把结果存进数据库。<br>
-    绝对不要在渲染页面时实时调用 —— 那是把一个 O(1) 的操作变成了 O(访问量)。
-    <em>用户请求路径上的每一次外部调用，都是一个潜在的故障点和账单项。</em>
+    这个设计的价值不是「帮你加上 tenant_id」，而是<strong>业务代码根本拿不到 <code>rawDb</code></strong>。
+    想写一个漏掉租户条件的查询，你得先绕过这一层 —— 而绕过是个显眼的动作，
+    在代码评审里一眼就能看见。<br>
+    <em>好的安全设计不是让人「不要犯错」，而是让犯错需要付出额外的、显眼的努力。</em>
   </p>
 </div>
 
-<h3>显示地图</h3>
+<h3>方案二：数据库行级安全（RLS）</h3>
 
 <p>
-  地图 SDK 是少数应该在前端调用的场景（它本来就是画在浏览器里的）。
-  但仍然要保护好 Key：
+  PostgreSQL 可以把隔离下沉到数据库本身 —— 这样连写原始 SQL 都逃不掉：
 </p>
 
-<div class="code" data-lang="tsx">
+<div class="code" data-lang="sql">
 <pre>
-export const VacationsMap: FC&lt;{ vacations: Vacation[]; mapKey: string }&gt; = ({
-  vacations, mapKey,
-}) =&gt; (
-  &lt;&gt;
-    &lt;div id="map" style="height:480px"&gt;&lt;/div&gt;
-    {/* 用 JSON 传数据给前端脚本，避免拼接字符串造成注入 */}
-    &lt;script
-      type="application/json"
-      id="map-data"
-      dangerouslySetInnerHTML={{
-        __html: JSON.stringify(
-          vacations
-            .filter((v) =&gt; v.lat &amp;&amp; v.lng)
-            .map((v) =&gt; ({ name: v.name, lat: v.lat, lng: v.lng, url: `/vacations/${v.slug}` }))
-        ),
-      }}
-    /&gt;
-    &lt;script src={`https://maps.googleapis.com/maps/api/js?key=${mapKey}&amp;callback=initMap`} async&gt;&lt;/script&gt;
-    &lt;script src="/js/map.js" defer&gt;&lt;/script&gt;
-  &lt;/&gt;
-)
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::uuid);
+
+-- 之后任何查询都会被自动追加这个条件，包括手写 SQL、包括误操作
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 每个请求开始时设置当前租户
+await db.execute(sql`SET LOCAL app.tenant_id = ${tenantId}`)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; RLS 的两个坑</div>
+  <ul>
+    <li><strong>连接池会串。</strong><code>SET</code>（不带 <code>LOCAL</code>）的作用域是连接，
+        而连接会被下一个请求复用 —— 如果忘了重置，B 租户的请求会用上 A 的设置。
+        <strong>必须用 <code>SET LOCAL</code> 并包在事务里。</strong></li>
+    <li><strong>表的所有者绕过 RLS。</strong>默认情况下建表的那个用户不受策略约束。
+        应用要用一个<em>独立的、非所有者</em>的数据库角色连接，否则策略形同虚设。</li>
+  </ul>
+</div>
+
+<h3>方案三：让编译器帮忙</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 给「已确认属于某租户」的 ID 一个专门的类型
+type TenantScoped&lt;T&gt; = T &amp; { readonly __tenantChecked: unique symbol }
+
+function scoped&lt;T&gt;(value: T, _proof: TenantProof): TenantScoped&lt;T&gt; {
+  return value as TenantScoped&lt;T&gt;
+}
+
+// 敏感操作只接受已验证过的 ID
+async function deleteOrder(id: TenantScoped&lt;string&gt;) { /* ... */ }
+
+// 直接传原始 ID 会编译报错
+await deleteOrder(c.req.param('id'))        // ✗ 类型不匹配
+await deleteOrder(await verifyOwnership(c, c.req.param('id')))   // ✓
 </pre>
 </div>
 
 <div class="box tip">
-  <div class="t">&#128161; 前端 Key 要加限制</div>
+  <div class="t">&#128161; 三种方案叠加使用</div>
   <p>
-    地图这类必须暴露在前端的 Key，一定要在服务商控制台设置<strong>域名白名单</strong>
-    （只允许 <code>meadowlarktravel.com</code> 使用）和<strong>用量上限</strong>。
-    这样别人抄走了也用不了，而且万一被滥用，损失有上限。
+    它们不是互斥的，而是<strong>纵深防御</strong>（第 21 章 CSP 那一节的同一个思路）：<br>
+    数据访问层挡住 99% 的疏忽 → RLS 兜住剩下的原始 SQL → 类型系统在编译期拦一层。<br>
+    <em>任何一层都可能被绕过，但三层同时失效的概率很低。</em>
   </p>
 </div>
 
-<h2 id="resilience">别人挂了，我不能挂</h2>
+<h2 id="models">权限模型</h2>
 
-<p>
-  第三方服务一定会出问题 —— 超时、限流、返回格式变了、干脆下线。
-  你的应用要能撑住。三个层次：
-</p>
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="RBAC、ABAC、ReBAC 三种权限模型">
+  <rect class="bx-b" x="20" y="20" width="232" height="150" rx="10"/>
+  <text class="ttl on-b" x="136" y="44" text-anchor="middle">RBAC 基于角色</text>
+  <text class="sm" x="36" y="70">用户 → 角色 → 权限</text>
+  <text class="mono sm" x="36" y="94">admin: 读写删</text>
+  <text class="mono sm" x="36" y="112">editor: 读写</text>
+  <text class="mono sm" x="36" y="130">viewer: 读</text>
+  <text class="sm on-g" x="36" y="156">简单、好理解、够用</text>
 
-<h3>① 降级</h3>
+  <rect class="bx-a" x="264" y="20" width="232" height="150" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">ABAC 基于属性</text>
+  <text class="sm" x="280" y="70">按条件动态判断</text>
+  <text class="sm" x="280" y="94">「金额 &lt; 1 万的订单</text>
+  <text class="sm" x="280" y="112">经理可以直接批」</text>
+  <text class="sm" x="280" y="130">「只能在工作时间访问」</text>
+  <text class="sm on-r" x="280" y="156">灵活但难以推理和测试</text>
+
+  <rect class="bx-p" x="508" y="20" width="232" height="150" rx="10"/>
+  <text class="ttl on-p" x="624" y="44" text-anchor="middle">ReBAC 基于关系</text>
+  <text class="sm" x="524" y="70">「你是这个文档的</text>
+  <text class="sm" x="524" y="88">所属文件夹的编辑者」</text>
+  <text class="sm" x="524" y="112">权限沿着关系图继承</text>
+  <text class="sm" x="524" y="134">Google Docs、Notion 用它</text>
+  <text class="sm on-r" x="524" y="156">最强也最复杂</text>
+
+  <rect class="bx-g" x="20" y="188" width="720" height="96" rx="10"/>
+  <text class="ttl on-g" x="380" y="212" text-anchor="middle">怎么选</text>
+  <text class="sm" x="40" y="236">从 RBAC 开始。绝大多数产品「管理员 / 成员 / 只读」三个角色能覆盖 90% 的需求。</text>
+  <text class="sm" x="40" y="258">遇到「这个人只能看自己部门的」→ 加一个资源归属条件，还不用上 ABAC。</text>
+  <text class="sm" x="40" y="280">真的需要「共享给某人某个文件夹」这类嵌套授权时，再考虑 ReBAC（或用 OpenFGA 这类现成方案）。</text>
+</svg>
+<figcaption>图 22-3　不要一上来就设计一个能表达任何规则的权限系统 —— 你会被它拖垮</figcaption>
+</figure>
+
+<h3>一个够用的 RBAC 实现</h3>
+
+<div class="code" data-lang="ts" data-file="src/lib/permissions.ts">
+<pre>
+export const PERMISSIONS = [
+  'order:read', 'order:write', 'order:delete',
+  'member:read', 'member:invite', 'member:remove',
+  'billing:read', 'billing:manage',
+] as const
+
+export type Permission = (typeof PERMISSIONS)[number]
+
+// 角色只是权限的命名集合
+const ROLE_PERMISSIONS: Record&lt;Role, readonly Permission[]&gt; = {
+  owner:  PERMISSIONS,
+  admin:  ['order:read','order:write','order:delete','member:read','member:invite','billing:read'],
+  member: ['order:read','order:write','member:read'],
+  viewer: ['order:read','member:read'],
+}
+
+export function can(user: User, permission: Permission): boolean {
+  return ROLE_PERMISSIONS[user.role].includes(permission)
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+export function requirePermission(permission: Permission) {
+  return createMiddleware(async (c, next) =&gt; {
+    const user = c.get('user')
+    if (!user) throw new HTTPException(401, { message: '请先登录' })
+
+    if (!can(user, permission)) {
+      // 越权尝试要记日志 —— 这是入侵检测的信号（第 29 章）
+      c.get('log')('warn', 'permission_denied', {
+        userId: user.id, tenantId: user.tenantId,
+        permission, path: c.req.path,
+      })
+      throw new HTTPException(403, { message: '没有权限执行这个操作' })
+    }
+    await next()
+  })
+}
+
+app.delete('/app/orders/:id', requirePermission('order:delete'), handlers.deleteOrder)
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 用权限判断，不要用角色判断</div>
+  <p>
+    <code>if (user.role === 'admin')</code> 散落在几十个地方之后，
+    新增一个「财务」角色就要改几十处，而且一定会漏。<br>
+    <code>if (can(user, 'billing:manage'))</code> 则只需要在角色定义那一张表里加一行。<br>
+    <em>角色是给人看的标签，权限才是代码该依赖的东西。</em>
+  </p>
+</div>
+
+<h3>前端也要知道权限，但不能只靠前端</h3>
 
 <div class="code" data-lang="tsx">
 <pre>
-app.get('/', async (c) =&gt; {
-  let forecasts: Forecast[] = []
-  try {
-    forecasts = await getCachedForecasts()
-  } catch (err) {
-    console.error('天气数据不可用', err)
-    // 不抛出去。首页的主要内容和天气无关
-  }
-
-  return c.html(&lt;HomePage forecasts={forecasts} /&gt;)
+// 后端把权限清单一起返回，前端据此决定显示什么
+app.get('/api/v1/me', requireLogin, (c) =&gt; {
+  const user = c.get('user')
+  return c.json({
+    id: user.id,
+    name: user.name,
+    role: user.role,
+    permissions: ROLE_PERMISSIONS[user.role],
+  })
 })
 </pre>
 </div>
 
-<div class="code" data-lang="tsx">
+<div class="box warn">
+  <div class="t">&#9888; 前端隐藏按钮不是权限控制</div>
+  <p>
+    前端的权限判断只影响<strong>显示</strong>：不给没权限的人看一个点了会报错的按钮。<br>
+    但用户完全可以打开控制台直接调接口。<strong>每一个接口都必须独立做服务端检查</strong>，
+    哪怕对应的按钮在界面上根本不存在。<br>
+    <em>这和第 8 章「前端校验是体验，服务端校验是必须」是同一句话。</em>
+  </p>
+</div>
+
+<h2 id="layer">权限检查该放在哪一层</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="权限检查放在不同层的效果">
+  <rect class="bx-r" x="20" y="20" width="350" height="120" rx="10"/>
+  <text class="ttl on-r" x="36" y="44">只放在路由层</text>
+  <text class="sm" x="36" y="68">app.get('/orders', requirePermission(…))</text>
+  <text class="sm on-r" x="36" y="94">定时任务、队列消费者、管理脚本、</text>
+  <text class="sm on-r" x="36" y="112">GraphQL 解析器 —— 全都绕过了</text>
+  <text class="sm on-r" x="36" y="132">新增一个入口就多一个漏洞机会</text>
+
+  <rect class="bx-g" x="390" y="20" width="350" height="120" rx="10"/>
+  <text class="ttl on-g" x="406" y="44">下沉到数据访问层</text>
+  <text class="sm" x="406" y="68">tenantDb.findOrderById(id)</text>
+  <text class="sm on-g" x="406" y="94">任何入口只要走这一层，</text>
+  <text class="sm on-g" x="406" y="112">隔离就自动生效</text>
+  <text class="sm" x="406" y="132">路由层只做「粗粒度」的能力检查</text>
+
+  <rect class="bx-a" x="20" y="158" width="720" height="106" rx="10"/>
+  <text class="ttl on-a" x="380" y="182" text-anchor="middle">两层各管一件事</text>
+  <text class="sm" x="40" y="208">路由层（requirePermission）：你有没有<tspan class="on-a">这个能力</tspan> —— 你能删订单吗？</text>
+  <text class="sm" x="40" y="232">数据层（tenantDb）：<tspan class="on-a">这条数据是不是你的</tspan> —— 这个订单属于你的租户吗？</text>
+  <text class="sm" x="40" y="256">两者缺一不可：只有前者会 IDOR，只有后者管理员和普通成员就没区别了</text>
+</svg>
+<figcaption>图 22-4　「能不能做这类事」和「能不能碰这条数据」是两个正交的问题</figcaption>
+</figure>
+
+<h2 id="pitfalls">几个容易踩的坑</h2>
+
+<div class="tw">
+<table>
+  <tr><th>坑</th><th>说明</th></tr>
+  <tr>
+    <td><strong>批量接口忘了过滤</strong></td>
+    <td>单条查询加了 tenant_id，但 <code>POST /orders/batch-delete</code> 接受一个 ID 数组时忘了 —— 传别人的 ID 就删掉了。<strong>批量操作要逐个校验归属，或者用 <code>WHERE id IN (...) AND tenant_id = ?</code> 并核对影响行数</strong></td>
+  </tr>
+  <tr>
+    <td><strong>关联查询泄露</strong></td>
+    <td>订单加了租户条件，但 <code>JOIN</code> 出来的用户信息没加 —— 通过订单能看到别的租户的用户名和邮箱</td>
+  </tr>
+  <tr>
+    <td><strong>聚合泄露</strong></td>
+    <td>「全平台共 12345 个订单」这类统计忘了按租户过滤，泄露了商业信息</td>
+  </tr>
+  <tr>
+    <td><strong>缓存串租户</strong></td>
+    <td>缓存键是 <code>order:1042</code> 而不是 <code>t:{tenantId}:order:1042</code> —— 下一章会详谈</td>
+  </tr>
+  <tr>
+    <td><strong>越权提升</strong></td>
+    <td>「修改成员信息」接口没排除 <code>role</code> 字段，普通成员把自己改成了 owner</td>
+  </tr>
+  <tr>
+    <td><strong>邀请链接不失效</strong></td>
+    <td>离职员工手里的旧邀请链接还能用；或者邀请链接没绑定邮箱，转发给谁谁就能进</td>
+  </tr>
+  <tr>
+    <td><strong>文件没隔离</strong></td>
+    <td>第 15 章的签名 URL 生成前没做归属检查</td>
+  </tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
 <pre>
-// 视图要能处理「没有数据」
-export const WeatherWidget: FC&lt;{ forecasts: Forecast[] }&gt; = ({ forecasts }) =&gt; {
-  if (forecasts.length === 0) return null   // 干脆不显示，好过显示一个报错框
-  return &lt;div class="weather"&gt;{/* ... */}&lt;/div&gt;
-}
+// 修改成员信息：显式列出允许修改的字段，而不是排除不允许的
+const updateMemberSchema = z.object({
+  name: z.string().max(50).optional(),
+  title: z.string().max(50).optional(),
+  // 注意这里没有 role 和 tenantId —— 白名单而不是黑名单
+})
+
+app.patch('/app/members/:id', requirePermission('member:read'),
+  zValidator('json', updateMemberSchema), async (c) =&gt; {
+    const patch = c.req.valid('json')     // 多余的字段已被 Zod 剥掉
+    // 改角色是另一个接口，需要另一个权限
+    await c.get('db').updateMember(c.req.param('id'), patch)
+    return c.json({ ok: true })
+  })
 </pre>
 </div>
 
-<h3>② 熔断</h3>
+<div class="box key">
+  <div class="t">&#9733; 白名单，不是黑名单</div>
+  <p>
+    <code>delete patch.role</code> 这种写法是黑名单 —— 将来加了 <code>isSuperAdmin</code> 字段，
+    没人会记得也去 delete 一下。<br>
+    Zod schema 天然是白名单：<strong>没在 schema 里声明的字段直接消失</strong>。
+    这是第 8 章的校验器在安全上的额外收益。
+  </p>
+</div>
+
+<h2 id="test">给权限写测试</h2>
 
 <p>
-  如果对方已经连续失败了十次，第十一次大概率还是失败。
-  继续调用只会浪费时间、拖慢你自己的响应。<strong>熔断器</strong>会在失败到一定次数后
-  「跳闸」，一段时间内直接失败，不再发出请求。
+  权限是少数「测试收益极高」的领域：规则明确、边界清晰，而且一旦出错后果严重。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/orders.authz.test.ts">
+<pre>
+import { describe, it, expect, beforeEach } from 'vitest'
+
+describe('订单接口的权限', () =&gt; {
+  let tenantA: Tenant, tenantB: Tenant, orderA: Order
+
+  beforeEach(async () =&gt; {
+    await resetDb()
+    tenantA = await createTenant('A 公司')
+    tenantB = await createTenant('B 公司')
+    orderA = await createOrder(tenantA, { total: 100 })
+  })
+
+  it('本租户成员能看到自己的订单', async () =&gt; {
+    const res = await request(`/app/orders/${orderA.id}`, asMember(tenantA))
+    expect(res.status).toBe(200)
+  })
+
+  it('其他租户看不到，且返回 404 而非 403', async () =&gt; {
+    const res = await request(`/app/orders/${orderA.id}`, asMember(tenantB))
+    expect(res.status).toBe(404)    // 不泄露「这个 ID 存在」
+  })
+
+  it('viewer 不能删除', async () =&gt; {
+    const res = await request(`/app/orders/${orderA.id}`,
+                              asRole(tenantA, 'viewer'), { method: 'DELETE' })
+    expect(res.status).toBe(403)
+    expect(await orderExists(orderA.id)).toBe(true)   // 确认真的没删
+  })
+
+  it('成员不能把自己提升为 owner', async () =&gt; {
+    const me = await createMember(tenantA, 'member')
+    await request(`/app/members/${me.id}`, asUser(me), {
+      method: 'PATCH', json: { name: '新名字', role: 'owner' },
+    })
+    const after = await getMember(me.id)
+    expect(after.role).toBe('member')      // 角色没被改掉
+    expect(after.name).toBe('新名字')       // 但允许的字段改了
+  })
+
+  it('批量删除不能混入其他租户的 ID', async () =&gt; {
+    const orderB = await createOrder(tenantB, { total: 200 })
+    await request('/app/orders/batch-delete', asRole(tenantA, 'admin'), {
+      method: 'POST', json: { ids: [orderA.id, orderB.id] },
+    })
+    expect(await orderExists(orderA.id)).toBe(false)
+    expect(await orderExists(orderB.id)).toBe(true)    // B 的订单必须还在
+  })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 建一张「权限矩阵」表格驱动测试</div>
+  <p>
+    把「角色 × 操作 → 期望结果」列成一张表，然后用循环跑完所有组合。
+    这样新增角色或操作时，缺失的组合会立刻暴露出来。
+  </p>
+  <div class="code" data-lang="ts"><pre>
+const MATRIX = [
+  { role: 'owner',  action: 'delete', expect: 204 },
+  { role: 'admin',  action: 'delete', expect: 204 },
+  { role: 'member', action: 'delete', expect: 403 },
+  { role: 'viewer', action: 'delete', expect: 403 },
+  { role: 'viewer', action: 'read',   expect: 200 },
+]
+
+for (const { role, action, expect: code } of MATRIX) {
+  it(`${role} 执行 ${action} 应返回 ${code}`, async () =&gt; {
+    const res = await perform(action, asRole(tenantA, role))
+    expect(res.status).toBe(code)
+  })
+}
+</pre></div>
+</div>
+
+<h2 id="audit">审计日志</h2>
+
+<p>
+  权限系统还需要回答一个事后问题：<strong>「这条数据是谁在什么时候改的？」</strong>
 </p>
 
 <div class="code" data-lang="ts">
 <pre>
-export function createBreaker&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;, opts = { threshold: 5, resetMs: 60_000 }) {
-  let failures = 0
-  let openUntil = 0
-
-  return async (): Promise&lt;T&gt; =&gt; {
-    if (Date.now() &lt; openUntil) {
-      throw new Error('熔断器已跳闸，暂时不调用该服务')
-    }
-
-    try {
-      const result = await fn()
-      failures = 0                       // 成功一次就重置
-      return result
-    } catch (err) {
-      failures++
-      if (failures &gt;= opts.threshold) {
-        openUntil = Date.now() + opts.resetMs
-        console.error(`熔断器跳闸，${opts.resetMs / 1000} 秒后重试`)
-      }
-      throw err
-    }
-  }
-}
+export const auditLog = sqliteTable('audit_log', {
+  id: text('id').primaryKey(),
+  tenantId: text('tenant_id').notNull(),
+  actorId: text('actor_id').notNull(),
+  action: text('action').notNull(),           // 'order.delete'
+  resourceType: text('resource_type').notNull(),
+  resourceId: text('resource_id').notNull(),
+  // 改了什么：只记变化的字段，别记全量（可能含敏感信息）
+  changes: text('changes', { mode: 'json' }),
+  ip: text('ip'),
+  requestId: text('request_id'),               // 关联到第 29 章的日志
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
 </pre>
 </div>
 
-<h3>③ 超时预算</h3>
-
-<div class="box warn">
-  <div class="t">&#9888; 你的超时必须比调用方的超时短</div>
+<div class="box key">
+  <div class="t">&#9733; 审计日志和普通日志不是一回事</div>
+  <div class="tw"><table>
+    <tr><th></th><th>应用日志（第 29 章）</th><th>审计日志</th></tr>
+    <tr><td>目的</td><td>排查故障</td><td>追责与合规</td></tr>
+    <tr><td>存在哪</td><td>日志平台</td><td><strong>数据库</strong>，可查询、可导出</td></tr>
+    <tr><td>保留多久</td><td>7–30 天</td><td>数月到数年（可能有法规要求）</td></tr>
+    <tr><td>能否修改</td><td>无所谓</td><td><strong>只能追加，不能改也不能删</strong></td></tr>
+    <tr><td>谁看</td><td>工程师</td><td>客户、合规、法务</td></tr>
+  </table></div>
   <p>
-    如果浏览器等你 10 秒，而你等第三方 30 秒，那么第三方一慢，
-    用户看到的就是浏览器超时 —— 而你的服务器还在傻等，占着连接和内存。<br>
-    <strong>给每个外部调用设置明确的超时，并且加起来要小于你自己的响应目标。</strong>
-    比如：目标 2 秒响应，那么两个外部调用各给 800 ms。
+    B2B 产品里，「谁改了这个配置」是客户会真实问出来的问题。
+    <em>而且很多企业采购流程会直接要求你有这个功能。</em>
   </p>
 </div>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="超时预算的分配">
-  <text class="ttl" x="20" y="24">用户能接受的等待时间，要在整条链路上分配完</text>
+<h2 id="checklist">自查清单</h2>
 
-  <rect class="bx-b" x="20" y="40" width="720" height="34" rx="6"/>
-  <text class="sm on-b" x="380" y="62" text-anchor="middle">浏览器愿意等：约 3 秒</text>
-
-  <rect class="bx-a" x="60" y="86" width="640" height="34" rx="6"/>
-  <text class="sm on-a" x="380" y="108" text-anchor="middle">你给自己的目标：2 秒内返回</text>
-
-  <rect class="bx-g" x="100" y="132" width="270" height="34" rx="6"/>
-  <text class="sm on-g" x="235" y="154" text-anchor="middle">天气 API：超时 800 ms</text>
-
-  <rect class="bx-g" x="380" y="132" width="230" height="34" rx="6"/>
-  <text class="sm on-g" x="495" y="154" text-anchor="middle">数据库查询：超时 500 ms</text>
-
-  <rect class="bx-d" x="620" y="132" width="80" height="34" rx="6"/>
-  <text class="sm" x="660" y="154" text-anchor="middle">渲染等</text>
-
-  <path class="ln-d" d="M100 172 V190 H700 V172"/>
-  <text class="sm" x="400" y="208" text-anchor="middle">800 + 500 + 余量 &lt; 2000 ms　&#10003;</text>
-
-  <rect class="bx-r" x="120" y="216" width="520" height="30" rx="6"/>
-  <text class="sm on-r" x="380" y="236" text-anchor="middle">如果外部调用超时设成 30 秒：用户早就走了，你的服务器还在等</text>
-</svg>
-<figcaption>图 22-3　超时是从外往里分配的预算，不是随手填的数字</figcaption>
-</figure>
-
-<div class="box tip">
-  <div class="t">&#128161; 反过来的方向</div>
-  <p>这一章讲的是「你主动调别人」。如果对方要<strong>主动通知你</strong>（支付结果、审核完成），那是 Webhook —— 思维完全反过来，见<strong>第 26 章</strong>。</p>
-</div>
-
-<h2 id="social">社交媒体嵌入</h2>
-
-<div class="box warn">
-  <div class="t">&#9888; 一个分享按钮可能拖慢整个页面</div>
-  <p>
-    第三方的嵌入脚本（分享按钮、评论组件、客服挂件、统计代码）通常会：
-    加载几百 KB 的 JS、发起十几个额外请求、插入 iframe、拖慢首屏、
-    并且它们的可用性完全不受你控制。
-  </p>
-  <p><strong>更好的做法：</strong></p>
+<div class="box key">
+  <div class="t">&#9733; 逐条对照你的代码</div>
   <ul>
-    <li>分享按钮用纯链接实现（<code>https://twitter.com/intent/tweet?url=...</code>），零 JavaScript。</li>
-    <li>确实需要的嵌入，用<strong>惰性加载</strong>：先显示一个占位图，用户点击后才真正加载。</li>
-    <li>所有第三方脚本加 <code>defer</code> 或 <code>async</code>，绝不阻塞渲染。</li>
-    <li>用第 20 章的 CSP 限制第三方脚本能做什么。</li>
+    <li>☐ 每个「按 ID 取资源」的接口，归属条件是<strong>写在查询里</strong>还是查完再判断？</li>
+    <li>☐ 批量接口有没有逐个校验归属？</li>
+    <li>☐ <code>JOIN</code> 出来的关联数据有没有一起过滤？</li>
+    <li>☐ 统计和聚合接口有没有按租户过滤？</li>
+    <li>☐ 更新接口用的是字段白名单吗？<code>role</code>、<code>tenantId</code> 能被改吗？</li>
+    <li>☐ 定时任务、队列消费者走的是同一套数据访问层吗？</li>
+    <li>☐ 文件下载（第 15 章）在签发 URL 前做了归属检查吗？</li>
+    <li>☐ 缓存键包含租户标识吗？</li>
+    <li>☐ 有没有至少一个「跨租户访问必须失败」的测试？</li>
+    <li>☐ 越权尝试有记日志吗？</li>
+    <li>☐ 成员离开团队后，他的会话、令牌、邀请链接都失效了吗？</li>
   </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>默认在后端调第三方 API：保护 Key、能缓存、无 CORS、可统一处理错误。</li>
-  <li><code>fetch</code> 要包一层：超时、区分可重试与不可重试、指数退避加抖动。</li>
-  <li>缓存是最重要的优化，边缘环境要用共享缓存。</li>
-  <li>地理编码这类「结果不变」的调用，在数据录入时做一次并存库。</li>
-  <li>用降级、熔断、超时预算保证第三方故障不会传染给你。</li>
-  <li>第三方前端脚本要惰性加载，能用纯链接就别用脚本。</li>
+  <li><strong>IDOR 是最常见的越权漏洞</strong>：检查了「登录了吗」却没检查「是你的吗」。</li>
+  <li>把归属<strong>写进查询条件</strong>，让「查到了但不该给你」这个状态不存在。</li>
+  <li>对不属于你的资源返回 404，避免泄露 ID 是否存在。</li>
+  <li>多数 SaaS 用「共享表 + tenant_id」，所以隔离必须靠<strong>结构</strong>而非纪律：
+      租户作用域的数据访问层 + RLS + 类型，三层叠加。</li>
+  <li>从 RBAC 开始；代码里判断<strong>权限</strong>而不是角色。</li>
+  <li>路由层管「能不能做这类事」，数据层管「能不能碰这条数据」，两者正交。</li>
+  <li>更新接口用字段白名单（Zod schema 天然如此）。</li>
+  <li>权限一定要写测试，用权限矩阵驱动；越权尝试要记日志。</li>
+  <li>审计日志是独立于应用日志的东西：进数据库、只追加、长期保留。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>实现 <code>fetchJson</code>，用它调用任意一个公开 API。把超时改成 1 毫秒，确认它正确抛出超时错误而不是永久挂起。</li>
-    <li>给天气组件接上真实数据并加上 15 分钟缓存。在日志里打印实际发出的外部请求，刷新页面十次，确认只发了一轮。</li>
-    <li>把天气 API 的地址故意改错，确认首页仍然正常显示，只是没有天气组件。</li>
-    <li>实现熔断器，用一个必定失败的 URL 测试：连续失败 5 次后，第 6 次应该立刻失败而不发请求。</li>
-    <li>检查你的项目：用户请求路径上有几个外部调用？每一个的超时是多少？加起来会不会超过你的响应目标？</li>
+    <li>在你的项目里找一个「按 ID 取资源」的接口，用另一个账号的登录态访问它。如果拿到了数据，你就找到了一个 IDOR。</li>
+    <li>实现 <code>createTenantDb</code>，把至少三个接口改成通过它访问。确认业务代码里再也拿不到未加租户条件的查询入口。</li>
+    <li>实现 <code>can()</code> 和 <code>requirePermission()</code>，把散落的 <code>role === 'admin'</code> 全部替换掉。</li>
+    <li>写一个跨租户测试：A 租户的用户访问 B 租户的资源，断言返回 404。让它跑在 CI 里（第 5 章）。</li>
+    <li>做一个「修改成员信息」接口，然后用 curl 在请求体里塞 <code>"role": "owner"</code>，确认它被忽略了。</li>
+    <li>给一张核心表加审计日志，改一条数据，然后从审计表里查出「谁在什么时候把什么改成了什么」。</li>
+    <li>对照自查清单过一遍你的项目。找到几处问题？</li>
   </ol>
 </div>
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 29 章 · 调试 — Hono 全栈开发教程</title>
+<title>第 29 章 · 可观测性 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="29">
@@ -12,453 +12,702 @@
 <main>
 
 <span class="chapter-eyebrow">第 29 章</span>
-<h1>调试</h1>
+<h1>可观测性</h1>
 <p class="lede">
-  调试的核心不是工具，是方法。这一章先讲一条能用一辈子的原则，
-  再给出 Hono 项目里最常见故障的速查表。
+  下一章讲调试 —— 那是你已经知道哪里坏了之后的事。
+  这一章讲更前面的一步：<strong>怎么让系统自己告诉你哪里不对</strong>，
+  在用户投诉之前，在你还没意识到有问题之前。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>掌握「二分缩小范围」这个通用调试方法</li>
-    <li>用好 <code>console</code> 里那些你可能没用过的方法</li>
-    <li>用调试器打断点，而不是到处加打印</li>
-    <li>调试异步代码和中间件顺序问题</li>
-    <li>会用 Hono 的诊断工具定位路由问题</li>
+    <li>分清「监控」和「可观测性」，知道后者多解决了什么问题</li>
+    <li>掌握三大支柱：日志、指标、追踪，各自回答什么问题</li>
+    <li>用 RED 方法设计服务指标</li>
+    <li>用 SLO 和错误预算把「好不好」变成一个可以争论的数字</li>
+    <li>设计不会让人麻木的告警</li>
+    <li>在 Hono 里把这一套落地</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="principle">第一原则：缩小范围</h2>
+<h2 id="what">监控 vs 可观测性</h2>
 
 <p>
-  面对一个 bug，最没效率的做法是盯着代码想「哪里错了」。
-  最有效的做法是<strong>系统地把「可能出错的范围」一次次砍半</strong>，直到只剩几行。
+  <strong>监控</strong>回答你<em>预先想到</em>的问题：CPU 超过 80% 了吗？错误率超过 1% 了吗？
+  你事先列出一堆指标，盯着它们。
+</p>
+<p>
+  <strong>可观测性</strong>回答你<em>没想到</em>的问题：
+  「为什么只有华南地区的安卓用户在下午三点下单会失败？」
+  这个问题你不可能提前配一个仪表盘，但系统里必须留下足够的线索让你能<em>事后</em>问出来。
 </p>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="二分法缩小问题范围">
-  <rect class="bx-r" x="20" y="24" width="720" height="34" rx="6"/>
-  <text class="sm on-r" x="380" y="46" text-anchor="middle">「订单页面报错了」—— 可能出错的地方：整个应用</text>
-
-  <path class="ln-d" d="M380 62 V78" marker-end="url(#ar)"/>
-
-  <rect class="bx-a" x="120" y="82" width="520" height="34" rx="6"/>
-  <text class="sm on-a" x="380" y="104" text-anchor="middle">问：接口返回的数据对吗？→ 对。所以问题在前端渲染</text>
-
-  <path class="ln-d" d="M380 120 V136" marker-end="url(#ar)"/>
-
-  <rect class="bx-b" x="200" y="140" width="360" height="34" rx="6"/>
-  <text class="sm on-b" x="380" y="162" text-anchor="middle">问：数据传进组件了吗？→ 传了，但 total 是 undefined</text>
-
-  <path class="ln-d" d="M380 178 V194" marker-end="url(#ar)"/>
-
-  <rect class="bx-g" x="270" y="198" width="220" height="34" rx="6"/>
-  <text class="sm on-g" x="380" y="220" text-anchor="middle">找到了：字段名拼成了 totle</text>
-</svg>
-<figcaption>图 29-1　每一步都在把范围砍半，而不是随机猜测</figcaption>
-</figure>
-
 <div class="box key">
-  <div class="t">&#9733; 调试前先回答四个问题</div>
-  <ol>
-    <li><strong>能稳定复现吗？</strong>不能稳定复现的 bug，无法验证是否修好了。先花时间找到复现步骤。</li>
-    <li><strong>最小复现是什么？</strong>把无关的部分一点点删掉，直到删任何一行 bug 就消失。
-        这个过程本身经常就把原因暴露出来了。</li>
-    <li><strong>最后一次正常是什么时候？</strong><code>git bisect</code> 能在几十次提交里用几步定位到引入问题的那次提交。</li>
-    <li><strong>我假设了什么？</strong>Bug 几乎总是藏在你「觉得肯定没问题」的地方。把假设一条条验证。</li>
-  </ol>
-</div>
-
-<div class="code" data-lang="bash">
-<pre>
-# git bisect：在 100 次提交里，7 次就能定位
-git bisect start
-git bisect bad                  # 当前版本有问题
-git bisect good v1.2.0          # 这个版本是好的
-# Git 会自动切到中间某次提交，你测试后告诉它 good 还是 bad
-git bisect good
-git bisect bad
-# ...重复几次
-git bisect reset
-</pre>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="按层排查：每一层用什么工具">
-  <text class="ttl" x="20" y="22">一个请求经过五层，每一层都有专门的观察工具</text>
-
-  <rect class="bx-b" x="20" y="36" width="470" height="42" rx="8"/>
-  <text class="ttl on-b" x="36" y="62">① 浏览器</text>
-  <text class="sm" x="150" y="62">DOM 对吗？脚本报错了吗？</text>
-  <rect class="bx-d" x="502" y="36" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="62">开发者工具 Console / Elements</text>
-
-  <rect class="bx-b" x="20" y="88" width="470" height="42" rx="8"/>
-  <text class="ttl on-b" x="36" y="114">② 网络</text>
-  <text class="sm" x="150" y="114">请求发出去了吗？状态码和响应头对吗？</text>
-  <rect class="bx-d" x="502" y="88" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="114">Network 面板 · curl -v</text>
-
-  <rect class="bx-a" x="20" y="140" width="470" height="42" rx="8"/>
-  <text class="ttl on-a" x="36" y="166">③ 路由与中间件</text>
-  <text class="sm" x="180" y="166">匹配到哪条路由？哪些中间件跑了？</text>
-  <rect class="bx-d" x="502" y="140" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="166">showRoutes() · c.req.routePath</text>
-
-  <rect class="bx-p" x="20" y="192" width="470" height="42" rx="8"/>
-  <text class="ttl on-p" x="36" y="218">④ 处理函数</text>
-  <text class="sm" x="150" y="218">变量的值是什么？走了哪个分支？</text>
-  <rect class="bx-d" x="502" y="192" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="218">断点 · console.table</text>
-
-  <rect class="bx-g" x="20" y="244" width="470" height="42" rx="8"/>
-  <text class="ttl on-g" x="36" y="270">⑤ 数据与外部服务</text>
-  <text class="sm" x="200" y="270">查询返回了什么？第三方超时了吗？</text>
-  <rect class="bx-d" x="502" y="244" width="238" height="42" rx="8"/>
-  <text class="sm" x="516" y="270">SQL 客户端 · EXPLAIN · 日志</text>
-</svg>
-<figcaption>图 29-2　定位问题的第一步是判断「它坏在第几层」</figcaption>
-</figure>
-
-<h2 id="console">console 不只有 log</h2>
-
-<div class="code" data-lang="ts">
-<pre>
-// 表格：看数组对象的神器
-console.table(vacations)
-// ┌─────────┬─────────┬──────────────────┬────────┐
-// │ (index) │   sku   │       name       │ price  │
-// ├─────────┼─────────┼──────────────────┼────────┤
-// │    0    │ 'HR199' │  '胡德河一日游'   │ 99.95  │
-// └─────────┴─────────┴──────────────────┴────────┘
-
-// 分组：让大量日志有层次
-console.group('处理订单 ' + orderId)
-console.log('用户：', userId)
-console.log('商品数：', items.length)
-console.groupEnd()
-
-// 计时
-console.time('查询数据库')
-const rows = await db.select().from(vacations)
-console.timeEnd('查询数据库')     // 查询数据库: 23.4ms
-
-// 断言：条件为假时才输出
-console.assert(total &gt; 0, '总价不应该是 0！', { cart })
-
-// 打印调用栈：搞清楚「这个函数是谁调的」
-console.trace('走到这里了')
-
-// 深层对象：默认只展开两层，这样能全部展开
-console.dir(config, { depth: null })
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 一个省时间的小技巧</div>
+  <div class="t">&#9733; 一句话区分</div>
   <p>
-    打印变量时用对象简写，这样输出里自带变量名：
+    监控告诉你<strong>「有问题」</strong>，可观测性让你能查出<strong>「什么问题」</strong>。<br>
+    前者是有限个预设的仪表盘，后者是能任意切片、任意下钻的原始数据。
+    <em>小项目先做好监控就够；一旦系统复杂到「不知道该看哪个仪表盘」，就需要可观测性了。</em>
   </p>
-  <div class="code" data-lang="ts"><pre>
-console.log(userId, cartTotal, itemCount)
-// → u_123 299.85 3        ← 哪个是哪个？
+</div>
 
-console.log({ userId, cartTotal, itemCount })
-// → { userId: 'u_123', cartTotal: 299.85, itemCount: 3 }   ✓
+<h2 id="pillars">三大支柱</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="日志、指标、追踪三大支柱">
+  <rect class="bx-b" x="20" y="20" width="230" height="200" rx="10"/>
+  <text class="ttl on-b" x="135" y="46" text-anchor="middle">日志 Logs</text>
+  <text class="sm on-b" x="36" y="72">回答：那一刻发生了什么？</text>
+  <text class="sm" x="36" y="98">离散的事件记录</text>
+  <text class="sm" x="36" y="118">信息最全，能带任意字段</text>
+  <text class="sm" x="36" y="138">适合：查一个具体请求</text>
+  <text class="sm on-r" x="36" y="164">代价最高：</text>
+  <text class="sm on-r" x="36" y="182">量大、存储贵、检索慢</text>
+  <text class="sm" x="36" y="206">「用户 u_9 的订单为什么失败」</text>
+
+  <rect class="bx-a" x="266" y="20" width="230" height="200" rx="10"/>
+  <text class="ttl on-a" x="381" y="46" text-anchor="middle">指标 Metrics</text>
+  <text class="sm on-a" x="282" y="72">回答：整体健康吗？</text>
+  <text class="sm" x="282" y="98">聚合后的数字，随时间变化</text>
+  <text class="sm" x="282" y="118">极其便宜，可以长期保留</text>
+  <text class="sm" x="282" y="138">适合：告警、趋势、容量规划</text>
+  <text class="sm on-r" x="282" y="164">代价：</text>
+  <text class="sm on-r" x="282" y="182">丢失了单个请求的细节</text>
+  <text class="sm" x="282" y="206">「过去一小时错误率 2.3%」</text>
+
+  <rect class="bx-p" x="512" y="20" width="228" height="200" rx="10"/>
+  <text class="ttl on-p" x="626" y="46" text-anchor="middle">追踪 Traces</text>
+  <text class="sm on-p" x="528" y="72">回答：慢在哪一段？</text>
+  <text class="sm" x="528" y="98">一个请求穿过所有组件的路径</text>
+  <text class="sm" x="528" y="118">每段耗时一目了然</text>
+  <text class="sm" x="528" y="138">适合：定位性能瓶颈</text>
+  <text class="sm on-r" x="528" y="164">代价：</text>
+  <text class="sm on-r" x="528" y="182">要埋点，通常要采样</text>
+  <text class="sm" x="528" y="206">「2 秒里 1.8 秒在调支付」</text>
+
+  <rect class="bx-g" x="20" y="234" width="720" height="56" rx="10"/>
+  <text class="ttl on-g" x="380" y="256" text-anchor="middle">把它们串起来的东西：请求 ID</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">指标告警 → 用 trace 找到最慢的那个请求 → 用它的请求 ID 捞出全部日志。这条链路必须打通</text>
+</svg>
+<figcaption>图 29-1　三者不是替代关系，而是从「宏观」到「微观」的三个不同焦距</figcaption>
+</figure>
+
+<h2 id="logs">日志：写给机器看</h2>
+
+<p>第 12 章已经引入了结构化日志。这里把它做扎实。</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 写给人看</div>
+    <div class="code" data-lang="text"><pre>
+用户 u_9 的订单 o_123 创建失败：
+库存不足
+
+无法检索、无法聚合、
+无法按用户过滤
 </pre></div>
-</div>
-
-<h2 id="debugger">用调试器</h2>
-
-<p>
-  打印语句的问题是：你只能看到你想到要打印的东西。
-  调试器让你<strong>暂停程序，然后随便看任何变量</strong>。
-</p>
-
-<div class="code" data-lang="bash">
-<pre>
-# 启动时开启调试端口
-node --inspect dist/server.js
-
-# 用 tsx 开发时
-npx tsx --inspect src/server.tsx
-
-# 在第一行就暂停（用于调试启动过程）
-node --inspect-brk dist/server.js
-</pre>
-</div>
-
-<p>然后打开 Chrome，访问 <code>chrome://inspect</code>，点击 「inspect」。</p>
-
-<p>更方便的是在 VS Code 里直接调试：</p>
-
-<div class="code" data-lang="json" data-file=".vscode/launch.json">
-<pre>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 写给机器看</div>
+    <div class="code" data-lang="json"><pre>
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "调试 Hono 服务器",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["tsx", "src/server.tsx"],
-      "console": "integratedTerminal",
-      "skipFiles": ["&lt;node_internals&gt;/**"],
-      "env": { "NODE_ENV": "development" }
-    },
-    {
-      "name": "调试当前测试文件",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["vitest", "run", "${relativeFile}"],
-      "console": "integratedTerminal"
-    }
-  ]
+  "level": "warn",
+  "msg": "order_failed",
+  "reason": "out_of_stock",
+  "userId": "u_9",
+  "orderId": "o_123",
+  "sku": "HR199",
+  "requestId": "5f3a...",
+  "traceId": "9b2c...",
+  "time": "2026-09-07T10:00:01Z"
 }
-</pre>
+</pre></div>
+  </div>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 三种断点，各有用处</div>
-  <ul>
-    <li><strong>普通断点</strong> —— 点行号左边。程序跑到这里就停。</li>
-    <li><strong>条件断点</strong> —— 右键行号，输入条件。「只在 <code>sku === 'HR199'</code> 时停下」，
-        循环里调试必备。</li>
-    <li><strong>日志断点</strong> —— 右键选 Logpoint。不暂停，只打印一条消息。
-        相当于「临时加一行 <code>console.log</code>，但不用改代码，也不会忘了删」。</li>
-  </ul>
+  <div class="t">&#9733; 关键差别：<code>msg</code> 是一个<strong>固定的标识符</strong></div>
+  <p>
+    不要写 <code>"用户 u_9 的订单创建失败"</code>，而要写
+    <code>msg: "order_failed"</code> 加上独立的字段。<br>
+    这样你才能查询「过去 24 小时所有 <code>order_failed</code> 且 <code>reason=out_of_stock</code> 的记录，
+    按 sku 分组」。把变量拼进消息文本里，这个查询就永远做不了。
+  </p>
 </div>
 
-<h2 id="async">调试异步代码</h2>
+<h3>一个够用的日志器</h3>
 
-<div class="code" data-lang="ts">
+<div class="code" data-lang="ts" data-file="src/lib/logger.ts">
 <pre>
-// ❌ 忘了 await：错误堆栈里根本看不到这个函数
-async function handler(c) {
-  saveToDatabase(data)         // 返回的 Promise 没人管
-  return c.text('ok')
+type Level = 'debug' | 'info' | 'warn' | 'error'
+
+const LEVELS: Record&lt;Level, number&gt; = { debug: 10, info: 20, warn: 30, error: 40 }
+const MIN = LEVELS[(process.env.LOG_LEVEL as Level) ?? 'info']
+
+/** 绝不能进日志的字段名 */
+const REDACT = new Set([
+  'password', 'passwordHash', 'token', 'accessToken', 'refreshToken',
+  'authorization', 'cookie', 'secret', 'apiKey', 'creditCard', 'cvv', 'idCard',
+])
+
+function scrub(obj: Record&lt;string, unknown&gt;): Record&lt;string, unknown&gt; {
+  const out: Record&lt;string, unknown&gt; = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (REDACT.has(k)) out[k] = '[已脱敏]'
+    else if (v &amp;&amp; typeof v === 'object' &amp;&amp; !Array.isArray(v)) out[k] = scrub(v as never)
+    else out[k] = v
+  }
+  return out
 }
 
-// ✅
-async function handler(c) {
-  await saveToDatabase(data)
-  return c.text('ok')
+export function log(level: Level, msg: string, fields: Record&lt;string, unknown&gt; = {}) {
+  if (LEVELS[level] &lt; MIN) return
+  console.log(JSON.stringify({ level, msg, time: new Date().toISOString(), ...scrub(fields) }))
+}
+
+/** 绑定一组固定字段，后续每条日志自动带上 */
+export function child(base: Record&lt;string, unknown&gt;) {
+  return (level: Level, msg: string, fields: Record&lt;string, unknown&gt; = {}) =&gt;
+    log(level, msg, { ...base, ...fields })
 }
 </pre>
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; 忘记 await 是最常见的异步 bug</div>
+  <div class="t">&#9888; 主动脱敏，不要靠自觉</div>
   <p>
-    症状五花八门：数据没保存但接口返回成功、日志顺序错乱、
-    偶发的「connection closed」、错误堆栈指向完全无关的地方。<br>
-    <strong>防御手段</strong>：开启 ESLint 的 <code>no-floating-promises</code> 规则
-    （需要 TypeScript 类型信息），它会在编译期就抓出所有没处理的 Promise。
+    「我不会把密码打进日志」这个假设总有一天会被打破 —— 通常是某天有人写了
+    <code>log('debug', 'req_body', body)</code> 来排查问题，然后忘了删。<br>
+    <strong>把脱敏做进日志器本身</strong>，让它成为默认行为。日志会被很多人看到、
+    同步到第三方、保留很久 —— 一旦写进去就等于泄露。
   </p>
 </div>
 
-<div class="code" data-lang="ts">
+<h3>请求级中间件</h3>
+
+<div class="code" data-lang="ts" data-file="src/middleware/observability.ts">
 <pre>
-// 让异步堆栈更完整
-process.on('unhandledRejection', (reason) =&gt; {
-  console.error('未处理的 Promise 拒绝：')
-  console.error(reason)
+import { createMiddleware } from 'hono/factory'
+import { child } from '../lib/logger'
+
+export const observability = createMiddleware&lt;{
+  Variables: { log: ReturnType&lt;typeof child&gt;; requestId: string; traceId: string }
+}&gt;(async (c, next) =&gt; {
+  // 上游传来的 trace id 要延续，没有才新建 —— 这是跨服务串联的关键
+  const traceId = c.req.header('x-trace-id') ?? crypto.randomUUID()
+  const requestId = c.req.header('x-request-id') ?? crypto.randomUUID()
+
+  const logger = child({ requestId, traceId })
+  c.set('log', logger)
+  c.set('requestId', requestId)
+  c.set('traceId', traceId)
+
+  const start = Date.now()
+
+  try {
+    await next()
+  } catch (err) {
+    logger('error', 'request_error', { error: String(err) })
+    throw err
+  } finally {
+    const durationMs = Date.now() - start
+    const status = c.res.status
+
+    logger(status &gt;= 500 ? 'error' : status &gt;= 400 ? 'warn' : 'info', 'request', {
+      method: c.req.method,
+      // 用路由模式而不是实际路径 —— 否则 /orders/o_1、/orders/o_2 会变成无数个不同的值
+      route: c.req.routePath,
+      path: c.req.path,
+      status,
+      durationMs,
+      userId: c.get('user')?.id,
+    })
+  }
+
+  c.res.headers.set('X-Request-Id', requestId)
 })
-
-// 用 Error.cause 保留原始错误（不要把它吞掉）
-try {
-  await callExternalApi()
-} catch (err) {
-  throw new Error('获取天气数据失败', { cause: err })
-}
-</pre>
-</div>
-
-<h2 id="hono">Hono 专属排查</h2>
-
-<h3>看路由表</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-import { showRoutes } from 'hono/dev'
-
-if (process.env.NODE_ENV !== 'production') {
-  showRoutes(app, { verbose: true })
-}
-</pre>
-</div>
-
-<h3>看请求经过了哪些中间件</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// 临时插在最外层
-app.use('*', async (c, next) =&gt; {
-  console.group(`&gt;&gt;&gt; ${c.req.method} ${c.req.path}`)
-  console.time('总耗时')
-  await next()
-  console.timeEnd('总耗时')
-  console.log('匹配的路由：', c.req.routePath)   // ← 关键：实际匹配到哪条
-  console.log('响应状态：', c.res.status)
-  console.groupEnd()
-})
-</pre>
-</div>
-
-<p>
-  <code>c.req.routePath</code> 特别有用：它告诉你<strong>实际匹配上的是哪条路由规则</strong>。
-  「我明明访问的是 <code>/vacations/new</code>，为什么走到了详情页」——
-  打印一下就会看到 <code>routePath</code> 是 <code>/vacations/:slug</code>，
-  于是知道是路由顺序问题（第 16 章）。
-</p>
-
-<h3>看真实的请求和响应</h3>
-
-<div class="code" data-lang="bash">
-<pre>
-# -v 显示完整的请求头和响应头
-curl -v http://localhost:3000/api/v1/vacations
-
-# 只看响应头
-curl -I http://localhost:3000/
-
-# 发 JSON
-curl -X POST http://localhost:3000/api/v1/vacations/HR199/notify \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"a@example.com"}' -i
-
-# 带 Cookie
-curl -b 'sid=abc123' http://localhost:3000/account -i
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 分不清是前端还是后端的问题时，用 curl</div>
-  <p>
-    curl 绕过了浏览器的一切（缓存、Cookie、CORS、Service Worker、前端代码）。
-    如果 curl 结果正确而浏览器不对，问题一定在浏览器侧；反之在服务端。
-    <strong>一条命令就砍掉了一半的搜索范围。</strong>
-  </p>
-</div>
-
-<h2 id="cheatsheet">常见故障速查表</h2>
-
-<div class="tw">
-<table>
-  <tr><th>症状</th><th>最可能的原因</th></tr>
-  <tr>
-    <td>中间件完全不生效</td>
-    <td>① 写在路由注册<strong>之后</strong>了；② 忘了调用工厂函数（<code>logger</code> 少了括号）；③ 路径模式不匹配</td>
-  </tr>
-  <tr>
-    <td>响应内容为空 / 请求挂住</td>
-    <td>处理函数忘了 <code>return</code>，或者中间件忘了 <code>await next()</code></td>
-  </tr>
-  <tr>
-    <td>「Body has already been read」</td>
-    <td>请求体读了两次。改成读一次存到变量里（第 6 章）</td>
-  </tr>
-  <tr>
-    <td>路由匹配错了</td>
-    <td>顺序问题。具体路径要写在通配和参数路由前面。用 <code>c.req.routePath</code> 确认（第 16 章）</td>
-  </tr>
-  <tr>
-    <td>写了路由但访问到静态文件</td>
-    <td><code>serveStatic</code> 在前面抢走了。检查 <code>public/</code> 里有没有同名文件（第 3 章）</td>
-  </tr>
-  <tr>
-    <td>浏览器报 CORS 错误</td>
-    <td>CORS 中间件没配、配在路由后面、或者 <code>origin</code> 写错了（第 17 章）</td>
-  </tr>
-  <tr>
-    <td>Cookie 设了但读不到</td>
-    <td><code>path</code> / <code>domain</code> 不匹配；本地开发时设了 <code>secure: true</code>；跨站被 <code>sameSite</code> 挡住（第 9 章）</td>
-  </tr>
-  <tr>
-    <td>Workers 上 <code>c.env</code> 是 undefined</td>
-    <td>在模块顶层访问了。必须在请求上下文里读（第 12 章）</td>
-  </tr>
-  <tr>
-    <td>本地好好的，线上 500</td>
-    <td>环境变量没配；用了 Node 独有 API；构建产物和源码不一致</td>
-  </tr>
-  <tr>
-    <td>JSX 报「找不到命名空间」</td>
-    <td><code>tsconfig.json</code> 里缺 <code>jsxImportSource: "hono/jsx"</code>；或文件后缀不是 <code>.tsx</code>（第 3 章）</td>
-  </tr>
-  <tr>
-    <td>RPC 客户端没有类型提示</td>
-    <td>路由不是链式定义的，类型信息丢了（第 16 章）</td>
-  </tr>
-  <tr>
-    <td>SPA 刷新子页面 404</td>
-    <td>服务端没配 SPA 回退（第 18 章）</td>
-  </tr>
-</table>
-</div>
-
-<h2 id="prod">线上问题</h2>
-
-<p>生产环境不能打断点，你只有三样东西：</p>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128220;</span><h4>结构化日志</h4>
-    <p>带上请求 ID，就能把一个请求经过的所有日志串起来（第 12 章）。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128680;</span><h4>错误追踪</h4>
-    <p>Sentry 之类。带上堆栈、用户、请求上下文，比翻日志高效得多。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128200;</span><h4>指标</h4>
-    <p>响应时间、错误率、依赖耗时。它们告诉你「什么时候开始变坏的」。</p>
-  </div>
-</div>
-
-<div class="code" data-lang="bash">
-<pre>
-# Cloudflare Workers：实时看线上日志
-npx wrangler tail
-
-# 只看错误
-npx wrangler tail --status error
 </pre>
 </div>
 
 <div class="box key">
-  <div class="t">&#9733; 每修一个 bug，问一句「怎么才能更早发现它」</div>
+  <div class="t">&#9733; 用 <code>routePath</code> 而不是 <code>path</code> 做聚合维度</div>
   <p>
-    如果答案是「加个类型」「加个校验」「加个测试」「加条日志」，那就顺手加上。<br>
-    修 bug 只解决了这一个；改进发现机制能解决一整类。
-    这也是第 5 章说的「QA 计划是活文档」的意思。
+    <code>/vacations/hood-river</code>、<code>/vacations/oregon-coast</code>……
+    如果按实际路径统计，你会得到成千上万个只出现过几次的指标 ——
+    这叫<strong>高基数问题</strong>，会撑爆监控系统的存储和查询。<br>
+    <code>c.req.routePath</code> 返回的是 <code>/vacations/:slug</code>，
+    是<em>有限</em>的一组值。<strong>把它当聚合维度，把具体路径放进日志字段。</strong>
   </p>
+</div>
+
+<h3>把请求 ID 交给用户</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+app.onError((err, c) =&gt; {
+  const requestId = c.get('requestId')
+  c.get('log')('error', 'unhandled_error', { error: String(err), stack: err.stack })
+
+  return c.html(
+    &lt;ErrorPage&gt;
+      &lt;p&gt;服务器出了点问题，我们已经记录下来了。&lt;/p&gt;
+      &lt;p&gt;如需帮助，请把这个编号告诉客服：&lt;code&gt;{requestId}&lt;/code&gt;&lt;/p&gt;
+    &lt;/ErrorPage&gt;,
+    500
+  )
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 这一招的价值远超它的成本</div>
+  <p>
+    用户报错时说「刚才下单失败了」——你要在几百万条日志里大海捞针。<br>
+    用户报错时说「编号 5f3a-9b2c」——<strong>一次查询直接定位到那个请求的全部上下文</strong>。<br>
+    十行代码，把排查时间从两小时降到两分钟。
+  </p>
+</div>
+
+<h2 id="metrics">指标：RED 方法</h2>
+
+<p>
+  指标该测什么？对于「请求驱动」的服务，有一个久经考验的极简答案：<strong>RED</strong>。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>字母</th><th>指标</th><th>回答的问题</th></tr>
+  <tr><td><strong>R</strong>ate</td><td>每秒请求数</td><td>流量多大？突然掉到 0 了吗？</td></tr>
+  <tr><td><strong>E</strong>rrors</td><td>失败请求数 / 比例</td><td>有多少用户在报错？</td></tr>
+  <tr><td><strong>D</strong>uration</td><td>响应时间分布</td><td>用户要等多久？</td></tr>
+</table>
+</div>
+
+<p>
+  这三个按 <code>route</code> 和 <code>status</code> 拆开，就能覆盖绝大多数「服务是否健康」的问题。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 永远不要看平均响应时间</div>
+  <p>
+    100 个请求，99 个花 10 ms，1 个花 5 秒。平均值是 60 ms —— 看起来很健康，
+    但有 1% 的用户体验糟糕透顶。<br>
+    <strong>要看分位数</strong>：p50（一半用户的体验）、p95、p99（最差的那批人）。
+    第 12 章压测时已经强调过一次，在线上监控里同样成立。
+    <em>而且请求量越大，p99 影响的绝对人数越多。</em>
+  </p>
+</div>
+
+<h3>记录指标</h3>
+
+<div class="code" data-lang="ts">
+<pre>
+// 最省事的做法：从结构化日志里派生指标
+// 日志平台（Axiom、Datadog、Grafana Loki）都支持基于日志字段做聚合，
+// 于是你不用额外埋点，上面那条 msg="request" 的日志就够算出 RED 了
+
+// 需要更细的自定义指标时再单独记录
+c.get('log')('info', 'metric', {
+  metric: 'checkout_amount',
+  value: order.total,
+  currency: order.currency,
+})
+
+// 业务指标同样重要 —— 技术指标全绿但没人下单，也是故障
+c.get('log')('info', 'metric', { metric: 'order_created', value: 1, sku: order.sku })
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 业务指标往往比技术指标更早发现问题</div>
+  <p>
+    支付回调因为一个配置错误全部失败 —— CPU 正常、内存正常、错误率正常
+    （因为回调的 5xx 是<em>对方</em>看到的，你这边只是没收到请求）。<br>
+    唯一的异常信号是：<strong>「过去一小时成功支付订单数 = 0」</strong>。<br>
+    <em>这就是第 32 章「隐形故障」的核心 —— 要监控「应该发生的事」。</em>
+  </p>
+</div>
+
+<h2 id="traces">追踪</h2>
+
+<p>
+  当一个请求要经过网关 → 你的服务 → 数据库 → 第三方 API → 队列时，
+  「慢了 2 秒」这句话毫无信息量。追踪把这 2 秒拆开：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="一个请求的 trace 瀑布图">
+  <text class="ttl" x="20" y="22">trace 9b2c… ：POST /api/v1/orders　总耗时 2140 ms</text>
+
+  <path class="ln-d" d="M170 34 V226"/>
+  <path class="ln-d" d="M700 34 V226"/>
+  <text class="sm" x="170" y="246" text-anchor="middle">0 ms</text>
+  <text class="sm" x="700" y="246" text-anchor="middle">2140 ms</text>
+
+  <text class="sm" x="20" y="56">HTTP 处理</text>
+  <rect class="bx-a" x="170" y="42" width="528" height="20" rx="4"/>
+
+  <text class="sm" x="20" y="84">　校验参数</text>
+  <rect class="bx-g" x="174" y="70" width="12" height="20" rx="3"/>
+  <text class="sm" x="196" y="84">8 ms</text>
+
+  <text class="sm" x="20" y="112">　查用户</text>
+  <rect class="bx-g" x="188" y="98" width="26" height="20" rx="3"/>
+  <text class="sm" x="224" y="112">22 ms</text>
+
+  <text class="sm" x="20" y="140">　写订单（事务）</text>
+  <rect class="bx-g" x="216" y="126" width="42" height="20" rx="3"/>
+  <text class="sm" x="268" y="140">45 ms</text>
+
+  <text class="sm on-r" x="20" y="168">　调支付接口</text>
+  <rect class="bx-r" x="260" y="154" width="420" height="20" rx="3"/>
+  <text class="sm on-r" x="450" y="168" text-anchor="middle">1840 ms　←　瓶颈在这里</text>
+
+  <text class="sm" x="20" y="196">　投递队列</text>
+  <rect class="bx-g" x="682" y="182" width="14" height="20" rx="3"/>
+  <text class="sm" x="702" y="196">12 ms</text>
+
+  <rect class="bx-d" x="20" y="210" width="720" height="24" rx="6"/>
+  <text class="sm" x="380" y="227" text-anchor="middle">没有 trace 时你只知道「慢」；有了 trace，问题在第一眼就锁定了</text>
+</svg>
+<figcaption>图 29-2　每一段叫一个 span，span 之间有父子关系，构成一棵树</figcaption>
+</figure>
+
+<h3>手工实现一个够用的版本</h3>
+
+<div class="code" data-lang="ts" data-file="src/lib/trace.ts">
+<pre>
+type Span = { name: string; startMs: number; endMs?: number; attrs: Record&lt;string, unknown&gt; }
+
+export function createTracer(traceId: string) {
+  const spans: Span[] = []
+
+  async function span&lt;T&gt;(
+    name: string,
+    fn: () =&gt; Promise&lt;T&gt;,
+    attrs: Record&lt;string, unknown&gt; = {}
+  ): Promise&lt;T&gt; {
+    const s: Span = { name, startMs: Date.now(), attrs }
+    spans.push(s)
+    try {
+      return await fn()
+    } catch (err) {
+      s.attrs.error = String(err)
+      throw err
+    } finally {
+      s.endMs = Date.now()
+    }
+  }
+
+  function flush() {
+    log('info', 'trace', {
+      traceId,
+      spans: spans.map((s) =&gt; ({
+        name: s.name,
+        durationMs: (s.endMs ?? Date.now()) - s.startMs,
+        ...s.attrs,
+      })),
+    })
+  }
+
+  return { span, flush }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/api/v1/orders', async (c) =&gt; {
+  const t = createTracer(c.get('traceId'))
+
+  try {
+    const user = await t.span('db.get_user', () =&gt; getUser(userId))
+    const order = await t.span('db.create_order', () =&gt; createOrder(user, body))
+    await t.span('payment.charge', () =&gt; chargeCard(order), { provider: 'stripe' })
+    await t.span('queue.send', () =&gt; c.env.TASKS.send({ type: 'send-order-email' }))
+    return c.json({ orderId: order.id }, 201)
+  } finally {
+    t.flush()
+  }
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 什么时候该上 OpenTelemetry</div>
+  <p>
+    上面这个手写版本对单体服务完全够用，而且零依赖。<br>
+    当你有<strong>多个服务互相调用</strong>时，才需要 <a href="https://opentelemetry.io">OpenTelemetry</a>
+    —— 它的价值在于标准化的<strong>上下文传播</strong>（把 trace id 通过
+    <code>traceparent</code> 请求头自动带到下游服务），这样一条 trace 能跨越整个系统。
+    Hono 有 <code>@hono/otel</code> 中间件可以直接接。
+  </p>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 调用下游服务时，把 trace 上下文传下去
+await fetch(downstreamUrl, {
+  headers: {
+    'X-Trace-Id': c.get('traceId'),        // 自己的简易方案
+    // 或标准的 W3C 格式：
+    // traceparent: `00-${traceId}-${spanId}-01`,
+  },
+})
+</pre>
+</div>
+
+<h2 id="slo">SLO 与错误预算</h2>
+
+<p>
+  「我们的服务稳定吗？」这个问题没法争论，因为没有共同标准。
+  SLO 把它变成一个数字。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>概念</th><th>含义</th><th>例子</th></tr>
+  <tr><td><strong>SLI</strong> 指标</td><td>你实际测量的那个数</td><td>成功请求数 ÷ 总请求数</td></tr>
+  <tr><td><strong>SLO</strong> 目标</td><td>你承诺达到的水平</td><td>30 天内成功率 ≥ 99.9%</td></tr>
+  <tr><td><strong>错误预算</strong></td><td>SLO 允许你失败的额度</td><td>30 天内可以失败 0.1%</td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="错误预算的消耗">
+  <text class="ttl" x="20" y="22">SLO = 99.9%　→　30 天里允许约 43 分钟不可用</text>
+
+  <rect class="bx-d" x="20" y="36" width="720" height="34" rx="6"/>
+  <rect class="bx-g" x="20" y="36" width="300" height="34" rx="6"/>
+  <rect class="bx-a" x="320" y="36" width="180" height="34" rx="6"/>
+  <text class="sm on-g" x="170" y="58" text-anchor="middle">已用 32%</text>
+  <text class="sm on-a" x="410" y="58" text-anchor="middle">本次事故又用掉 20%</text>
+  <text class="sm" x="620" y="58" text-anchor="middle">剩余 48%</text>
+
+  <rect class="bx-g" x="20" y="90" width="350" height="130" rx="10"/>
+  <text class="ttl on-g" x="36" y="114">预算充足时</text>
+  <text class="sm" x="36" y="140">· 可以大胆发新功能</text>
+  <text class="sm" x="36" y="162">· 可以做有风险的重构</text>
+  <text class="sm" x="36" y="184">· 可以加快发布节奏</text>
+  <text class="sm on-g" x="36" y="210">「稳定性有余量，拿它换速度」</text>
+
+  <rect class="bx-r" x="390" y="90" width="350" height="130" rx="10"/>
+  <text class="ttl on-r" x="406" y="114">预算耗尽时</text>
+  <text class="sm" x="406" y="140">· 冻结新功能发布</text>
+  <text class="sm" x="406" y="162">· 全员转去修稳定性问题</text>
+  <text class="sm" x="406" y="184">· 直到预算恢复</text>
+  <text class="sm on-r" x="406" y="210">「这是事先约定好的规则，不是临时吵架」</text>
+</svg>
+<figcaption>图 29-3　错误预算把「稳定 vs 速度」的争论变成了一条预先商定的规则</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 别把 SLO 定成 100%</div>
+  <p>
+    100% 可用意味着<strong>任何变更都不能做</strong>，因为变更就有风险。
+    这不是目标，是瘫痪。<br>
+    而且成本是指数级的：99% → 99.9% 可能只要加个健康检查，
+    99.9% → 99.99% 可能要多区域部署、自动故障转移、24 小时值班 —— 贵几十倍。<br>
+    <strong>先问「用户真的能感知到这个差别吗」，再决定要不要花这个钱。</strong>
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>可用性</th><th>每月允许不可用</th><th>大致意味着</th></tr>
+  <tr><td>99%</td><td>7 小时 18 分</td><td>个人项目、内部工具</td></tr>
+  <tr><td>99.9%</td><td>43 分钟</td><td><strong>大多数商业应用的合理起点</strong></td></tr>
+  <tr><td>99.99%</td><td>4 分 22 秒</td><td>需要多区域和自动故障转移</td></tr>
+  <tr><td>99.999%</td><td>26 秒</td><td>电信级，成本极高</td></tr>
+</table>
+</div>
+
+<h2 id="alert">告警</h2>
+
+<p>
+  告警设计得不好，后果不是「收不到通知」，而是更糟的 ——
+  <strong>大家开始无视所有通知</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="好告警与坏告警的对比">
+  <rect class="bx-r" x="20" y="20" width="350" height="210" rx="10"/>
+  <text class="ttl on-r" x="36" y="44">会造成告警疲劳的</text>
+  <text class="sm" x="36" y="70">「CPU 超过 80%」</text>
+  <text class="sm" x="36" y="88">　→ 那又怎样？用户有感觉吗？</text>
+  <text class="sm" x="36" y="112">「有一个请求返回了 500」</text>
+  <text class="sm" x="36" y="130">　→ 半夜把人叫醒，为了一个偶发错误</text>
+  <text class="sm" x="36" y="154">「磁盘使用率 71%」</text>
+  <text class="sm" x="36" y="172">　→ 没有行动指引，不知道要干嘛</text>
+  <text class="sm on-r" x="36" y="200">结果：一天 200 条告警，</text>
+  <text class="sm on-r" x="36" y="218">全部静音，真出事时没人看见</text>
+
+  <rect class="bx-g" x="390" y="20" width="350" height="210" rx="10"/>
+  <text class="ttl on-g" x="406" y="44">值得半夜叫醒人的</text>
+  <text class="sm" x="406" y="70">「错误率连续 5 分钟 &gt; 5%」</text>
+  <text class="sm" x="406" y="88">　→ 用户正在受影响</text>
+  <text class="sm" x="406" y="112">「p99 延迟连续 10 分钟 &gt; 3 秒」</text>
+  <text class="sm" x="406" y="130">　→ 体验已经不可接受</text>
+  <text class="sm" x="406" y="154">「过去 30 分钟成功订单数 = 0」</text>
+  <text class="sm" x="406" y="172">　→ 业务停了，哪怕技术指标全绿</text>
+  <text class="sm on-g" x="406" y="200">「死信队列非空」</text>
+  <text class="sm on-g" x="406" y="218">　→ 有任务彻底失败了，需要人介入</text>
+</svg>
+<figcaption>图 29-4　告警的标准只有一个：<strong>需要人立刻做点什么吗</strong></figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 三条规则</div>
+  <ol>
+    <li><strong>基于症状，不是基于原因。</strong>「用户在报错」是症状，「CPU 高」是可能的原因之一。
+        原因有无数种，症状就那么几个 —— 盯症状，覆盖面反而更全。</li>
+    <li><strong>每条告警都要可操作。</strong>收到它之后，接收人应该知道<em>下一步做什么</em>。
+        做不到就别设成告警，放进仪表盘。</li>
+    <li><strong>分级。</strong>页面级（立刻叫醒）、工单级（上班处理）、看板级（有空看看）。
+        <em>只有第一类才配得上半夜的电话。</em></li>
+  </ol>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 告警要带上足够的上下文，让人一眼知道该干什么
+await notifySlack({
+  level: 'page',
+  title: '订单接口错误率 8.2%（阈值 5%）',
+  fields: {
+    影响范围: '过去 5 分钟约 340 个请求失败',
+    主要错误: 'payment.timeout（占 91%）',
+    最近变更: 'v1.24.0 于 12 分钟前部署',
+    仪表盘: 'https://…/orders',
+    运维手册: 'https://…/runbook#payment-timeout',
+  },
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 「最近变更」这一行特别值钱</div>
+  <p>
+    绝大多数线上故障是由变更引起的。告警里自动带上「最近一次部署是什么时候、哪个版本」，
+    能让很多故障在 30 秒内定位 —— 而且直接指向第 31 章的答案：<strong>先回滚</strong>。
+  </p>
+</div>
+
+<h2 id="cost">采样与成本</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 可观测性的账单可能超过服务器</div>
+  <p>
+    每天一亿个请求，每个请求一条 1 KB 的日志 = 100 GB/天 = 3 TB/月。
+    按主流平台的价格，这个量级的费用能轻松超过你的计算成本。
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>策略</th><th>做法</th></tr>
+  <tr><td>分级采样</td><td>成功请求采样 1%，<strong>错误请求 100% 保留</strong>。出问题的那些才是你要看的</td></tr>
+  <tr><td>慢请求全留</td><td>耗时超过 p99 的请求 100% 保留 trace</td></tr>
+  <tr><td>尾部采样</td><td>先缓存整条 trace，等请求结束后再决定留不留（有错或很慢就留）</td></tr>
+  <tr><td>分层保留</td><td>原始日志留 7 天，聚合后的指标留 13 个月（用于同比）</td></tr>
+  <tr><td>控制基数</td><td>别把 userId、订单号放进<strong>指标标签</strong>；它们属于日志字段</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+function shouldSample(status: number, durationMs: number): boolean {
+  if (status &gt;= 500) return true            // 错误全留
+  if (durationMs &gt; 1000) return true         // 慢请求全留
+  return Math.random() &lt; 0.01                // 其余 1%
+}
+</pre>
+</div>
+
+<h2 id="wire">在 Hono 里串起来</h2>
+
+<div class="code" data-lang="ts" data-file="src/app.ts">
+<pre>
+import { requestId } from 'hono/request-id'
+import { timing, startTime, endTime } from 'hono/timing'
+import { observability } from './middleware/observability'
+
+const app = new Hono&lt;Env&gt;()
+
+app.use(requestId())
+app.use(observability)          // 结构化日志 + trace id + 耗时
+app.use(timing())               // 输出 Server-Timing 头，浏览器 DevTools 里能直接看到
+
+app.get('/vacations', async (c) =&gt; {
+  startTime(c, 'db')
+  const vacations = await c.get('repo').list({ available: true })
+  endTime(c, 'db')
+
+  startTime(c, 'render')
+  const html = &lt;VacationsPage vacations={vacations} /&gt;
+  endTime(c, 'render')
+
+  return c.html(html)
+})
+
+// 健康检查（第 12 章）也算可观测性的一部分
+app.get('/health', (c) =&gt; c.json({ status: 'ok' }))
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; <code>Server-Timing</code> 是个被忽视的好东西</div>
+  <p>
+    它把服务端各阶段耗时放进响应头，浏览器 DevTools 的 Network 面板会
+    <strong>直接画出来</strong>。前端同事抱怨「接口慢」时，
+    他自己打开面板就能看到是数据库慢还是渲染慢，不用来找你要日志。
+  </p>
+</div>
+
+<h2 id="start">从零开始的优先级</h2>
+
+<p>不要一上来就搭全套。按这个顺序做，每一步都有立竿见影的回报：</p>
+
+<div class="tw">
+<table>
+  <tr><th>顺序</th><th>做什么</th><th>成本</th></tr>
+  <tr><td>1</td><td>结构化日志 + 请求 ID，错误页展示请求 ID</td><td>半天</td></tr>
+  <tr><td>2</td><td>错误追踪（Sentry 之类），接上 <code>app.onError</code></td><td>一小时</td></tr>
+  <tr><td>3</td><td>外部可用性监控打 <code>/health</code></td><td>十分钟</td></tr>
+  <tr><td>4</td><td>RED 指标看板（多数日志平台能直接从日志算出来）</td><td>半天</td></tr>
+  <tr><td>5</td><td>定两三条真正可操作的告警</td><td>一小时</td></tr>
+  <tr><td>6</td><td>关键业务指标（订单数、注册数）</td><td>半天</td></tr>
+  <tr><td>7</td><td>定 SLO，开始跟踪错误预算</td><td>一天</td></tr>
+  <tr><td>8</td><td>分布式追踪（<em>确实有多个服务时才做</em>）</td><td>数天</td></tr>
+</table>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>调试的核心是二分缩小范围，不是盯着代码猜。</li>
-  <li>先确保能稳定复现，再找最小复现；<code>git bisect</code> 能快速定位引入问题的提交。</li>
-  <li><code>console.table</code>、<code>console.time</code>、条件断点、日志断点都能省大量时间。</li>
-  <li>忘记 <code>await</code> 是最常见的异步 bug，用 lint 规则防住。</li>
-  <li><code>showRoutes()</code> 和 <code>c.req.routePath</code> 是 Hono 路由问题的照妖镜。</li>
-  <li>用 curl 排除浏览器因素，一步砍掉一半搜索范围。</li>
+  <li>监控回答「有没有问题」，可观测性回答「是什么问题」。</li>
+  <li>日志看单个请求、指标看整体趋势、追踪看耗时分布；<strong>请求 ID 把三者串起来</strong>。</li>
+  <li>日志的 <code>msg</code> 要是固定标识符，变量放独立字段；脱敏做进日志器本身。</li>
+  <li>用 <code>routePath</code> 做聚合维度，避免高基数问题。</li>
+  <li>RED 三个指标够用；<strong>永远看分位数，不看平均值</strong>。</li>
+  <li>业务指标常常比技术指标更早发现故障。</li>
+  <li>SLO 别定 100%；错误预算把「稳定 vs 速度」变成预先商定的规则。</li>
+  <li>告警基于症状、必须可操作、要分级 —— 否则只会制造麻木。</li>
+  <li>错误和慢请求 100% 保留，其余采样。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>配好 VS Code 的调试配置，在一个路由处理函数里打断点，观察 <code>c.req</code> 对象里到底有什么。</li>
-    <li>在一个循环里设置条件断点，只在特定的 sku 上停下来。</li>
-    <li>加上本章的调试中间件，访问几个不同路径，看 <code>routePath</code> 输出。故意制造一次路由遮蔽，观察它怎么暴露出来。</li>
-    <li>故意写一个忘了 <code>await</code> 的 bug，观察它的表现有多难懂。然后开启 <code>no-floating-promises</code> 规则，看它是否被抓住。</li>
-    <li>在你的项目里制造一个 bug，提交几次之后用 <code>git bisect</code> 把它找出来。</li>
+    <li>实现本章的结构化日志器和 observability 中间件。访问几个路由，确认输出的 JSON 里 <code>route</code> 是路由模式而非具体路径。</li>
+    <li>在日志字段里故意传一个 <code>password</code>，确认它被替换成了 <code>[已脱敏]</code>。</li>
+    <li>把请求 ID 显示在 500 错误页上。故意触发一个错误，然后用这个 ID 在日志里把它捞出来。</li>
+    <li>接上 <code>timing()</code> 并给数据库查询加 <code>startTime/endTime</code>。在浏览器 DevTools 的 Network → Timing 里找到它们。</li>
+    <li>给你的项目定一个 SLO。想清楚：这个数字对用户意味着什么？达不到会怎样？</li>
+    <li>列出你现在会收到的所有告警。逐条问：收到之后我知道该做什么吗？把回答不了的那些降级或删掉。</li>
   </ol>
 </div>
 

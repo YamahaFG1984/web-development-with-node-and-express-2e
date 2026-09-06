@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 19 章 · 静态资源 — Hono 全栈开发教程</title>
+<title>第 19 章 · 单页应用 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="19">
@@ -12,456 +12,544 @@
 <main>
 
 <span class="chapter-eyebrow">第 19 章</span>
-<h1>静态资源</h1>
+<h1>单页应用</h1>
 <p class="lede">
-  一个典型页面里，HTML 只占几十 KB，剩下的几 MB 全是图片、CSS 和 JavaScript。
-  用户感受到的「快不快」，主要由这部分决定。这一章讲怎么把它们又快又省地送出去。
+  前面十五章，页面都是服务器拼好 HTML 发过来的。这一章换个架构：
+  浏览器加载一次 JavaScript，之后自己渲染页面，Hono 退居幕后只提供 JSON。
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>分清静态资源和动态内容，知道各自的优化手段</li>
-    <li>在不同运行时上正确配置 <code>serveStatic</code></li>
-    <li>理解 CDN 的工作方式和它为什么能大幅提速</li>
-    <li>掌握缓存三件套：<code>Cache-Control</code>、<code>ETag</code>、内容指纹</li>
-    <li>解决「改了文件但用户看到的还是旧版」这个经典问题</li>
+    <li>理解 Web 应用架构的演变，知道 SPA 解决了什么、代价是什么</li>
+    <li>用 Vite 建立一个 React 前端，和 Hono 后端协作</li>
+    <li>用 RPC 客户端调用 API，享受端到端类型安全</li>
+    <li>了解开发和生产两种部署形态</li>
+    <li>知道 <code>hono/jsx/dom</code> 和 HonoX 这两个更轻的选择</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="what">什么算静态资源</h2>
-
-<div class="tw">
-<table>
-  <tr><th>类型</th><th>例子</th><th>特点</th></tr>
-  <tr><td>样式与脚本</td><td><code>main.css</code>、<code>app.js</code></td><td>构建产物，内容变了文件名就该变</td></tr>
-  <tr><td>图片</td><td>logo、照片、图标</td><td>体积最大的一块，优化收益最高</td></tr>
-  <tr><td>字体</td><td><code>.woff2</code></td><td>阻塞文字渲染，要小心处理</td></tr>
-  <tr><td>其他</td><td><code>favicon.ico</code>、<code>robots.txt</code>、下载文件</td><td>基本不变</td></tr>
-</table>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 一条分界线</div>
-  <p>
-    <strong>静态资源</strong>：给定 URL，返回的字节永远一样，和是谁在请求无关。可以放 CDN，可以缓存一年。<br>
-    <strong>动态内容</strong>：需要执行代码才能算出来，可能因用户而异。不能盲目缓存。<br>
-    <em>用这条线判断：「如果我把这个响应存下来发给另一个用户，会出问题吗？」</em>
-  </p>
-</div>
-
-<h2 id="perf">性能的三个维度</h2>
+<h2 id="history">简史</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="影响加载速度的三个因素">
-  <rect class="bx-b" x="20" y="20" width="230" height="130" rx="10"/>
-  <text class="ttl on-b" x="135" y="44" text-anchor="middle">① 请求数量</text>
-  <text class="sm" x="36" y="70">每个请求都有固定开销</text>
-  <text class="sm" x="36" y="90">HTTP/2 之后不再需要</text>
-  <text class="sm" x="36" y="110">把文件合并成一个大包</text>
-  <text class="sm on-g" x="36" y="136">但小图标仍建议内联</text>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Web 应用架构的四个阶段">
+  <rect class="bx" x="20" y="20" width="700" height="60" rx="8"/>
+  <text class="ttl" x="36" y="42">1990s · 纯静态</text>
+  <text class="sm" x="36" y="62">服务器上放什么文件，浏览器就拿到什么。改内容要重新上传文件。</text>
+  <text class="sm" x="620" y="62" text-anchor="end">没有交互</text>
 
-  <rect class="bx-p" x="266" y="20" width="230" height="130" rx="10"/>
-  <text class="ttl on-p" x="381" y="44" text-anchor="middle">② 传输体积</text>
-  <text class="sm" x="282" y="70">压缩（gzip / brotli）</text>
-  <text class="sm" x="282" y="90">图片用 WebP / AVIF</text>
-  <text class="sm" x="282" y="110">删掉没用到的 CSS/JS</text>
-  <text class="sm on-g" x="282" y="136">收益通常最大</text>
+  <rect class="bx" x="20" y="88" width="700" height="60" rx="8"/>
+  <text class="ttl" x="36" y="110">1995–2005 · 服务端渲染</text>
+  <text class="sm" x="36" y="130">PHP / JSP / Rails。每次交互都是整页刷新，服务器重新拼一遍 HTML。</text>
+  <text class="sm" x="700" y="130" text-anchor="end">白屏闪烁</text>
 
-  <rect class="bx-g" x="512" y="20" width="228" height="130" rx="10"/>
-  <text class="ttl on-g" x="626" y="44" text-anchor="middle">③ 物理距离</text>
-  <text class="sm" x="528" y="70">北京到弗吉尼亚往返</text>
-  <text class="sm" x="528" y="90">约 200–300 ms</text>
-  <text class="sm" x="528" y="110">再快的服务器也没用</text>
-  <text class="sm on-g" x="528" y="136">这是 CDN 解决的</text>
+  <rect class="bx-b" x="20" y="156" width="700" height="60" rx="8"/>
+  <text class="ttl on-b" x="36" y="178">2005–2014 · Ajax 时代</text>
+  <text class="sm" x="36" y="198">jQuery 局部刷新。页面不整体重载了，但 DOM 操作散落各处，状态难以追踪。</text>
+  <text class="sm" x="700" y="198" text-anchor="end">意大利面条代码</text>
 
-  <rect class="bx-a" x="20" y="170" width="720" height="66" rx="10"/>
-  <text class="ttl on-a" x="380" y="194" text-anchor="middle">最快的请求是不发生的请求</text>
-  <text class="sm" x="380" y="216" text-anchor="middle">缓存命中的资源，三个维度全部归零。所以本章后半部分几乎都在讲缓存。</text>
+  <rect class="bx-a" x="20" y="224" width="700" height="60" rx="8"/>
+  <text class="ttl on-a" x="36" y="246">2014 至今 · 组件化 SPA</text>
+  <text class="sm" x="36" y="266">React / Vue / Svelte。用「状态 → 界面」的声明式模型代替手动操作 DOM。</text>
+  <text class="sm" x="700" y="266" text-anchor="end">代价：包体积、SEO、复杂度</text>
 </svg>
-<figcaption>图 19-1　优化顺序：先减体积，再上 CDN，最后调缓存</figcaption>
-</figure>
-
-<h2 id="serve">用 Hono 提供静态资源</h2>
-
-<div class="code" data-lang="ts">
-<pre>
-// Node.js
-import { serveStatic } from '@hono/node-server/serve-static'
-app.use('/*', serveStatic({ root: './public' }))
-
-// Bun
-import { serveStatic } from 'hono/bun'
-app.use('/*', serveStatic({ root: './public' }))
-
-// Deno
-import { serveStatic } from 'hono/deno'
-app.use('/*', serveStatic({ root: './public' }))
-</pre>
-</div>
-
-<h3>常用选项</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-app.use(
-  '/static/*',
-  serveStatic({
-    root: './public',
-    // 去掉 URL 前缀再去找文件：/static/img/a.png → ./public/img/a.png
-    rewriteRequestPath: (path) =&gt; path.replace(/^\/static/, ''),
-
-    // 在响应上补充头
-    onFound: (path, c) =&gt; {
-      c.header('Cache-Control', 'public, max-age=31536000, immutable')
-    },
-
-    // 文件不存在时
-    onNotFound: (path, c) =&gt; {
-      console.warn(`静态文件缺失：${path}`)
-    },
-  })
-)
-</pre>
-</div>
-
-<h3>Cloudflare Workers 上不一样</h3>
-
-<p>
-  Workers 上不用 <code>serveStatic</code> —— 静态文件由平台直接托管，
-  <strong>根本不会进入你的代码</strong>，因此更快也更便宜：
-</p>
-
-<div class="code" data-lang="toml" data-file="wrangler.toml">
-<pre>
-name = "meadowlark"
-main = "src/index.ts"
-compatibility_date = "2025-01-01"
-
-[assets]
-directory = "./public"
-binding = "ASSETS"
-# 找不到对应文件时，才交给你的 Worker 代码处理
-not_found_handling = "single-page-application"
-</pre>
-</div>
-
-<div class="box note">
-  <div class="t">&#9432; 这是边缘架构的一个优势</div>
-  <p>
-    传统服务器上，每个图片请求都要唤醒你的应用进程去读文件。
-    在 Workers 上，静态资源在边缘节点直接命中，你的代码只在真正需要动态逻辑时才执行。
-    <strong>省下的不只是延迟，还有账单</strong>（按请求计费的平台通常不对静态资源计费）。
-  </p>
-</div>
-
-<h2 id="cdn">CDN</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="有无 CDN 的请求路径对比">
-  <text class="ttl on-r" x="20" y="24">没有 CDN</text>
-  <rect class="bx" x="20" y="34" width="90" height="42" rx="8"/>
-  <text class="sm" x="65" y="60" text-anchor="middle">北京用户</text>
-  <path class="ln-r" d="M114 55 H600" style="stroke:var(--red)" marker-end="url(#ar)"/>
-  <text class="sm on-r" x="357" y="46" text-anchor="middle">每张图片都要跨越太平洋往返一次</text>
-  <text class="sm on-r" x="357" y="72" text-anchor="middle">约 250 ms · 有 30 个资源就是 30 次</text>
-  <rect class="bx" x="604" y="34" width="130" height="42" rx="8"/>
-  <text class="sm" x="669" y="60" text-anchor="middle">源站（美国）</text>
-
-  <path class="ln-d" d="M20 100 H740"/>
-
-  <text class="ttl on-g" x="20" y="130">有 CDN</text>
-  <rect class="bx" x="20" y="140" width="90" height="42" rx="8"/>
-  <text class="sm" x="65" y="166" text-anchor="middle">北京用户</text>
-
-  <path class="ln-g" d="M114 161 H236" marker-end="url(#ar)"/>
-  <text class="sm on-g" x="175" y="152" text-anchor="middle">10 ms</text>
-
-  <rect class="bx-g" x="240" y="132" width="150" height="58" rx="8"/>
-  <text class="ttl on-g" x="315" y="154" text-anchor="middle">CDN 北京节点</text>
-  <text class="sm" x="315" y="172" text-anchor="middle">缓存命中，直接返回</text>
-
-  <path class="ln-d" d="M394 161 H600" marker-end="url(#ar)"/>
-  <text class="sm" x="497" y="152" text-anchor="middle">仅首次未命中时回源</text>
-
-  <rect class="bx" x="604" y="140" width="130" height="42" rx="8"/>
-  <text class="sm" x="669" y="166" text-anchor="middle">源站（美国）</text>
-
-  <rect class="bx-a" x="20" y="212" width="720" height="56" rx="10"/>
-  <text class="ttl on-a" x="380" y="234" text-anchor="middle">CDN 的两个作用</text>
-  <text class="sm" x="380" y="256" text-anchor="middle">① 缩短物理距离，降低延迟　② 挡掉绝大部分流量，源站压力骤减</text>
-</svg>
-<figcaption>图 19-2　CDN 就是「把文件的副本放到离用户近的地方」</figcaption>
-</figure>
-
-<div class="box tip">
-  <div class="t">&#128161; 部署在 Workers 上的话，你已经在用 CDN 了</div>
-  <p>
-    Cloudflare Workers、Vercel、Netlify 这些平台本身就跑在 CDN 网络上。
-    你不需要额外配置 —— <strong>静态资源和你的代码都已经分发到全球边缘节点了。</strong>
-    只有部署在单台服务器上时，才需要单独接一个 CDN。
-  </p>
-</div>
-
-<h2 id="cache">缓存</h2>
-
-<p>浏览器缓存有两种模式，理解这两者的区别是本章的核心：</p>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="强缓存与协商缓存的流程对比">
-  <rect class="bx-g" x="20" y="20" width="700" height="118" rx="10"/>
-  <text class="ttl on-g" x="36" y="44">强缓存：连请求都不发</text>
-  <text class="sm" x="36" y="68">响应头：Cache-Control: public, max-age=31536000, immutable</text>
-  <text class="sm" x="36" y="92">浏览器：这个资源我本地有，而且没过期 → <tspan class="on-g">直接用，0 次网络请求</tspan></text>
-  <text class="sm" x="36" y="116">适合：带内容指纹的构建产物（app-a1b2c3.js）</text>
-
-  <rect class="bx-b" x="20" y="152" width="700" height="130" rx="10"/>
-  <text class="ttl on-b" x="36" y="176">协商缓存：发请求但可能不传内容</text>
-  <text class="sm" x="36" y="200">响应头：ETag: "abc123"　或　Last-Modified: ...</text>
-  <text class="sm" x="36" y="224">下次请求带上：If-None-Match: "abc123"</text>
-  <text class="sm" x="36" y="248">服务器比对后：内容没变 → <tspan class="on-b">返回 304，不带响应体</tspan>（省流量，但省不了往返时间）</text>
-  <text class="sm" x="36" y="272">适合：文件名固定但内容可能变的资源，比如 /logo.png</text>
-</svg>
-<figcaption>图 19-3　强缓存省掉整个请求，协商缓存只省掉传输</figcaption>
-</figure>
-
-<h3>Cache-Control 速查</h3>
-
-<div class="tw">
-<table>
-  <tr><th>写法</th><th>含义</th><th>用在哪</th></tr>
-  <tr><td><code>public, max-age=31536000, immutable</code></td><td>缓存一年，且永不重新验证</td><td>带内容指纹的 JS/CSS</td></tr>
-  <tr><td><code>public, max-age=3600</code></td><td>缓存一小时</td><td>图片等不常变的资源</td></tr>
-  <tr><td><code>no-cache</code></td><td>可以缓存，但每次都要问服务器「变了吗」</td><td>HTML 页面</td></tr>
-  <tr><td><code>no-store</code></td><td>完全不缓存，一个字节都不留</td><td>含个人信息的页面、API 响应</td></tr>
-  <tr><td><code>private, max-age=0</code></td><td>只允许浏览器缓存，CDN 不许缓存</td><td>登录后的个性化页面</td></tr>
-</table>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; <code>no-cache</code> 不是「不缓存」</div>
-  <p>
-    这是命名最坑的一对：<br>
-    <code>no-cache</code> = 「可以存，但用之前必须问我一下」（协商缓存）<br>
-    <code>no-store</code> = 「一个字节都别存」（真正的不缓存）<br>
-    想让敏感页面不被缓存，用 <code>no-store</code>。
-  </p>
-</div>
-
-<h3>ETag</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-import { etag } from 'hono/etag'
-
-app.use('/*', etag())
-</pre>
-</div>
-
-<p>
-  这个中间件会根据响应内容算一个哈希放进 <code>ETag</code> 头。
-  浏览器下次请求时带上 <code>If-None-Match</code>，内容没变就返回 304。
-</p>
-
-<div class="code" data-lang="http">
-<pre>
-# 第一次
-GET /logo.png
-← 200 OK
-  ETag: "a1b2c3d4"
-  Content-Length: 48213
-
-# 第二次
-GET /logo.png
-  If-None-Match: "a1b2c3d4"
-← 304 Not Modified          ← 没有响应体，只有几十字节的头
-</pre>
-</div>
-
-<h3>Cache API 中间件</h3>
-
-<p>在支持 Cache API 的运行时（Workers、Deno）上，可以把动态生成的响应也缓存起来：</p>
-
-<div class="code" data-lang="ts">
-<pre>
-import { cache } from 'hono/cache'
-
-app.get(
-  '/api/v1/vacations',
-  cache({
-    cacheName: 'meadowlark-v1',
-    cacheControl: 'public, max-age=300',    // 缓存 5 分钟
-    // 按语言分别缓存，避免中文用户拿到英文版
-    vary: ['Accept-Language'],
-  }),
-  listVacations
-)
-</pre>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 千万别缓存带个人信息的响应</div>
-  <p>
-    如果 <code>/api/me</code> 被 CDN 缓存了，第二个用户就会拿到第一个用户的资料。
-    <strong>这是真实发生过的重大事故。</strong><br>
-    规则：任何依赖 Cookie、<code>Authorization</code> 头或会话的响应，
-    必须设 <code>Cache-Control: private, no-store</code>。
-  </p>
-</div>
-
-<h2 id="fingerprint">改了文件用户却看到旧版</h2>
-
-<p>这是缓存带来的经典问题，也是有标准解法的问题。</p>
-
-<div class="vs">
-  <div class="old">
-    <div class="h">&#10060; 固定文件名 + 长缓存</div>
-    <div class="code" data-lang="html"><pre>
-&lt;script src="/js/app.js"&gt;&lt;/script&gt;
-
-Cache-Control: max-age=31536000
-</pre></div>
-    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
-      你改了 app.js 并发布，但用户浏览器里缓存的旧版还有 364 天才过期。
-      新 HTML 配旧 JS，页面直接坏掉。
-    </div>
-  </div>
-  <div class="new">
-    <div class="h">&#9989; 内容指纹 + 长缓存</div>
-    <div class="code" data-lang="html"><pre>
-&lt;script src="/js/app-a1b2c3.js"&gt;&lt;/script&gt;
-
-Cache-Control: max-age=31536000, immutable
-</pre></div>
-    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
-      内容一变，哈希就变，文件名就变，URL 就变 —— 浏览器认为这是个<strong>全新的资源</strong>，
-      必然重新下载。
-    </div>
-  </div>
-</div>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="内容指纹配合 HTML 不缓存的策略">
-  <rect class="bx-a" x="150" y="20" width="460" height="56" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">index.html</text>
-  <text class="mono sm" x="380" y="62" text-anchor="middle">Cache-Control: no-cache　← 每次都问服务器</text>
-
-  <path class="ln-a" d="M300 80 L180 118" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M460 80 L580 118" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-g" x="40" y="122" width="280" height="56" rx="10"/>
-  <text class="mono sm" x="180" y="144" text-anchor="middle">/assets/app-a1b2c3.js</text>
-  <text class="mono sm" x="180" y="164" text-anchor="middle">max-age=31536000, immutable</text>
-
-  <rect class="bx-g" x="440" y="122" width="280" height="56" rx="10"/>
-  <text class="mono sm" x="580" y="144" text-anchor="middle">/assets/main-d4e5f6.css</text>
-  <text class="mono sm" x="580" y="164" text-anchor="middle">max-age=31536000, immutable</text>
-</svg>
-<figcaption>图 19-4　HTML 短缓存做「索引」，指纹资源长缓存做「内容」</figcaption>
+<figcaption>图 19-1　每一代都在解决上一代的问题，同时带来新问题</figcaption>
 </figure>
 
 <div class="box key">
-  <div class="t">&#9733; 记住这个组合</div>
+  <div class="t">&#9733; SPA 真正的价值</div>
   <p>
-    <strong>HTML 用 <code>no-cache</code>（很小，每次验证一下），
-    带指纹的资源用 <code>max-age=31536000, immutable</code>（很大，永久缓存）。</strong><br>
-    这样发布新版本时，用户只需重新下载几 KB 的 HTML，
-    HTML 里的新文件名会自动触发新资源的下载，旧资源静静躺在缓存里等着过期。
+    不是「页面不刷新」这个表象，而是<strong>把「界面应该长什么样」变成状态的纯函数</strong>。
+    你不再手动写「找到这个元素、改它的文字、隐藏那个按钮」，而是描述「当状态是 X 时界面就是 Y」，
+    剩下的交给框架。<br>
+    这个收益在交互复杂时非常大，在展示型页面上则几乎不存在 —— 那种场景 SSR 更合适。
   </p>
 </div>
 
-<p>Vite 默认就是这么做的，你不用手动改文件名：</p>
+<h2 id="arch">项目结构</h2>
+
+<p>前后端在同一个仓库里，共享类型：</p>
 
 <div class="code" data-lang="text">
 <pre>
-$ npm run build
-
-dist/index.html                    0.46 kB
-dist/assets/index-DiwrgTda.css     1.23 kB
-dist/assets/index-C2vZs9Xy.js    143.61 kB
+meadowlark/
+├── package.json
+├── src/                    ← Hono 后端
+│   ├── server.ts
+│   ├── app.ts
+│   ├── routes/
+│   │   └── api.ts          ← 导出 ApiType
+│   └── db/
+└── client/                 ← React 前端
+    ├── index.html
+    ├── vite.config.ts
+    └── src/
+        ├── main.tsx
+        ├── App.tsx
+        ├── api.ts          ← import type { ApiType } from '../../src/routes/api'
+        └── pages/
 </pre>
 </div>
 
-<div class="code" data-lang="ts">
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="SPA 与 API 的协作方式">
+  <rect class="bx-b" x="20" y="26" width="200" height="130" rx="10"/>
+  <text class="ttl on-b" x="120" y="50" text-anchor="middle">浏览器</text>
+  <text class="sm" x="36" y="76">① 请求任意路径</text>
+  <text class="sm" x="36" y="96">② 拿到同一个 index.html</text>
+  <text class="sm" x="36" y="116">③ 加载 JS 包</text>
+  <text class="sm" x="36" y="136">④ React 接管，渲染界面</text>
+
+  <path class="ln-b" d="M224 70 H320" marker-end="url(#ar)"/>
+  <text class="sm" x="272" y="62" text-anchor="middle">HTML/JS</text>
+
+  <rect class="bx-g" x="324" y="26" width="200" height="130" rx="10"/>
+  <text class="ttl on-g" x="424" y="50" text-anchor="middle">静态资源服务</text>
+  <text class="sm" x="340" y="76">index.html</text>
+  <text class="sm" x="340" y="96">assets/index-a1b2.js</text>
+  <text class="sm" x="340" y="116">assets/index-c3d4.css</text>
+  <text class="sm" x="340" y="136">CDN 或 serveStatic</text>
+
+  <path class="ln-a" d="M120 160 V196 H320" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="180" y="190">⑤ fetch JSON</text>
+
+  <rect class="bx-a" x="324" y="172" width="200" height="52" rx="10"/>
+  <text class="ttl on-a" x="424" y="194" text-anchor="middle">Hono API</text>
+  <text class="sm" x="424" y="212" text-anchor="middle">/api/v1/*</text>
+
+  <path class="ln" d="M528 198 H600" marker-end="url(#ar)"/>
+  <rect class="bx" x="604" y="172" width="130" height="52" rx="10"/>
+  <text class="sm" x="669" y="202" text-anchor="middle">数据库</text>
+
+  <rect class="bx-d" x="560" y="26" width="180" height="130" rx="10"/>
+  <text class="sm" x="650" y="52" text-anchor="middle">关键点</text>
+  <text class="sm" x="576" y="78">任何前端路径都返回</text>
+  <text class="sm" x="576" y="96">同一个 index.html，</text>
+  <text class="sm" x="576" y="114">由前端路由决定显示什么。</text>
+  <text class="sm" x="576" y="138">这叫 SPA 回退（fallback）。</text>
+</svg>
+<figcaption>图 19-2　后端提供两样东西：静态文件 + JSON API</figcaption>
+</figure>
+
+<h2 id="setup">建立前端</h2>
+
+<div class="code" data-lang="bash">
 <pre>
-// 配合上面的构建产物设置缓存头
-app.use('/assets/*', serveStatic({
-  root: './public',
-  onFound: (_path, c) =&gt; {
-    c.header('Cache-Control', 'public, max-age=31536000, immutable')
-  },
-}))
-
-app.use('/*', serveStatic({
-  root: './public',
-  onFound: (_path, c) =&gt; {
-    c.header('Cache-Control', 'no-cache')
-  },
-}))
+npm create vite@latest client -- --template react-ts
+cd client
+npm install
 </pre>
 </div>
 
-<h2 id="images">图片</h2>
-
-<p>图片通常占页面体积的六到八成，优化收益最高：</p>
-
-<div class="cards">
-  <div class="card">
-    <span class="ic">&#128444;</span><h4>选对格式</h4>
-    <p>照片用 AVIF / WebP，比 JPEG 小 30–50%。图标和插图用 SVG（矢量、可缩放、体积小）。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128207;</span><h4>不要超尺寸</h4>
-    <p>显示宽度 400px 的位置，不要放 4000px 的原图。用 <code>srcset</code> 按屏幕提供不同尺寸。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#9203;</span><h4>懒加载</h4>
-    <p>首屏之外的图片加 <code>loading="lazy"</code>，一个属性的事。</p>
-  </div>
-  <div class="card">
-    <span class="ic">&#128207;</span><h4>写上宽高</h4>
-    <p>给 <code>&lt;img&gt;</code> 写 <code>width</code> 和 <code>height</code>，避免图片加载后页面跳动。</p>
-  </div>
-</div>
-
-<div class="code" data-lang="html">
+<div class="code" data-lang="ts" data-file="client/vite.config.ts">
 <pre>
-&lt;picture&gt;
-  &lt;source srcset="/img/hood-river.avif" type="image/avif"&gt;
-  &lt;source srcset="/img/hood-river.webp" type="image/webp"&gt;
-  &lt;img
-    src="/img/hood-river.jpg"
-    alt="胡德河上的帆船"
-    width="800" height="600"
-    loading="lazy"
-    decoding="async"
-  &gt;
-&lt;/picture&gt;
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    // 开发时把 /api 请求转发给 Hono，避免跨域
+    proxy: {
+      '/api': 'http://localhost:3000',
+    },
+  },
+  build: {
+    // 构建产物直接输出到后端的 public 目录
+    outDir: '../public',
+    emptyOutDir: false,
+  },
+})
 </pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 开发时用代理，就不用配 CORS</div>
+  <p>
+    前端跑在 5173 端口，后端在 3000。加上代理之后，浏览器看到的所有请求都来自
+    <code>localhost:5173</code>，同源，没有 CORS 问题。<br>
+    生产环境两者部署在同一个域名下，同样不需要 CORS。<strong>只有前后端真的跨域时才配 CORS。</strong>
+  </p>
+</div>
+
+<h2 id="react">React 快速入门</h2>
+
+<p>如果你没写过 React，三个概念就够开始了。</p>
+
+<h3>① 组件</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+function VacationCard({ vacation }: { vacation: Vacation }) {
+  return (
+    &lt;article className="vacation"&gt;
+      &lt;h3&gt;{vacation.name}&lt;/h3&gt;
+      &lt;p&gt;{vacation.description}&lt;/p&gt;
+      &lt;span&gt;¥{vacation.price.toFixed(2)}&lt;/span&gt;
+    &lt;/article&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  和第 7 章的 Hono JSX 几乎一样。唯一区别：React 用 <code>className</code>，Hono JSX 用 <code>class</code>。
+</p>
+
+<h3>② 状态</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { useState } from 'react'
+
+function Counter() {
+  const [count, setCount] = useState(0)
+
+  return (
+    &lt;button onClick={() =&gt; setCount(count + 1)}&gt;
+      点了 {count} 次
+    &lt;/button&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  <code>useState</code> 返回「当前值」和「修改它的函数」。
+  调用修改函数时，React 会<strong>重新执行这个组件函数</strong>，用新的值渲染出新的界面。
+  这就是「状态 → 界面」的声明式模型。
+</p>
+
+<h3>③ 副作用</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { useEffect, useState } from 'react'
+
+function VacationList() {
+  const [vacations, setVacations] = useState&lt;Vacation[]&gt;([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState&lt;string | null&gt;(null)
+
+  useEffect(() =&gt; {
+    let cancelled = false
+
+    fetch('/api/v1/vacations')
+      .then((res) =&gt; {
+        if (!res.ok) throw new Error(`请求失败：${res.status}`)
+        return res.json()
+      })
+      .then((body) =&gt; { if (!cancelled) setVacations(body.data) })
+      .catch((err) =&gt; { if (!cancelled) setError(err.message) })
+      .finally(() =&gt; { if (!cancelled) setLoading(false) })
+
+    // 组件卸载时取消，避免对已卸载组件调用 setState
+    return () =&gt; { cancelled = true }
+  }, [])   // 空数组 = 只在组件首次挂载时执行一次
+
+  if (loading) return &lt;p&gt;加载中…&lt;/p&gt;
+  if (error) return &lt;p role="alert"&gt;出错了：{error}&lt;/p&gt;
+  if (vacations.length === 0) return &lt;p&gt;暂时没有可预订的行程。&lt;/p&gt;
+
+  return (
+    &lt;div&gt;
+      {vacations.map((v) =&gt; &lt;VacationCard key={v.sku} vacation={v} /&gt;)}
+    &lt;/div&gt;
+  )
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 三个状态，一个都不能少</div>
+  <p>
+    <strong>加载中、出错了、空数据</strong> —— 初学者最常见的错误就是只写「成功且有数据」的分支。
+    结果用户在网速慢时看到一片空白，在接口挂掉时也看到一片空白，完全不知道发生了什么。
+    <br>
+    在真实项目里，用 <a href="https://tanstack.com/query">TanStack Query</a> 或 SWR
+    可以把这三个状态、缓存、重试、去重都管起来，比手写 <code>useEffect</code> 可靠得多。
+  </p>
+</div>
+
+<h2 id="rpc-client">用 RPC 调 API</h2>
+
+<p>第 18 章导出的 <code>ApiType</code> 在这里派上用场：</p>
+
+<div class="code" data-lang="ts" data-file="client/src/api.ts">
+<pre>
+import { hc } from 'hono/client'
+import type { ApiType } from '../../src/routes/api'
+
+export const api = hc&lt;ApiType&gt;('/api/v1')
+</pre>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { api } from './api'
+
+useEffect(() =&gt; {
+  api.vacations
+    .$get({ query: { available: 'true' } })
+    .then(async (res) =&gt; {
+      if (!res.ok) throw new Error('加载失败')
+      const body = await res.json()
+      setVacations(body.data)     // ← body.data 的类型是自动推导出来的
+    })
+    .catch((err) =&gt; setError(err.message))
+}, [])
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 试一下这个体验</div>
+  <p>
+    把后端的 <code>price</code> 字段改名成 <code>priceCny</code>，然后回到前端 ——
+    <code>v.price</code> 那一行立刻出现红波浪线。<br>
+    没有这层类型的话，你要等到打开页面看到「¥undefined」才发现。
+    <strong>而且如果那个页面你今天正好没点开，这个 bug 就上线了。</strong>
+  </p>
+</div>
+
+<h3>提交数据</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+function NotifyForm({ sku }: { sku: string }) {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState&lt;'idle' | 'sending' | 'done' | 'error'&gt;('idle')
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setStatus('sending')
+
+    const res = await api.vacations[':sku'].notify.$post({
+      param: { sku },
+      json: { email },
+    })
+
+    setStatus(res.ok ? 'done' : 'error')
+  }
+
+  if (status === 'done') return &lt;p&gt;好的，到季节我们会通知你。&lt;/p&gt;
+
+  return (
+    &lt;form onSubmit={handleSubmit}&gt;
+      &lt;label htmlFor="email"&gt;邮箱&lt;/label&gt;
+      &lt;input
+        id="email"
+        type="email"
+        required
+        value={email}
+        onChange={(e) =&gt; setEmail(e.target.value)}
+      /&gt;
+      &lt;button type="submit" disabled={status === 'sending'}&gt;
+        {status === 'sending' ? '提交中…' : '通知我'}
+      &lt;/button&gt;
+      {status === 'error' &amp;&amp; &lt;p role="alert"&gt;提交失败，请重试。&lt;/p&gt;}
+    &lt;/form&gt;
+  )
+}
+</pre>
+</div>
+
+<h2 id="routing">前端路由</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install react-router-dom
+</pre>
+</div>
+
+<div class="code" data-lang="tsx" data-file="client/src/App.tsx">
+<pre>
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
+
+export default function App() {
+  return (
+    &lt;BrowserRouter&gt;
+      &lt;nav&gt;
+        &lt;Link to="/"&gt;首页&lt;/Link&gt;
+        &lt;Link to="/vacations"&gt;行程&lt;/Link&gt;
+        &lt;Link to="/about"&gt;关于&lt;/Link&gt;
+      &lt;/nav&gt;
+      &lt;Routes&gt;
+        &lt;Route path="/" element={&lt;Home /&gt;} /&gt;
+        &lt;Route path="/vacations" element={&lt;VacationList /&gt;} /&gt;
+        &lt;Route path="/vacations/:sku" element={&lt;VacationDetail /&gt;} /&gt;
+        &lt;Route path="*" element={&lt;NotFound /&gt;} /&gt;
+      &lt;/Routes&gt;
+    &lt;/BrowserRouter&gt;
+  )
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 服务端必须配合前端路由</div>
+  <p>
+    用户直接在地址栏输入 <code>/vacations/HR199</code> 并回车，请求会发到<strong>服务器</strong>。
+    如果服务器上没有这个路径，就会返回 404 —— 前端路由根本没机会运行。<br>
+    解决办法是「SPA 回退」：所有没匹配到 API 和静态文件的请求，一律返回 <code>index.html</code>。
+  </p>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.ts">
+<pre>
+// 1. API 路由优先
+app.route('/api/v1', apiRoutes)
+
+// 2. 真实存在的静态文件
+app.use('/*', serveStatic({ root: './public' }))
+
+// 3. 其余全部回退到 index.html，交给前端路由
+app.get('*', serveStatic({ path: './public/index.html' }))
+</pre>
+</div>
+
+<h2 id="state">状态管理什么时候需要</h2>
+
+<div class="tw">
+<table>
+  <tr><th>情况</th><th>用什么</th></tr>
+  <tr><td>状态只在一个组件里用</td><td><code>useState</code> 就够了</td></tr>
+  <tr><td>父子组件之间传</td><td>props 往下传，回调往上传</td></tr>
+  <tr><td>很多层组件都要用（当前用户、主题）</td><td>React Context</td></tr>
+  <tr><td>来自服务器的数据（列表、详情）</td><td><strong>TanStack Query / SWR</strong>，不是状态管理库</td></tr>
+  <tr><td>复杂的纯客户端状态（编辑器、画布）</td><td>Zustand / Jotai / Redux</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 大部分「状态管理」其实是「服务器数据缓存」</div>
+  <p>
+    很多项目把 Redux 塞满了从 API 拿回来的数据，然后手写一堆代码去处理加载状态、
+    缓存失效、重新拉取、并发请求去重。<br>
+    这些问题 TanStack Query 已经全部解决了。<strong>先分清「这个状态的真相在服务器还是在浏览器」</strong>，
+    再选工具。真相在服务器的，用数据获取库；真正属于客户端的（比如「侧边栏展开了吗」），才用状态管理。
+  </p>
+</div>
+
+<h2 id="deploy">部署形态</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="两种部署方式">
+  <rect class="bx-b" x="20" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-b" x="192" y="44" text-anchor="middle">A. 同域部署（推荐入门）</text>
+  <text class="sm" x="36" y="70">前端构建产物放进后端的 public/</text>
+  <text class="sm" x="36" y="90">一个域名，一次部署</text>
+  <text class="mono sm" x="36" y="118">meadowlark.com/</text>
+  <text class="mono sm" x="36" y="136">meadowlark.com/api/v1/*</text>
+  <text class="sm on-g" x="36" y="164">&#10003; 不需要 CORS</text>
+  <text class="sm on-g" x="36" y="184">&#10003; Cookie 直接能用</text>
+  <text class="sm on-g" x="36" y="204">&#10003; 部署简单</text>
+
+  <rect class="bx-p" x="395" y="20" width="345" height="210" rx="10"/>
+  <text class="ttl on-p" x="567" y="44" text-anchor="middle">B. 分离部署</text>
+  <text class="sm" x="411" y="70">前端上 CDN，后端独立部署</text>
+  <text class="sm" x="411" y="90">两个域名，两条流水线</text>
+  <text class="mono sm" x="411" y="118">app.meadowlark.com（CDN）</text>
+  <text class="mono sm" x="411" y="136">api.meadowlark.com（Hono）</text>
+  <text class="sm on-g" x="411" y="164">&#10003; 前端全球加速</text>
+  <text class="sm on-g" x="411" y="184">&#10003; 前后端独立发版</text>
+  <text class="sm on-r" x="411" y="204">&#10007; 要配 CORS 和跨域 Cookie</text>
+</svg>
+<figcaption>图 19-3　先用 A，遇到性能瓶颈再考虑 B</figcaption>
+</figure>
+
+<div class="code" data-lang="json" data-file="package.json">
+<pre>
+{
+  "scripts": {
+    "dev:api": "tsx watch src/server.ts",
+    "dev:web": "vite --root client",
+    "dev": "npm-run-all --parallel dev:api dev:web",
+    "build": "vite build --root client && tsc -p tsconfig.build.json",
+    "start": "node dist/server.js"
+  }
+}
+</pre>
+</div>
+
+<h2 id="alternatives">更轻的选择</h2>
+
+<p>不是每个项目都需要完整的 React。Hono 生态里有两个更轻的方案：</p>
+
+<h3><code>hono/jsx/dom</code>：客户端也用 Hono 的 JSX</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+import { render, useState } from 'hono/jsx/dom'
+
+function Counter() {
+  const [count, setCount] = useState(0)
+  return &lt;button onClick={() =&gt; setCount(count + 1)}&gt;点了 {count} 次&lt;/button&gt;
+}
+
+render(&lt;Counter /&gt;, document.getElementById('root')!)
+</pre>
+</div>
+
+<p>
+  API 和 React 高度相似，但体积小一个数量级。适合「页面基本是服务端渲染的，
+  只有几个地方需要交互」的场景 —— 而这其实是<strong>大多数网站</strong>的真实情况。
+</p>
+
+<h3>HonoX：全栈元框架</h3>
+
+<p>
+  <a href="https://github.com/honojs/honox">HonoX</a> 是 Hono 官方的全栈框架，
+  提供基于文件的路由、服务端渲染、以及「孤岛架构」——
+  默认整页服务端渲染，只把标记为「岛」的组件送到客户端做水合。
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+app/
+├── routes/
+│   ├── index.tsx           → /
+│   ├── about.tsx           → /about
+│   └── vacations/
+│       └── [sku].tsx       → /vacations/:sku
+├── islands/
+│   └── NotifyForm.tsx      ← 只有这个组件的 JS 会发到浏览器
+└── server.ts
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 怎么选</div>
+  <ul>
+    <li><strong>内容为主、少量交互</strong>（营销站、博客、文档）→ Hono SSR + <code>hono/jsx/dom</code></li>
+    <li><strong>想要文件路由和孤岛架构</strong> → HonoX</li>
+    <li><strong>交互密集的应用</strong>（后台、看板、编辑器）→ Hono API + React/Vue SPA</li>
+    <li><strong>团队已经很熟 React</strong> → 直接上 React，别为了轻量增加学习成本</li>
+  </ul>
 </div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>静态资源 = 「同一个 URL 永远返回同样字节」，这决定了它能被缓存和分发。</li>
-  <li>优化顺序：减体积 → 上 CDN → 调缓存。最快的请求是不发生的请求。</li>
-  <li>Workers 上静态资源由平台托管，不经过你的代码。</li>
-  <li><code>no-cache</code> 是「用前验证」，<code>no-store</code> 才是「不缓存」。</li>
-  <li>黄金组合：HTML 用 <code>no-cache</code>，带指纹的资源用 <code>immutable</code> 长缓存。</li>
-  <li>永远不要缓存含个人信息的响应。</li>
-  <li>本章讲的是浏览器和 CDN 层；应用内部的缓存（查询结果、外部调用）见第 24 章。</li>
+  <li>SPA 的价值是「状态 → 界面」的声明式模型，不是「页面不刷新」。</li>
+  <li>后端在 SPA 架构里只做两件事：提供静态文件、提供 JSON API。</li>
+  <li>开发时用 Vite 代理避开 CORS；生产同域部署同样不需要 CORS。</li>
+  <li>RPC 客户端让前端拿到后端类型，接口改了当场编译报错。</li>
+  <li>数据请求一定要处理加载中、出错、空数据三种状态。</li>
+  <li>服务器要配 SPA 回退，否则刷新子路径会 404。</li>
+  <li>需要服务器主动推送数据（通知、进度、协作）时，见第 28 章。</li>
+  <li>不是所有项目都需要 React；<code>hono/jsx/dom</code> 和 HonoX 值得考虑。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>用 <code>curl -I http://localhost:3000/img/logo.png</code> 看看当前的响应头。有 <code>Cache-Control</code> 吗？有 <code>ETag</code> 吗？</li>
-    <li>接上 <code>etag()</code> 中间件，用 <code>curl -H 'If-None-Match: "..."'</code> 验证第二次请求返回 304。</li>
-    <li>给 <code>/assets/*</code> 配上一年缓存，给其他静态文件配 <code>no-cache</code>。在浏览器 Network 面板里刷新页面，观察哪些资源显示「from disk cache」。</li>
-    <li>找一张页面上最大的图片，转成 WebP，对比体积。然后用 <code>&lt;picture&gt;</code> 做格式回退。</li>
-    <li>想一想你的应用里有哪些响应<strong>绝对不能</strong>被 CDN 缓存。给它们加上 <code>private, no-store</code>。</li>
+    <li>用 Vite 建一个 React 前端，通过代理调用你的 <code>/api/v1/vacations</code>，把结果渲染成列表。</li>
+    <li>把 <code>fetch</code> 换成 RPC 客户端 <code>hc</code>。然后在后端把某个字段改名，确认前端立刻编译报错。</li>
+    <li>加上 react-router 和至少两个页面，配好服务端的 SPA 回退，确认直接访问 <code>/vacations</code> 并刷新不会 404。</li>
+    <li>故意把后端停掉，看看你的前端界面表现如何。如果只是一片空白，去补上错误状态。</li>
+    <li>把「到季通知」表单做出来，包含提交中禁用按钮、成功提示、失败重试。</li>
   </ol>
 </div>
 

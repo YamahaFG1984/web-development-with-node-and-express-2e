@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>第 16 章 · 路由深入 — Hono 全栈开发教程</title>
+<title>第 16 章 · 时间与国际化 — Hono 全栈开发教程</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="16">
@@ -12,485 +12,734 @@
 <main>
 
 <span class="chapter-eyebrow">第 16 章</span>
-<h1>路由深入</h1>
+<h1>时间与国际化</h1>
 <p class="lede">
-  路由是网站的目录结构，也是唯一会被用户收藏、被搜索引擎收录、被别人写进文章里的东西。
-  这一章先讲怎么设计 URL，再讲 Hono 的路由能力和它为什么这么快。
+  时间看起来是所有数据类型里最简单的一个。它不是。
+  「用户看到的时间差了 8 小时」「定时任务在夏令时那天跑了两次」「跨年那天的报表数字对不上」——
+  这些 bug 有一个共同点：<strong>写代码的人和用户不在同一个时区。</strong>
 </p>
 
 <div class="goals">
   <h4>本章目标</h4>
   <ul>
-    <li>掌握 URL 设计的原则，写出十年后还能用的地址</li>
-    <li>用好路径参数、通配符和正则约束</li>
-    <li>用 <code>app.route()</code> 和 <code>basePath()</code> 把大应用拆成小模块</li>
-    <li>理解 Hono 的多路由器机制，知道什么时候该换预设</li>
-    <li>处理子域名路由</li>
+    <li>分清三种时间类型，知道各自该用什么列类型存</li>
+    <li>掌握「存 UTC、显示本地」这条铁律，以及它的例外</li>
+    <li>理解时区标识符和偏移的区别，为什么只存偏移是错的</li>
+    <li>用 <code>Intl</code> API 做格式化，不引入任何日期库</li>
+    <li>做语言协商，选择合适的多语言 URL 策略</li>
+    <li>避开定时任务、复数、排序这几个常见坑</li>
   </ul>
 </div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="ia">先想清楚 URL</h2>
+<h2 id="kinds">时间有三种，不是一种</h2>
 
-<blockquote style="border-left:3px solid var(--line-2);margin:20px 0;padding:8px 18px;color:var(--fg-soft)">
-  网站管理员有责任分配那些两年后、二十年后、两百年后依然站得住的 URI。
-  这需要思考、组织和承诺。
-  <br><span style="font-size:13px">—— Tim Berners-Lee，1998 年</span>
-</blockquote>
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种时间类型及其适用场景">
+  <rect class="bx-a" x="20" y="20" width="232" height="170" rx="10"/>
+  <text class="ttl on-a" x="136" y="44" text-anchor="middle">① 时刻 Instant</text>
+  <text class="sm" x="36" y="70">宇宙中的一个绝对时间点</text>
+  <text class="mono sm" x="36" y="94">2026-09-06T14:30:00Z</text>
+  <text class="sm" x="36" y="120">全世界的人都同意</text>
+  <text class="sm" x="36" y="138">这是「同一瞬间」</text>
+  <text class="sm on-g" x="36" y="164">用于：创建时间、日志时间、</text>
+  <text class="sm on-g" x="36" y="182">下单时间、消息发送时间</text>
 
-<p>
-  这段话写于 1998 年，今天读依然成立。URL 改一次，所有收藏、外链、搜索排名全部作废。
-  下面这些原则值得在动手前花十分钟想一想：
-</p>
+  <rect class="bx-b" x="264" y="20" width="232" height="170" rx="10"/>
+  <text class="ttl on-b" x="380" y="44" text-anchor="middle">② 本地日期时间</text>
+  <text class="sm" x="280" y="70">墙上时钟显示的数字，</text>
+  <text class="sm" x="280" y="88">不带时区</text>
+  <text class="mono sm" x="280" y="112">2026-09-06 09:00</text>
+  <text class="sm" x="280" y="138">「每天早上 9 点开会」</text>
+  <text class="sm on-g" x="280" y="164">用于：营业时间、闹钟、</text>
+  <text class="sm on-g" x="280" y="182">当地日程安排</text>
+
+  <rect class="bx-g" x="508" y="20" width="232" height="170" rx="10"/>
+  <text class="ttl on-g" x="624" y="44" text-anchor="middle">③ 日期 Date</text>
+  <text class="sm" x="524" y="70">只有年月日，没有时间</text>
+  <text class="mono sm" x="524" y="94">1990-03-14</text>
+  <text class="sm" x="524" y="120">它<tspan class="on-r">不是</tspan>一个时刻 ——</text>
+  <text class="sm" x="524" y="138">转成时刻就会出错</text>
+  <text class="sm on-g" x="524" y="164">用于：生日、发票日期、</text>
+  <text class="sm on-g" x="524" y="182">纪念日、法定节假日</text>
+
+  <rect class="bx-r" x="20" y="206" width="720" height="84" rx="10"/>
+  <text class="ttl on-r" x="380" y="228" text-anchor="middle">最常见的错误：把 ③ 当成 ①</text>
+  <text class="sm" x="40" y="252">生日 1990-03-14 存成时刻 1990-03-14T00:00:00Z，用户在东八区看到的是「3 月 14 日 08:00」</text>
+  <text class="sm" x="40" y="272">在西五区的用户看到的却是「<tspan class="on-r">3 月 13 日</tspan> 19:00」—— 生日整整差了一天</text>
+  <text class="sm on-r" x="40" y="288">日期就该存成字符串或 DATE 类型，永远不要给它加时区</text>
+</svg>
+<figcaption>图 16-1　动手之前先问：这个字段是「绝对时刻」「墙上时间」还是「纯日期」？</figcaption>
+</figure>
 
 <div class="tw">
 <table>
-  <tr><th>原则</th><th>反面例子</th><th>好的写法</th></tr>
+  <tr><th>类型</th><th>PostgreSQL</th><th>SQLite / D1</th><th>JavaScript</th></tr>
   <tr>
-    <td>不暴露技术细节</td>
-    <td><code>/vacation.php</code><br><code>/api/v1/getVacationList</code></td>
-    <td><code>/vacations</code><br><code>/api/v1/vacations</code></td>
+    <td>时刻</td>
+    <td><code>timestamptz</code></td>
+    <td>整数（毫秒时间戳）</td>
+    <td><code>Date</code></td>
   </tr>
   <tr>
-    <td>不放无意义的词</td>
-    <td><code>/home/about</code><br><code>/pages/contact</code></td>
-    <td><code>/about</code><br><code>/contact</code></td>
+    <td>本地日期时间</td>
+    <td><code>timestamp</code>（无 tz）+ 单独一列存时区</td>
+    <td><code>TEXT</code> <code>'2026-09-06 09:00'</code></td>
+    <td>字符串</td>
   </tr>
   <tr>
-    <td>用连字符分词</td>
-    <td><code>/hood_river_day_trip</code><br><code>/HoodRiverDayTrip</code></td>
-    <td><code>/hood-river-day-trip</code></td>
-  </tr>
-  <tr>
-    <td>全小写</td>
-    <td><code>/Vacations/HoodRiver</code></td>
-    <td><code>/vacations/hood-river</code></td>
-  </tr>
-  <tr>
-    <td>层级反映内容结构</td>
-    <td><code>/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
-  </tr>
-  <tr>
-    <td>别为 SEO 硬塞关键词</td>
-    <td><code>/vacations/oregon-coast-portland-hood-river/oregon-coast/manzanita</code></td>
-    <td><code>/vacations/oregon-coast/manzanita</code></td>
+    <td>日期</td>
+    <td><code>date</code></td>
+    <td><code>TEXT</code> <code>'1990-03-14'</code></td>
+    <td>字符串</td>
   </tr>
 </table>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 非改不可的时候，用 301</div>
+<div class="box warn">
+  <div class="t">&#9888; Postgres 的 <code>timestamp</code> 和 <code>timestamptz</code> 名字都在骗人</div>
   <p>
-    真的需要调整 URL 结构时，<strong>保留旧地址并 301 永久重定向到新地址</strong>。
-    搜索引擎会把权重转移过去，老书签也不会失效。留着这些重定向，别急着删。
-  </p>
-  <div class="code" data-lang="ts"><pre>
-app.get('/old-vacations/:slug', (c) =&gt;
-  c.redirect(`/vacations/${c.req.param('slug')}`, 301)
-)
-</pre></div>
-</div>
-
-<h2 id="patterns">路径模式</h2>
-
-<div class="code" data-lang="ts">
-<pre>
-// 静态路径
-app.get('/about', handler)
-
-// 路径参数
-app.get('/vacations/:slug', (c) =&gt; {
-  const slug = c.req.param('slug')          // 'hood-river-day-trip'
-})
-
-// 多个参数
-app.get('/contest/:year/:month', (c) =&gt; {
-  const { year, month } = c.req.param()     // 一次拿全部
-})
-
-// 可选参数
-app.get('/vacations/:region?', (c) =&gt; {
-  const region = c.req.param('region')      // 可能是 undefined
-})
-
-// 正则约束：只匹配数字
-app.get('/orders/:id{[0-9]+}', (c) =&gt; {
-  const id = Number(c.req.param('id'))      // 保证能转成数字
-})
-
-// 约束版本号格式
-app.get('/api/:version{v[0-9]+}/vacations', handler)
-
-// 通配符
-app.get('/files/*', (c) =&gt; {
-  const path = c.req.path                   // '/files/a/b/c.png'
-})
-
-// 包含斜杠的参数
-app.get('/files/:path{.+}', (c) =&gt; {
-  const path = c.req.param('path')          // 'a/b/c.png'
-})
-</pre>
-</div>
-
-<div class="box key">
-  <div class="t">&#9733; 正则约束能省掉一堆校验</div>
-  <p>
-    <code>/orders/:id{[0-9]+}</code> 意味着 <code>/orders/abc</code> 根本不会进你的处理函数，
-    而是走 404。你不用在函数里写 <code>if (isNaN(id)) return 400</code>。
-    <strong>让路由层挡掉明显非法的请求，处理函数就能只关心正常情况。</strong>
+    <code>timestamptz</code> 听起来像「带时区的时间戳」，但它<strong>不存储时区</strong> ——
+    它把输入转成 UTC 存起来，读取时按会话时区转换显示。<br>
+    <code>timestamp</code>（不带 tz）则完全不做转换，存什么读什么。<br>
+    <strong>结论：需要「时刻」就用 <code>timestamptz</code>，这是 99% 的情况。</strong>
+    真的需要记住「用户当时选的是哪个时区」，得<em>额外加一列</em>存时区标识符。
   </p>
 </div>
 
-<h3>匹配顺序</h3>
-
-<div class="code" data-lang="ts">
-<pre>
-// ❌ /vacations/new 会被第一条抢走，当成 slug='new'
-app.get('/vacations/:slug', showVacation)
-app.get('/vacations/new', newVacationForm)
-
-// ✅ 具体的写前面
-app.get('/vacations/new', newVacationForm)
-app.get('/vacations/:slug', showVacation)
-</pre>
-</div>
-
-<h2 id="middleware-route">路由处理函数也是中间件</h2>
-
-<p>
-  第 10 章说过：中间件和处理函数本质是一回事。
-  一个路由可以挂多个函数，只要不返回响应就继续往下走：
-</p>
-
-<div class="code" data-lang="ts">
-<pre>
-app.get(
-  '/admin/vacations/:sku',
-  requireLogin,          // 中间件：没登录就重定向
-  requireRole('admin'),  // 中间件：不是管理员就 403
-  loadVacation,          // 中间件：查数据库，塞进 c
-  (c) =&gt; c.html(&lt;AdminVacationPage vacation={c.get('vacation')} /&gt;)
-)
-</pre>
-</div>
-
-<div class="code" data-lang="ts">
-<pre>
-// loadVacation 长这样
-const loadVacation = createMiddleware&lt;{ Variables: { vacation: Vacation } }&gt;(
-  async (c, next) =&gt; {
-    const v = await repo.findBySku(c.req.param('sku'))
-    if (!v) return c.notFound()      // 拦截，后面不执行
-    c.set('vacation', v)
-    await next()
-  }
-)
-</pre>
-</div>
-
-<div class="box tip">
-  <div class="t">&#128161; 这是消除重复的好办法</div>
-  <p>
-    如果有五个路由都要「按 sku 查出度假套餐，查不到就 404」，
-    把它写成中间件，五个处理函数就都能假设「<code>c.get('vacation')</code> 一定存在且有效」。
-  </p>
-</div>
-
-<h2 id="organize">拆分大应用</h2>
-
-<p>
-  所有路由堆在一个文件里，超过一两百行就没法看了。Hono 用 <code>app.route()</code> 组合子应用：
-</p>
-
-<div class="code" data-lang="ts" data-file="src/routes/vacations.tsx">
-<pre>
-import { Hono } from 'hono'
-
-export const vacationRoutes = new Hono()
-  .get('/', listVacations)                 // 实际路径 /vacations
-  .get('/:slug', showVacation)             // 实际路径 /vacations/:slug
-  .post('/:slug/notify', notifyWhenInSeason)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/routes/api.ts">
-<pre>
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
-
-export const apiRoutes = new Hono()
-  .use('*', cors())                        // 只对 API 生效
-  .get('/vacations', apiListVacations)
-  .get('/vacations/:sku', apiGetVacation)
-  .delete('/vacations/:sku', apiDeleteVacation)
-</pre>
-</div>
-
-<div class="code" data-lang="ts" data-file="src/app.tsx">
-<pre>
-import { Hono } from 'hono'
-import { vacationRoutes } from './routes/vacations'
-import { apiRoutes } from './routes/api'
-import { adminRoutes } from './routes/admin'
-
-export const app = new Hono()
-
-app.get('/', handlers.home)
-app.get('/about', handlers.about)
-
-app.route('/vacations', vacationRoutes)
-app.route('/api/v1', apiRoutes)
-app.route('/admin', adminRoutes)
-</pre>
-</div>
+<h2 id="utc">铁律：存 UTC，显示本地</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="用 app.route 组合子应用">
-  <rect class="bx-a" x="280" y="20" width="200" height="46" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">app（主应用）</text>
-  <text class="mono sm" x="380" y="58" text-anchor="middle">/ · /about</text>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="UTC 存储与本地显示的数据流">
+  <rect class="bx-b" x="20" y="30" width="150" height="60" rx="8"/>
+  <text class="sm" x="95" y="54" text-anchor="middle">用户在东八区</text>
+  <text class="sm" x="95" y="72" text-anchor="middle">输入 22:30</text>
 
-  <path class="ln" d="M330 70 L150 108" marker-end="url(#ar)"/>
-  <path class="ln" d="M380 70 V108" marker-end="url(#ar)"/>
-  <path class="ln" d="M430 70 L610 108" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M174 60 H240" marker-end="url(#ar)"/>
+  <text class="sm" x="207" y="52" text-anchor="middle">转换</text>
 
-  <rect class="bx-b" x="30" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-b" x="150" y="134" text-anchor="middle">vacationRoutes</text>
-  <text class="mono sm" x="150" y="154" text-anchor="middle">挂载于 /vacations</text>
-  <text class="mono sm" x="150" y="172" text-anchor="middle">'/' → /vacations</text>
+  <rect class="bx-a" x="244" y="30" width="180" height="60" rx="8"/>
+  <text class="ttl on-a" x="334" y="54" text-anchor="middle">服务端</text>
+  <text class="mono sm" x="334" y="74" text-anchor="middle">2026-09-06T14:30:00Z</text>
 
-  <rect class="bx-g" x="290" y="112" width="180" height="74" rx="10"/>
-  <text class="ttl on-g" x="380" y="134" text-anchor="middle">apiRoutes</text>
-  <text class="mono sm" x="380" y="154" text-anchor="middle">挂载于 /api/v1</text>
-  <text class="sm" x="380" y="172" text-anchor="middle">自带 CORS 中间件</text>
+  <path class="ln-a" d="M428 60 H494" marker-end="url(#ar-a)"/>
 
-  <rect class="bx-p" x="490" y="112" width="240" height="74" rx="10"/>
-  <text class="ttl on-p" x="610" y="134" text-anchor="middle">adminRoutes</text>
-  <text class="mono sm" x="610" y="154" text-anchor="middle">挂载于 /admin</text>
-  <text class="sm" x="610" y="172" text-anchor="middle">自带权限中间件</text>
+  <rect class="bx-g" x="498" y="30" width="242" height="60" rx="8"/>
+  <text class="ttl on-g" x="619" y="54" text-anchor="middle">数据库</text>
+  <text class="sm" x="619" y="74" text-anchor="middle">只存 UTC，一种表示，没有歧义</text>
 
-  <rect class="bx-d" x="120" y="204" width="520" height="34" rx="8"/>
-  <text class="sm" x="380" y="226" text-anchor="middle">子应用内部只关心相对路径，挂载前缀由主应用决定 —— 换前缀不用改子应用</text>
+  <path class="ln-g" d="M619 94 V124 H380 V124" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="244" y="128" width="180" height="46" rx="8"/>
+  <text class="sm on-a" x="334" y="148" text-anchor="middle">读出来仍然是 UTC</text>
+  <text class="sm" x="334" y="166" text-anchor="middle">按每个用户的时区渲染</text>
+
+  <path class="ln-b" d="M244 151 H180" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M424 151 H488" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="20" y="128" width="156" height="46" rx="8"/>
+  <text class="sm" x="98" y="146" text-anchor="middle">东八区用户看到</text>
+  <text class="sm on-b" x="98" y="166" text-anchor="middle">9 月 6 日 22:30</text>
+
+  <rect class="bx-b" x="492" y="128" width="248" height="46" rx="8"/>
+  <text class="sm" x="616" y="146" text-anchor="middle">西五区用户看到</text>
+  <text class="sm on-b" x="616" y="166" text-anchor="middle">9 月 6 日 10:30（同一瞬间）</text>
+
+  <rect class="bx-d" x="120" y="192" width="520" height="36" rx="8"/>
+  <text class="sm" x="380" y="215" text-anchor="middle">时区只在<tspan class="on-a">最外面两层</tspan>出现：接收输入时、渲染输出时。中间全是 UTC</text>
 </svg>
-<figcaption>图 16-1　子应用可以独立开发、独立测试、独立挂载</figcaption>
+<figcaption>图 16-2　把时区转换挤到系统边界，内部逻辑就永远不用操心它</figcaption>
 </figure>
-
-<h3>basePath</h3>
 
 <div class="code" data-lang="ts">
 <pre>
-// 给整个应用加前缀
-const app = new Hono().basePath('/api/v2')
+// ✅ 存储：永远是 UTC
+await db.insert(orders).values({
+  createdAt: new Date(),          // Date 内部就是 UTC 毫秒数
+})
 
-app.get('/vacations', handler)    // 实际是 /api/v2/vacations
+// ❌ 这些写法都在制造问题
+const bad1 = new Date().toLocaleString()          // 变成服务器时区的字符串
+const bad2 = '2026-09-06 22:30'                   // 没有时区信息，谁知道是哪里的 22:30
+const bad3 = new Date('2026-09-06')               // 被当成 UTC 午夜，不是本地午夜
 </pre>
 </div>
 
-<h3>为什么推荐链式写法</h3>
+<div class="box warn">
+  <div class="t">&#9888; <code>new Date('2026-09-06')</code> 和 <code>new Date('2026/09/06')</code> 结果不同</div>
+  <p>
+    前者是 ISO 格式，被解析成 <strong>UTC 午夜</strong>；后者不是 ISO 格式，
+    被解析成<strong>本地午夜</strong>。差一个时区。<br>
+    这是 JavaScript 日期 API 最著名的坑之一。
+    <strong>永远显式指定：</strong><code>new Date('2026-09-06T00:00:00Z')</code>，
+    或者干脆不要把纯日期转成 <code>Date</code>。
+  </p>
+</div>
+
+<h2 id="tz">时区标识符 vs 偏移</h2>
 
 <div class="vs">
   <div class="old">
-    <div class="h">分开写：类型信息丢失</div>
+    <div class="h">&#10060; 只存偏移</div>
     <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-api.get('/vacations', h1)
-api.get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 里没有路由信息
-// RPC 客户端用不了
+{ timezoneOffset: -480 }   // 分钟
+{ timezone: '+08:00' }
 </pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      这只是<strong>某一刻</strong>的偏移。
+      纽约夏天是 −4，冬天是 −5 —— 存了偏移就无法推算其他日期。
+    </div>
   </div>
   <div class="new">
-    <div class="h">链式写：类型一路累加</div>
+    <div class="h">&#9989; 存 IANA 时区标识符</div>
     <div class="code" data-lang="ts"><pre>
-const api = new Hono()
-  .get('/vacations', h1)
-  .get('/vacations/:sku', h2)
-
-export type AppType = typeof api
-// AppType 包含全部路由的
-// 路径、参数和返回值类型
+{ timezone: 'Asia/Shanghai' }
+{ timezone: 'America/New_York' }
 </pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      这是一套<strong>规则</strong>：包含历史上和未来的所有夏令时切换。
+      任何日期都能算出正确偏移。
+    </div>
   </div>
 </div>
 
-<p>
-  这个差别在第 17 章（RPC 客户端）和第 5 章（<code>testClient</code>）时会变得非常重要。
-  <strong>养成链式写的习惯</strong>，将来想用这些特性时不用回头重构。
-</p>
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="夏令时导致的偏移变化和不存在的时刻">
+  <text class="ttl" x="20" y="22">纽约的一年：偏移不是固定的</text>
 
-<h2 id="subdomain">子域名</h2>
+  <path class="ln" d="M40 70 H720"/>
+  <rect class="bx-b" x="40" y="56" width="150" height="28" rx="4"/>
+  <text class="sm" x="115" y="75" text-anchor="middle">冬令时 UTC−5</text>
+  <rect class="bx-a" x="190" y="56" width="380" height="28" rx="4"/>
+  <text class="sm" x="380" y="75" text-anchor="middle">夏令时 UTC−4</text>
+  <rect class="bx-b" x="570" y="56" width="150" height="28" rx="4"/>
+  <text class="sm" x="645" y="75" text-anchor="middle">冬令时 UTC−5</text>
+  <text class="sm" x="190" y="102" text-anchor="middle">3 月切换</text>
+  <text class="sm" x="570" y="102" text-anchor="middle">11 月切换</text>
 
-<p>
-  子域名适合承载「和主站关系不大」的部分：<code>api.example.com</code>、<code>admin.example.com</code>。
-  Hono 的路由默认不看域名，需要自己判断：
-</p>
+  <rect class="bx-r" x="20" y="120" width="350" height="126" rx="10"/>
+  <text class="ttl on-r" x="36" y="144">春季：有一小时不存在</text>
+  <text class="sm" x="36" y="168">时钟从 01:59 直接跳到 03:00</text>
+  <text class="mono sm" x="36" y="192">2026-03-08 02:30</text>
+  <text class="sm on-r" x="36" y="214">这个时刻<tspan>从未发生过</tspan></text>
+  <text class="sm" x="36" y="236">定时任务设在 02:30 → 那天不执行</text>
+
+  <rect class="bx-r" x="390" y="120" width="350" height="126" rx="10"/>
+  <text class="ttl on-r" x="406" y="144">秋季：有一小时出现两次</text>
+  <text class="sm" x="406" y="168">时钟从 01:59 退回 01:00</text>
+  <text class="mono sm" x="406" y="192">2026-11-01 01:30</text>
+  <text class="sm on-r" x="406" y="214">这个时刻<tspan>出现了两次</tspan></text>
+  <text class="sm" x="406" y="236">定时任务设在 01:30 → <tspan class="on-r">那天执行两次</tspan></text>
+</svg>
+<figcaption>图 16-3　「每天凌晨 2:30 跑一次」这句话，一年里有两天是不成立的</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 时区规则是政治决定，会变</div>
+  <p>
+    某个国家宣布取消夏令时、某个地区改了偏移 —— 这些事每年都在发生，
+    IANA 时区数据库一年更新好几次。<br>
+    <strong>所以「未来的时刻」不能预先算成 UTC 存起来。</strong><br>
+    「2027 年 3 月 15 日上午 9 点在上海开会」应该存成
+    <code>{ localDateTime: '2027-03-15 09:00', timezone: 'Asia/Shanghai' }</code>，
+    到时候再算 —— 万一规则变了，会议仍然在「上午 9 点」，这才是用户要的。
+  </p>
+</div>
+
+<h2 id="counterintuitive">几件反直觉的事</h2>
+
+<div class="tw">
+<table>
+  <tr><th>你以为</th><th>实际上</th></tr>
+  <tr><td>一天有 24 小时</td><td>夏令时切换那天是 23 或 25 小时</td></tr>
+  <tr><td>「明天同一时间」= 现在 + 24h</td><td>跨越夏令时时会差一小时。要用日历运算，不是加毫秒数</td></tr>
+  <tr><td>一分钟有 60 秒</td><td>存在闰秒（虽然大多数系统会抹平它）</td></tr>
+  <tr><td>「今天」是确定的</td><td>取决于你在哪。同一瞬间，北京是 7 号，洛杉矶还是 6 号</td></tr>
+  <tr><td>时区偏移是整小时</td><td>印度是 +5:30，尼泊尔是 +5:45</td></tr>
+  <tr><td>UTC 和 GMT 一样</td><td>日常等价，但严格来说是两个不同的标准</td></tr>
+</table>
+</div>
 
 <div class="code" data-lang="ts">
 <pre>
-const mainApp = new Hono()
-const adminApp = new Hono()
-const apiApp = new Hono()
+// ❌ 「统计今天的订单」—— 谁的今天？
+const start = new Date()
+start.setHours(0, 0, 0, 0)          // 服务器时区的午夜，不是用户的
 
-const root = new Hono()
+// ✅ 明确按某个时区计算日期边界
+function dayBoundsInTz(date: Date, timeZone: string) {
+  // 用 Intl 取出该时区下的年月日
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date)
+  const get = (t: string) =&gt; parts.find((p) =&gt; p.type === t)!.value
+  const ymd = `${get('year')}-${get('month')}-${get('day')}`
 
-root.all('*', async (c) =&gt; {
-  const host = c.req.header('host') ?? ''
-
-  if (host.startsWith('admin.')) return adminApp.fetch(c.req.raw, c.env)
-  if (host.startsWith('api.'))   return apiApp.fetch(c.req.raw, c.env)
-  return mainApp.fetch(c.req.raw, c.env)
-})
-
-export default root
+  // 再把该时区的 00:00 和次日 00:00 转回 UTC
+  return {
+    start: zonedTimeToUtc(`${ymd}T00:00:00`, timeZone),
+    end: zonedTimeToUtc(`${ymd}T00:00:00`, timeZone, { addDays: 1 }),
+  }
+}
 </pre>
 </div>
 
 <div class="box note">
-  <div class="t">&#9432; 本地怎么测子域名</div>
+  <div class="t">&#9432; 关于日期库</div>
   <p>
-    改 hosts 文件（macOS/Linux 是 <code>/etc/hosts</code>，Windows 是
-    <code>C:\Windows\System32\drivers\etc\hosts</code>）：
-  </p>
-  <div class="code" data-lang="text"><pre>
-127.0.0.1  meadowlark.local
-127.0.0.1  admin.meadowlark.local
-127.0.0.1  api.meadowlark.local
-</pre></div>
-  <p>用 <code>.local</code> 后缀，避免和真实域名冲突。</p>
-</div>
-
-<div class="box warn">
-  <div class="t">&#9888; 子域名对 SEO 不利</div>
-  <p>
-    搜索引擎倾向于把子域名当作<strong>独立站点</strong>，权重不共享。
-    所以博客放 <code>example.com/blog</code> 比 <code>blog.example.com</code> 好。
-    子域名留给 API、后台这些不需要 SEO 的部分。
+    <code>zonedTimeToUtc</code> 这类时区换算，原生 API 目前还比较别扭。
+    实践中用 <a href="https://github.com/date-fns/date-fns">date-fns-tz</a>
+    或 <a href="https://moment.github.io/luxon/">Luxon</a>。<br>
+    <strong>但不要用 Moment.js</strong> —— 它已官方停止维护，而且体积大、对象可变（容易误改）。<br>
+    未来的答案是 <strong>Temporal</strong>（TC39 提案），它把本章讲的三种时间类型做成了
+    <code>Temporal.Instant</code>、<code>Temporal.PlainDateTime</code>、<code>Temporal.PlainDate</code>
+    三个独立的类 —— 类型系统直接杜绝了混用。留意它的落地进度。
   </p>
 </div>
 
-<h2 id="router">Hono 为什么快</h2>
+<h2 id="format">格式化：用 Intl，别造轮子</h2>
 
 <p>
-  Hono 有个别的框架没有的设计：<strong>它内置了多个路由器实现，启动时自动选一个。</strong>
+  <code>Intl</code> 是所有现代 JavaScript 运行时内置的，零依赖，而且比任何库都懂各地习惯。
 </p>
 
-<figure>
-<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="Hono 的多路由器架构">
-  <rect class="bx-a" x="270" y="20" width="220" height="48" rx="10"/>
-  <text class="ttl on-a" x="380" y="42" text-anchor="middle">SmartRouter（默认）</text>
-  <text class="sm" x="380" y="60" text-anchor="middle">第一个请求到来时，挑一个最合适的</text>
+<div class="code" data-lang="ts">
+<pre>
+const when = new Date('2026-09-06T14:30:00Z')
 
-  <path class="ln-a" d="M330 72 L190 108" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M430 72 L570 108" marker-end="url(#ar-a)"/>
+// 日期时间
+new Intl.DateTimeFormat('zh-CN', {
+  dateStyle: 'long', timeStyle: 'short', timeZone: 'Asia/Shanghai',
+}).format(when)
+// → 2026年9月6日 22:30
 
-  <rect class="bx-g" x="50" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-g" x="190" y="134" text-anchor="middle">RegExpRouter</text>
-  <text class="sm" x="66" y="156">把所有路由编译成<tspan>一个</tspan>大正则</text>
-  <text class="sm" x="66" y="176">匹配是 O(1)，不随路由数量变慢</text>
-  <text class="sm on-r" x="66" y="194">但少数复杂模式它处理不了</text>
+new Intl.DateTimeFormat('en-US', {
+  dateStyle: 'long', timeStyle: 'short', timeZone: 'America/New_York',
+}).format(when)
+// → September 6, 2026 at 10:30 AM
 
-  <rect class="bx-b" x="430" y="112" width="280" height="90" rx="10"/>
-  <text class="ttl on-b" x="570" y="134" text-anchor="middle">TrieRouter</text>
-  <text class="sm" x="446" y="156">用前缀树逐段匹配</text>
-  <text class="sm" x="446" y="176">稍慢一点，但<tspan>支持全部模式</tspan></text>
-  <text class="sm on-g" x="446" y="194">作为兜底方案</text>
+// 相对时间：「3 天前」
+const rtf = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' })
+rtf.format(-3, 'day')    // → 3天前
+rtf.format(1, 'day')     // → 明天　（numeric:'auto' 才会说「明天」而不是「1天后」）
 
-  <rect class="bx-d" x="120" y="220" width="520" height="46" rx="8"/>
-  <text class="sm" x="380" y="242" text-anchor="middle">SmartRouter 先试 RegExpRouter；如果你的路由里有它搞不定的模式，</text>
-  <text class="sm" x="380" y="260" text-anchor="middle">就自动退回 TrieRouter。你什么都不用配。</text>
-</svg>
-<figcaption>图 16-2　「自动挑最快的那个」是 Hono 性能的来源</figcaption>
-</figure>
+// 货币 —— 注意不同语言的符号位置和分隔符都不同
+new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(1234.5)
+// → ¥1,234.50
+new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(1234.5)
+// → 1.234,50 €
 
-<h3>预设</h3>
+// 列表
+new Intl.ListFormat('zh-CN', { type: 'conjunction' }).format(['帆船', '啤酒', '风筝'])
+// → 帆船、啤酒和风筝
+</pre>
+</div>
 
-<p>大多数人不需要改。但如果你的场景特殊，可以换预设：</p>
+<h3>服务端渲染的难题：服务器不知道用户时区</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 请求里没有时区信息</div>
+  <p>
+    HTTP 请求头里有 <code>Accept-Language</code>（语言），但<strong>没有时区</strong>。
+    服务端渲染时你不知道该用哪个时区格式化。
+  </p>
+</div>
 
 <div class="tw">
 <table>
-  <tr><th>引入方式</th><th>用的路由器</th><th>适合</th></tr>
+  <tr><th>方案</th><th>做法</th><th>取舍</th></tr>
   <tr>
-    <td><code>import { Hono } from 'hono'</code></td>
-    <td>SmartRouter [RegExp + Trie]</td>
-    <td><strong>默认，绝大多数情况</strong>。长驻服务器，注册一次跑很久</td>
+    <td><strong>用户设置</strong></td>
+    <td>让用户在账号里选，存进数据库</td>
+    <td>最准确。登录用户首选</td>
   </tr>
   <tr>
-    <td><code>import { Hono } from 'hono/quick'</code></td>
-    <td>SmartRouter [Linear + Trie]</td>
-    <td>每个请求都要重新注册路由的环境（某些 FaaS）。注册极快，匹配稍慢</td>
+    <td><strong>浏览器上报</strong></td>
+    <td>首次访问时 JS 读 <code>Intl.DateTimeFormat().resolvedOptions().timeZone</code>，写进 Cookie</td>
+    <td>自动，准确。但首屏拿不到</td>
   </tr>
   <tr>
-    <td><code>import { Hono } from 'hono/tiny'</code></td>
-    <td>PatternRouter</td>
-    <td>对体积极度敏感的场景。代码最小，性能够用</td>
+    <td><strong>渲染 UTC，前端转换</strong></td>
+    <td>服务端输出 <code>&lt;time datetime="…Z"&gt;</code>，前端脚本改写显示</td>
+    <td>首屏可能闪一下，但对匿名用户最省事</td>
+  </tr>
+  <tr>
+    <td><strong>边缘平台的地理信息</strong></td>
+    <td>Cloudflare 提供 <code>cf.timezone</code></td>
+    <td>零成本猜测，可作为默认值。<em>但用 VPN 的用户会被猜错</em></td>
   </tr>
 </table>
 </div>
 
-<div class="box tip">
-  <div class="t">&#128161; 怎么判断该不该换</div>
+<div class="code" data-lang="tsx">
+<pre>
+// 推荐的组合：服务端输出机器可读的 UTC + 一个合理的默认显示
+export const TimeStamp: FC&lt;{ at: Date; tz: string; locale: string }&gt; = ({ at, tz, locale }) =&gt; (
+  &lt;time
+    datetime={at.toISOString()}
+    data-format="datetime"
+    title={new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone: tz }).format(at)}
+  &gt;
+    {new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: tz }).format(at)}
+  &lt;/time&gt;
+)
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="public/js/localize-time.js">
+<pre>
+// 前端渐进增强：如果浏览器时区和服务端猜的不一样，就地修正
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+document.cookie = `tz=${tz}; path=/; max-age=31536000; samesite=lax`
+
+for (const el of document.querySelectorAll('time[data-format]')) {
+  const at = new Date(el.dateTime)
+  el.textContent = new Intl.DateTimeFormat(navigator.language, {
+    dateStyle: 'medium', timeStyle: 'short', timeZone: tz,
+  }).format(at)
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; <code>&lt;time datetime&gt;</code> 是个被低估的标签</div>
   <p>
-    默认预设的取舍是：<strong>启动时多花一点时间做编译，换取之后每个请求都快</strong>。
-    这在服务器上是划算的（编译一次，服务几百万个请求）。
-    只有当「进程存活时间极短、每次只处理一两个请求」时，<code>hono/quick</code> 才更划算。
-    不确定就别改。
+    它让机器能读到精确时刻（搜索引擎、屏幕阅读器、爬虫），
+    而显示文本可以是「3 天前」这种人类友好的形式。<br>
+    <em>这也是下一节可访问性的一个例子：语义化标签让辅助技术能理解内容。</em>
   </p>
 </div>
 
-<h2 id="debug">看看路由表长什么样</h2>
+<h2 id="cron">定时任务的时区</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; cron 表达式默认是 UTC</div>
+  <p>
+    <code>0 9 * * *</code> 在 Cloudflare Workers 上是<strong>UTC 早上 9 点</strong>，
+    也就是北京时间下午 5 点。<br>
+    「每天早上给用户发日报」如果按 UTC 跑，中国用户会在下午收到，
+    美西用户会在凌晨 2 点收到。
+  </p>
+</div>
 
 <div class="code" data-lang="ts">
 <pre>
-import { showRoutes } from 'hono/dev'
+// ❌ 一个固定时刻发给所有人
+// crons = ["0 9 * * *"]
 
-// 在所有路由注册完之后
-showRoutes(app, { verbose: true })
+// ✅ 每小时跑一次，只处理「此刻当地正好 9 点」的用户
+export async function sendDailyDigests(env: Bindings) {
+  const now = new Date()
+
+  // 找出当前时刻本地时间是 9 点的所有时区
+  const targetZones = ALL_TIMEZONES.filter((tz) =&gt; localHourIn(now, tz) === 9)
+
+  for (const tz of targetZones) {
+    let cursor: string | undefined
+    do {
+      const page = await getUsersByTimezone(env.DB, tz, { cursor, limit: 500 })
+      // 投递任务，不在这里直接发（第 26 章）
+      await env.TASKS.sendBatch(
+        page.items.map((u) =&gt; ({ body: { type: 'daily-digest', userId: u.id } }))
+      )
+      cursor = page.nextCursor
+    } while (cursor)
+  }
+}
 </pre>
 </div>
 
-<div class="code" data-lang="text">
+<div class="box key">
+  <div class="t">&#9733; 幂等在这里又一次救命</div>
+  <p>
+    秋季夏令时切换那天，某些时区的「9 点」会出现两次 —— 上面这个任务会跑两遍。<br>
+    如果没有第 24 章说的幂等保护（比如用 <code>(userId, 日期)</code> 做唯一约束），
+    <strong>那天所有用户会收到两封日报</strong>。<br>
+    <em>这是个很好的例子：时区问题往往表现为并发/重复问题。</em>
+  </p>
+</div>
+
+<h2 id="i18n">国际化：文案</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10060; 拼接字符串</div>
+    <div class="code" data-lang="tsx"><pre>
+&lt;p&gt;
+  {t('you_have')} {count} {t('new_messages')}
+&lt;/p&gt;
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      不同语言的<strong>语序不同</strong>。
+      日语的动词在句尾，阿拉伯语从右往左。
+      拼接出来的句子在很多语言里读不通。
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">&#9989; 整句作为一个条目</div>
+    <div class="code" data-lang="tsx"><pre>
+&lt;p&gt;{t('inbox.unread', { count })}&lt;/p&gt;
+
+// zh: "你有 {count} 条新消息"
+// ja: "新着メッセージが {count} 件あります"
+</pre></div>
+    <div style="padding:10px 14px;font-size:13.5px;color:var(--fg-soft)">
+      译者拿到完整句子，可以自由调整语序。
+    </div>
+  </div>
+</div>
+
+<h3>复数不只有单数和复数</h3>
+
+<div class="code" data-lang="ts">
 <pre>
-GET     /
-GET     /about
-GET     /vacations
-GET     /vacations/:slug
-POST    /vacations/:slug/notify
-GET     /api/v1/vacations
-GET     /api/v1/vacations/:sku
-DELETE  /api/v1/vacations/:sku
-GET     /admin/vacations
+// 英语有 2 种形式，中文只有 1 种，俄语有 4 种，阿拉伯语有 6 种
+// 别自己写 if (n === 1)
+const pr = new Intl.PluralRules('ru-RU')
+pr.select(1)    // 'one'
+pr.select(2)    // 'few'
+pr.select(5)    // 'many'
+pr.select(1.5)  // 'other'
+
+// 文案文件里为每种形式提供一条
+const messages = {
+  'inbox.unread': {
+    one:   '{count} новое сообщение',
+    few:   '{count} новых сообщения',
+    many:  '{count} новых сообщений',
+    other: '{count} нового сообщения',
+  },
+}
 </pre>
 </div>
 
-<p>
-  排查「为什么这个路由不生效」时，先看这张表 ——
-  经常会发现路径拼错了，或者顺序被前面的通配符抢了。
-</p>
+<div class="code" data-lang="ts" data-file="src/lib/i18n.ts">
+<pre>
+type Messages = Record&lt;string, string | Record&lt;string, string&gt;&gt;
+
+export function createTranslator(locale: string, messages: Messages) {
+  const plural = new Intl.PluralRules(locale)
+
+  return function t(key: string, vars: Record&lt;string, unknown&gt; = {}): string {
+    let template = messages[key]
+
+    // 复数：根据 count 选择形式
+    if (typeof template === 'object') {
+      const form = plural.select(Number(vars.count ?? 0))
+      template = template[form] ?? template.other ?? key
+    }
+    if (typeof template !== 'string') return key    // 缺翻译时回退到 key，不要崩
+
+    return template.replace(/\{(\w+)\}/g, (_, name) =&gt; {
+      const v = vars[name]
+      // 数字也要本地化格式
+      return typeof v === 'number' ? new Intl.NumberFormat(locale).format(v) : String(v ?? '')
+    })
+  }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 缺翻译时该显示什么</div>
+  <p>
+    <strong>不要崩溃，也不要显示空白。</strong>回退顺序通常是：
+    当前语言 → 默认语言 → key 本身。<br>
+    开发环境下可以把缺失的 key 打进日志（第 29 章），这样上线前就能发现漏翻的条目。
+  </p>
+</div>
+
+<h2 id="negotiation">语言协商与 URL 策略</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="四种多语言 URL 策略对比">
+  <rect class="bx-g" x="20" y="20" width="350" height="112" rx="10"/>
+  <text class="ttl on-g" x="36" y="44">路径前缀（推荐）</text>
+  <text class="mono sm" x="36" y="68">example.com/zh/vacations</text>
+  <text class="mono sm" x="36" y="86">example.com/en/vacations</text>
+  <text class="sm on-g" x="36" y="110">SEO 友好 · 可分享 · 可缓存 · 实现简单</text>
+  <text class="sm" x="36" y="126">绝大多数情况选它</text>
+
+  <rect class="bx-b" x="390" y="20" width="350" height="112" rx="10"/>
+  <text class="ttl on-b" x="406" y="44">子域名 / 独立域名</text>
+  <text class="mono sm" x="406" y="68">zh.example.com　example.cn</text>
+  <text class="sm on-g" x="406" y="92">适合内容差异大、有本地运营团队</text>
+  <text class="sm on-r" x="406" y="112">SEO 权重不共享，Cookie 也要单独处理</text>
+  <text class="sm" x="406" y="128">成本高</text>
+
+  <rect class="bx-r" x="20" y="148" width="350" height="112" rx="10"/>
+  <text class="ttl on-r" x="36" y="172">查询串</text>
+  <text class="mono sm" x="36" y="196">example.com/vacations?lang=zh</text>
+  <text class="sm on-r" x="36" y="220">搜索引擎容易当成重复内容</text>
+  <text class="sm on-r" x="36" y="240">缓存键要额外处理（第 25 章）</text>
+  <text class="sm" x="36" y="256">不推荐用于面向公众的页面</text>
+
+  <rect class="bx-r" x="390" y="148" width="350" height="112" rx="10"/>
+  <text class="ttl on-r" x="406" y="172">只用 Cookie / 请求头</text>
+  <text class="mono sm" x="406" y="196">example.com/vacations</text>
+  <text class="sm on-r" x="406" y="220">同一个 URL 返回不同语言 ——</text>
+  <text class="sm on-r" x="406" y="240">链接分享给别人语言可能不对，CDN 会缓存串</text>
+  <text class="sm" x="406" y="256">只适合登录后的应用内部</text>
+</svg>
+<figcaption>图 16-4　判断标准：这个页面需要被搜索引擎收录、被用户分享吗？需要 → 语言必须在 URL 里</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+import { languageDetector } from 'hono/language'
+
+app.use('*', languageDetector({
+  supportedLanguages: ['zh', 'en', 'ja'],
+  fallbackLanguage: 'zh',
+  // 优先级：URL 路径 &gt; Cookie &gt; 浏览器偏好
+  order: ['path', 'cookie', 'header'],
+  lookupFromPathIndex: 0,
+}))
+
+app.use('*', async (c, next) =&gt; {
+  const locale = c.get('language')
+  c.set('t', createTranslator(locale, await loadMessages(locale)))
+  await next()
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 根路径按浏览器偏好重定向到具体语言，别让 / 直接渲染
+app.get('/', (c) =&gt; c.redirect(`/${c.get('language')}/`, 302))
+//                                                       ↑ 302 不是 301
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 语言重定向必须用 302，不能用 301</div>
+  <p>
+    301 是永久重定向，<strong>浏览器和 CDN 会缓存它</strong>。
+    一个英语用户访问后，<code>/</code> → <code>/en/</code> 这个跳转被缓存下来，
+    后面的中文用户也会被送到英文页面。<br>
+    <em>第 6 章讲过 301 的缓存特性，这里是它咬人的一个具体场景。</em>
+  </p>
+</div>
+
+<h3>告诉搜索引擎有哪些语言版本</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+&lt;head&gt;
+  &lt;link rel="alternate" hreflang="zh" href="https://example.com/zh/vacations" /&gt;
+  &lt;link rel="alternate" hreflang="en" href="https://example.com/en/vacations" /&gt;
+  &lt;link rel="alternate" hreflang="ja" href="https://example.com/ja/vacations" /&gt;
+  {/* x-default：语言不匹配任何一个时去哪 */}
+  &lt;link rel="alternate" hreflang="x-default" href="https://example.com/" /&gt;
+&lt;/head&gt;
+</pre>
+</div>
+
+<h2 id="beyond">语言之外的本地化</h2>
+
+<div class="tw">
+<table>
+  <tr><th>方面</th><th>坑</th></tr>
+  <tr><td>排序</td><td>中文按拼音还是笔画？德语的 ä 排在哪？用 <code>Intl.Collator</code>，别用 <code>a.localeCompare(b)</code> 的默认行为</td></tr>
+  <tr><td>姓名</td><td>「姓」「名」两个字段在很多文化里不成立。用一个 <code>fullName</code> 字段 + 可选的 <code>displayName</code></td></tr>
+  <tr><td>地址</td><td>邮编不一定是数字，州/省不一定存在，顺序也完全不同。别写死表单结构</td></tr>
+  <tr><td>电话</td><td>存 E.164 格式（<code>+8613800138000</code>），显示时再按当地习惯格式化</td></tr>
+  <tr><td>数字</td><td>德语用 <code>1.234,56</code>，法语用空格分隔。<strong>解析用户输入的数字时尤其危险</strong></td></tr>
+  <tr><td>货币</td><td>金额和币种必须一起存。日元没有小数位，某些货币有三位</td></tr>
+  <tr><td>文本长度</td><td>德语通常比英语长 30%，按钮会被撑破。设计时留余量</td></tr>
+  <tr><td>RTL</td><td>阿拉伯语、希伯来语从右往左。用 CSS 逻辑属性（<code>margin-inline-start</code>）代替 <code>margin-left</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+// 排序：Intl.Collator 比 localeCompare 快得多（可复用），而且能配置
+const collator = new Intl.Collator('zh-CN', { sensitivity: 'base', numeric: true })
+names.sort(collator.compare)
+
+// numeric: true 让 "第2章" 排在 "第10章" 前面，而不是按字符串比较
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 金额永远和币种一起存</div>
+  <p>
+    <code>{ amount: 100 }</code> 是一个 bug 等着发生 —— 100 什么？<br>
+    <code>{ amountMinor: 10000, currency: 'CNY' }</code>：用<strong>最小货币单位</strong>（分）存整数，
+    避开浮点误差（第 13 章提过），并且币种寸步不离。<br>
+    <em>注意日元的最小单位就是 1 日元，没有「分」——
+    所以「除以 100」这种硬编码也是错的，要按币种查小数位数。</em>
+  </p>
+</div>
+
+<h2 id="test">测试</h2>
+
+<div class="code" data-lang="ts">
+<pre>
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+
+describe('日期边界', () =&gt; {
+  // 关键：不要在本机时区下测试。显式设定一个「奇怪」的时区
+  beforeEach(() =&gt; { process.env.TZ = 'Pacific/Chatham' })   // UTC+12:45，还有夏令时
+  afterEach(() =&gt; { delete process.env.TZ })
+
+  it('「今天的订单」按用户时区计算，不按服务器时区', async () =&gt; {
+    const at = new Date('2026-09-06T16:00:00Z')   // 东八区是 7 号 00:00
+    const bounds = dayBoundsInTz(at, 'Asia/Shanghai')
+    expect(bounds.start.toISOString()).toBe('2026-09-06T16:00:00.000Z')
+  })
+
+  it('夏令时那天不会漏发或重发', async () =&gt; {
+    // 纽约 2026-11-01 01:30 出现两次
+    const first = new Date('2026-11-01T05:30:00Z')
+    const second = new Date('2026-11-01T06:30:00Z')
+
+    await sendDigest(userInNewYork, first)
+    await sendDigest(userInNewYork, second)
+
+    expect(await countDigestsSent(userInNewYork.id, '2026-11-01')).toBe(1)
+  })
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 让 CI 跑在一个「难搞」的时区下</div>
+  <p>
+    如果 CI 和开发机都是 UTC，所有时区 bug 都会藏起来。
+    在 CI 里设 <code>TZ=Pacific/Chatham</code>（UTC+12:45，带夏令时）或
+    <code>TZ=Asia/Kolkata</code>（+5:30，无夏令时）—— <strong>非整点偏移能立刻暴露一大类假设错误</strong>。
+  </p>
+</div>
 
 <h2 id="summary">小结</h2>
 
 <ul>
-  <li>URL 是长期承诺。全小写、连字符分词、不暴露技术细节、层级反映结构。</li>
-  <li>路径参数支持正则约束，用它把非法请求挡在处理函数之外。</li>
-  <li>具体路由写在通配路由前面。</li>
-  <li>用 <code>app.route()</code> 拆分子应用，用链式写法保住类型信息。</li>
-  <li>子域名要自己判断 <code>host</code>；子域名对 SEO 不友好，留给 API 和后台。</li>
-  <li>Hono 的多路由器机制默认就是最优解，不确定就别换预设。</li>
+  <li>时间有三种：<strong>时刻、本地日期时间、纯日期</strong>。混用是所有时间 bug 的根源。</li>
+  <li>存 UTC、显示本地；时区转换只在系统边界发生。</li>
+  <li>存 IANA 时区标识符（<code>Asia/Shanghai</code>），不要存偏移。</li>
+  <li>未来的时刻不能预先算成 UTC —— 时区规则会变。</li>
+  <li>一天不总是 24 小时；「今天」取决于你在哪。</li>
+  <li>用 <code>Intl</code> 做所有格式化，零依赖且比手写正确。</li>
+  <li>定时任务默认 UTC；「本地时间几点」的需求要每小时扫一遍 + 幂等保护。</li>
+  <li>文案以整句为单位，复数用 <code>Intl.PluralRules</code>。</li>
+  <li>公开页面的语言要放在 URL 路径里；语言重定向用 302 不是 301。</li>
+  <li>金额和币种一起存，用最小货币单位的整数。</li>
+  <li>CI 跑在非整点偏移的时区下，能暴露一大类隐藏假设。</li>
 </ul>
 
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>把云雀旅行的路由按 <code>vacations</code> / <code>api</code> / <code>admin</code> 拆成三个子应用，用 <code>app.route()</code> 挂载。全部用链式写法。</li>
-    <li>加一条 <code>/vacations/:region/:slug</code> 路由，并确保 <code>/vacations/new</code> 仍然能进到「新建」页面。</li>
-    <li>给 <code>/orders/:id</code> 加上数字约束，然后访问 <code>/orders/abc</code>，确认返回的是 404 而不是处理函数里的报错。</li>
-    <li>用 <code>showRoutes(app)</code> 打印路由表，检查有没有你意料之外的重复或遮蔽。</li>
-    <li>为你的项目写一份「URL 规划」文档，列出所有计划中的路径。想一想哪些两年后可能要改。</li>
+    <li>把 <code>TZ=Pacific/Chatham</code> 加到你的测试命令前跑一遍。有测试失败吗？那些就是隐藏的时区 bug。</li>
+    <li>写一个「统计今天订单数」的接口，分别按服务器时区和用户时区实现，用一个 UTC 时间 16:00 的订单验证两者结果不同。</li>
+    <li>用 <code>Intl.DateTimeFormat</code> 把同一个时刻渲染成三个时区的本地时间，确认它们指向同一瞬间。</li>
+    <li>做一个 <code>&lt;TimeStamp&gt;</code> 组件：服务端输出 UTC，前端脚本按浏览器时区改写。关掉 JavaScript 看看降级效果。</li>
+    <li>实现 <code>createTranslator</code>，做一个中英双语页面，用路径前缀策略。确认 <code>/</code> 的重定向用的是 302。</li>
+    <li>把一个按钮的英文文案换成德文（通常长 30%），看看布局有没有撑破。</li>
+    <li>找出你项目里所有 <code>new Date(</code> 和 <code>setHours(</code> 的调用，逐个问：这里假设了哪个时区？</li>
   </ol>
 </div>
 

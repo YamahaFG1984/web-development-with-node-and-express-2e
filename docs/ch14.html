@@ -468,7 +468,7 @@ const res = await index.search(q, {
   <text class="ttl on-a" x="36" y="134">&#9989; 队列：写库成功后投递同步任务</text>
   <text class="mono sm" x="36" y="156">await db.update(…)　　await QUEUE.send({ type: 'reindex', sku })</text>
   <text class="sm" x="36" y="176">失败会自动重试，最终一致。任务要幂等（重复执行结果相同）</text>
-  <text class="sm on-g" x="36" y="192">这正是第 25 章队列的典型用途 —— 也是大多数项目的正确答案</text>
+  <text class="sm on-g" x="36" y="192">这正是第 26 章队列的典型用途 —— 也是大多数项目的正确答案</text>
 
   <rect class="bx-b" x="20" y="210" width="720" height="60" rx="10"/>
   <text class="ttl on-b" x="36" y="232">&#9989; 变更数据捕获（CDC）：监听数据库的变更日志</text>
@@ -478,7 +478,7 @@ const res = await index.search(q, {
   <rect class="bx-d" x="20" y="282" width="720" height="30" rx="6"/>
   <text class="sm" x="380" y="302" text-anchor="middle">无论用哪种，都还要有一个<tspan class="on-a">定时全量重建</tspan>兜底 —— 增量同步一定会漏</text>
 </svg>
-<figcaption>图 14-4　索引同步是「最终一致」的经典场景，和第 26 章 webhook 的对账思路完全一样</figcaption>
+<figcaption>图 14-4　索引同步是「最终一致」的经典场景，和第 27 章 webhook 的对账思路完全一样</figcaption>
 </figure>
 
 <div class="code" data-lang="ts" data-file="src/tasks/reindex.ts">
@@ -514,7 +514,7 @@ export async function reindexVacation(sku: string, env: Bindings) {
 
 <div class="code" data-lang="ts">
 <pre>
-// 写库之后投递任务（第 25 章）
+// 写库之后投递任务（第 26 章）
 app.patch('/api/v1/vacations/:sku', async (c) =&gt; {
   const sku = c.req.param('sku')
   await c.get('repo').update(sku, c.req.valid('json'))
@@ -556,7 +556,7 @@ export async function rebuildSearchIndex(env: Bindings) {
     「先 <code>deleteAllDocuments()</code> 再重新导入」这个做法很直觉，但在重建的那几分钟里，
     <strong>所有用户搜索都是零结果</strong>。<br>
     正确做法是建一个新索引，导完之后<strong>原子地切换别名</strong>。
-    用户完全无感 —— 这和第 19 章「内容指纹」、第 30 章「零停机迁移」是同一个思路：
+    用户完全无感 —— 这和第 20 章「内容指纹」、第 31 章「零停机迁移」是同一个思路：
     <em>先准备好新的，再切换，最后清理旧的。</em>
   </p>
 </div>
@@ -686,7 +686,7 @@ app.get('/api/v1/search', zValidator('query', searchSchema), async (c) =&gt; {
 
   const results = await searchVacations(q, page)
 
-  // 记录每一次搜索（第 28 章的结构化日志）
+  // 记录每一次搜索（第 29 章的结构化日志）
   c.get('log')('info', 'search', {
     query: q.slice(0, 100),
     resultCount: results.total,

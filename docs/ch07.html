@@ -26,6 +26,7 @@
     <li>用 <code>jsxRenderer</code> 中间件把布局统一起来</li>
     <li>理解自动转义为什么保护你，以及什么时候需要 <code>raw()</code></li>
     <li>知道 <code>html</code> 标签函数这个不用 JSX 的备选方案</li>
+    <li>在模板层就把可访问性做对 —— 这是成本最低的时机</li>
   </ul>
 </div>
 
@@ -525,6 +526,232 @@ app.get('/card', (c) =&gt; c.html(html`
   </p>
 </div>
 
+<h2 id="a11y">可访问性</h2>
+
+<p>
+  可访问性（accessibility，常缩写为 a11y）是指让有视觉、听觉、运动或认知障碍的人也能使用你的网站。
+  它在很多国家和地区已经是<strong>法律要求</strong>，不再只是加分项。
+</p>
+
+<p>
+  好消息是：<strong>绝大部分可访问性来自「把 HTML 写对」</strong>，
+  而模板层正是写 HTML 的地方 —— 所以这里是成本最低的时机。在这一层做对，之后就一直是对的。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="可访问性受益人群与实现层次">
+  <rect class="bx-b" x="20" y="20" width="720" height="80" rx="10"/>
+  <text class="ttl on-b" x="36" y="44">谁在受益（远不止「盲人用户」）</text>
+  <text class="sm" x="36" y="68">屏幕阅读器用户 · 只用键盘的人（鼠标坏了、手部受伤、效率党） · 弱视与色盲</text>
+  <text class="sm" x="36" y="88">大字号用户 · 强光下看手机的人 · 认知负荷高时的所有人 · 搜索引擎爬虫</text>
+
+  <rect class="bx-g" x="20" y="116" width="350" height="146" rx="10"/>
+  <text class="ttl on-g" x="36" y="140">用对标签就免费获得</text>
+  <text class="sm" x="36" y="164">&lt;button&gt; —— 可聚焦、回车/空格可触发</text>
+  <text class="sm" x="36" y="186">&lt;a href&gt; —— 可聚焦、能新窗口打开</text>
+  <text class="sm" x="36" y="208">&lt;label for&gt; —— 点文字也能选中输入框</text>
+  <text class="sm" x="36" y="230">&lt;nav&gt; &lt;main&gt; —— 屏幕阅读器可跳转</text>
+  <text class="sm on-g" x="36" y="254">这些行为你一行 JS 都不用写</text>
+
+  <rect class="bx-r" x="390" y="116" width="350" height="146" rx="10"/>
+  <text class="ttl on-r" x="406" y="140">用 div 模拟就全丢了</text>
+  <text class="mono sm" x="406" y="164">&lt;div onclick&gt;提交&lt;/div&gt;</text>
+  <text class="sm on-r" x="406" y="188">· 键盘 Tab 键跳不到</text>
+  <text class="sm on-r" x="406" y="210">· 按回车没反应</text>
+  <text class="sm on-r" x="406" y="232">· 屏幕阅读器念出来只是一段文字</text>
+  <text class="sm on-r" x="406" y="254">要补齐这些行为要写十几行代码</text>
+</svg>
+<figcaption>图 7-4　可访问性的第一原则：<strong>能用原生标签就别用 div</strong></figcaption>
+</figure>
+
+<h3>六条覆盖八成问题的规则</h3>
+
+<div class="code" data-lang="tsx">
+<pre>
+{/* ① 图片必须有 alt。装饰性图片用空 alt，让屏幕阅读器跳过 */}
+&lt;img src="/img/hood-river.jpg" alt="帆船在胡德河上航行" /&gt;
+&lt;img src="/img/divider.svg" alt="" /&gt;              {/* 纯装饰 */}
+
+{/* ② 表单控件必须有关联的 label */}
+&lt;label for="email"&gt;邮箱&lt;/label&gt;
+&lt;input id="email" name="email" type="email" /&gt;
+
+{/* placeholder 不能代替 label —— 输入后它就消失了，而且对比度通常不够 */}
+
+{/* ③ 用语义标签划分页面区域 */}
+&lt;header&gt;…&lt;/header&gt;
+&lt;nav aria-label="主导航"&gt;…&lt;/nav&gt;
+&lt;main&gt;…&lt;/main&gt;          {/* 一个页面只能有一个 main */}
+&lt;footer&gt;…&lt;/footer&gt;
+
+{/* ④ 标题层级不能跳，它是屏幕阅读器的目录 */}
+&lt;h1&gt;云雀旅行&lt;/h1&gt;
+  &lt;h2&gt;精选行程&lt;/h2&gt;
+    &lt;h3&gt;胡德河一日游&lt;/h3&gt;
+{/* 不要为了字号小就用 h4 —— 字号用 CSS 控制 */}
+
+{/* ⑤ 链接文字要能独立看懂 */}
+&lt;a href="/vacations/hr199"&gt;查看胡德河一日游详情&lt;/a&gt;
+{/* ❌ 屏幕阅读器可以只念出页面所有链接，一堆「点击这里」毫无意义 */}
+
+{/* ⑥ 语言要声明，屏幕阅读器据此选择发音 */}
+&lt;html lang="zh-CN"&gt;
+&lt;p&gt;这个词在英文里叫 &lt;span lang="en"&gt;serendipity&lt;/span&gt;。&lt;/p&gt;
+</pre>
+</div>
+
+<h3>表单错误要被「说」出来</h3>
+
+<p>
+  第 8 章会讲表单校验。校验失败时，如果只是把错误文字渲染在输入框下面，
+  <strong>屏幕阅读器用户完全不知道发生了什么</strong> —— 页面变了但没人告诉他。
+</p>
+
+<div class="code" data-lang="tsx">
+<pre>
+export const EmailField: FC&lt;{ value?: string; error?: string }&gt; = ({ value, error }) =&gt; (
+  &lt;div class="field"&gt;
+    &lt;label for="email"&gt;邮箱&lt;/label&gt;
+    &lt;input
+      id="email"
+      name="email"
+      type="email"
+      value={value}
+      required
+      {/* 告诉辅助技术：这个控件当前处于错误状态 */}
+      aria-invalid={error ? 'true' : undefined}
+      {/* 把错误信息和输入框关联起来，聚焦时会被一起念出来 */}
+      aria-describedby={error ? 'email-error' : undefined}
+    /&gt;
+    {error &amp;&amp; (
+      &lt;p id="email-error" class="error" role="alert"&gt;
+        {error}
+      &lt;/p&gt;
+    )}
+  &lt;/div&gt;
+)
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; <code>role="alert"</code> 和 <code>aria-live</code></div>
+  <p>
+    动态出现的内容（校验错误、「保存成功」提示、搜索结果数量）需要主动通知辅助技术：
+  </p>
+  <ul>
+    <li><code>role="alert"</code> —— 立即打断并播报。用于错误、警告。</li>
+    <li><code>aria-live="polite"</code> —— 等用户空闲时播报。用于状态更新、结果计数。</li>
+  </ul>
+  <p>
+    <em>第 9 章的 Flash 消息、第 14 章的搜索结果都用到了它。</em>
+    注意：这个容器必须<strong>在页面加载时就存在</strong>（哪怕是空的），
+    后来才插入的 <code>aria-live</code> 元素可能不会被播报。
+  </p>
+</div>
+
+<h3>键盘可用性</h3>
+
+<div class="tw">
+<table>
+  <tr><th>要求</th><th>怎么验证</th></tr>
+  <tr><td>所有交互元素都能用 Tab 到达</td><td><strong>把鼠标拿开，只用键盘走一遍主流程</strong>。这是最有效的一次性检查</td></tr>
+  <tr><td>焦点位置始终可见</td><td>不要写 <code>outline: none</code>。要改样式就用 <code>:focus-visible</code> 提供替代</td></tr>
+  <tr><td>Tab 顺序符合视觉顺序</td><td>不要用 <code>tabindex</code> 正数去调顺序，改 DOM 顺序</td></tr>
+  <tr><td>能跳过重复的导航</td><td>页面开头放一个「跳到主内容」链接</td></tr>
+  <tr><td>弹窗打开时焦点进入、关闭时归还</td><td>用原生 <code>&lt;dialog&gt;</code> 能免费拿到大部分行为</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="tsx">
+<pre>
+{/* 跳过导航链接：平时隐藏，被 Tab 聚焦时出现 */}
+&lt;a href="#main" class="skip-link"&gt;跳到主内容&lt;/a&gt;
+&lt;nav&gt;…几十个链接…&lt;/nav&gt;
+&lt;main id="main" tabindex="-1"&gt;…&lt;/main&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="css">
+<pre>
+.skip-link {
+  position: absolute;
+  left: -9999px;          /* 视觉上移出屏幕，但仍在无障碍树里 */
+}
+.skip-link:focus {
+  left: 8px; top: 8px;
+  background: #fff; padding: 8px 12px; z-index: 100;
+}
+
+/* ❌ 千万别这样 */
+*:focus { outline: none; }
+
+/* ✅ 要改就提供更好的替代 */
+:focus-visible {
+  outline: 3px solid #0b5fff;
+  outline-offset: 2px;
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>outline: none</code> 是可访问性头号杀手</div>
+  <p>
+    很多 CSS reset 里都有这一行，因为设计师觉得那个蓝框不好看。<br>
+    但对只用键盘的人来说，<strong>失去焦点指示等于失去光标</strong> ——
+    他完全不知道自己现在选中的是哪个元素。<br>
+    <em>用 <code>:focus-visible</code>：鼠标点击时不显示轮廓，键盘导航时显示。两全其美。</em>
+  </p>
+</div>
+
+<h3>颜色与对比度</h3>
+
+<div class="tw">
+<table>
+  <tr><th>规则</th><th>说明</th></tr>
+  <tr><td>正文对比度 ≥ 4.5:1</td><td>WCAG AA 级要求。大字号（18pt+）可以放宽到 3:1</td></tr>
+  <tr><td>不要只用颜色传达信息</td><td>「红色表示错误」对色盲用户无效。要配上图标或文字</td></tr>
+  <tr><td>链接要能和正文区分</td><td>只靠颜色不够，加下划线或其他视觉标记</td></tr>
+  <tr><td>支持深色模式和放大</td><td>用相对单位（rem），别写死 px 高度导致文字放大后被裁切</td></tr>
+</table>
+</div>
+
+<h3>怎么检查</h3>
+
+<div class="tw">
+<table>
+  <tr><th>方法</th><th>能发现</th><th>成本</th></tr>
+  <tr><td><strong>只用键盘走一遍</strong></td><td>焦点丢失、无法到达的控件、顺序错乱</td><td>五分钟，收益最高</td></tr>
+  <tr><td>浏览器 DevTools 的 Lighthouse / 无障碍面板</td><td>缺 alt、对比度不足、标题层级问题</td><td>一次点击</td></tr>
+  <tr><td><a href="https://github.com/dequelabs/axe-core">axe-core</a> 接进 Playwright</td><td>自动化，能进 CI（第 5 章）</td><td>半小时接入</td></tr>
+  <tr><td>真的用一次屏幕阅读器</td><td>前面几种都发现不了的体验问题</td><td>需要学一点，但值得</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="ts" data-file="e2e/a11y.spec.ts">
+<pre>
+import { test, expect } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
+
+test('首页没有可访问性违规', async ({ page }) =&gt; {
+  await page.goto('/')
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa'])
+    .analyze()
+
+  expect(results.violations).toEqual([])
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 自动化只能查出约三成问题</div>
+  <p>
+    工具能发现「这个图片没有 alt」，但发现不了「alt 写的是 <code>image1.jpg</code>」。
+    能发现「对比度不足」，但发现不了「Tab 顺序让人摸不着头脑」。<br>
+    <strong>把 axe 接进 CI 挡住回归，但真正的检查还是那五分钟的键盘走查。</strong>
+  </p>
+</div>
+
 <h2 id="tips">模板的实践建议</h2>
 
 <ul>
@@ -566,6 +793,9 @@ app.get('/vacations', async (c) =&gt; {
   <li><code>jsxRenderer</code> 可以把布局变成中间件，路由里只写内容。</li>
   <li>JSX 和 <code>html</code> 标签函数都会自动转义。<code>raw()</code> 关掉转义，只对可信内容使用。</li>
   <li>传给视图前先映射数据，别把数据库行对象直接透出去。</li>
+  <li>可访问性八成来自「把 HTML 写对」：原生标签、alt、label、语义区域、标题层级。</li>
+  <li>动态内容用 <code>role="alert"</code> / <code>aria-live</code> 播报；永远不要 <code>outline: none</code>。</li>
+  <li>最有效的检查是<strong>把鼠标拿开，只用键盘走一遍</strong>。</li>
 </ul>
 
 <div class="exercise">
@@ -577,6 +807,8 @@ app.get('/vacations', async (c) =&gt; {
         <code>/echo?msg=&lt;script&gt;alert(1)&lt;/script&gt;</code>，确认脚本没有执行。再把它改成用
         <code>raw()</code>，观察区别（看完记得改回来）。</li>
     <li>用 <code>jsxRenderer</code> 给 <code>/admin/*</code> 挂一个和前台不同的布局。</li>
+    <li><strong>把鼠标拿开</strong>，只用 Tab 和回车走一遍你的页面。有没有到不了的地方？焦点看得见吗？</li>
+    <li>在浏览器 DevTools 里跑一次 Lighthouse 的无障碍检查，把分数提到 95 以上。</li>
   </ol>
 </div>
 

@@ -342,12 +342,12 @@ app.get('/x', mw1, mw2, handler)           // 只给这一个路由挂两个中�
 <div class="tw">
 <table>
   <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
-  <tr><td><code>cors</code></td><td><code>hono/cors</code></td><td>允许指定的其他域名调用你的 API（第 17 章）</td></tr>
-  <tr><td><code>csrf</code></td><td><code>hono/csrf</code></td><td>阻止跨站伪造请求（第 20 章）</td></tr>
-  <tr><td><code>secureHeaders</code></td><td><code>hono/secure-headers</code></td><td>一次性设置一整组安全响应头（第 20 章）</td></tr>
+  <tr><td><code>cors</code></td><td><code>hono/cors</code></td><td>允许指定的其他域名调用你的 API（第 18 章）</td></tr>
+  <tr><td><code>csrf</code></td><td><code>hono/csrf</code></td><td>阻止跨站伪造请求（第 21 章）</td></tr>
+  <tr><td><code>secureHeaders</code></td><td><code>hono/secure-headers</code></td><td>一次性设置一整组安全响应头（第 21 章）</td></tr>
   <tr><td><code>basicAuth</code></td><td><code>hono/basic-auth</code></td><td>浏览器弹框式的用户名密码认证</td></tr>
   <tr><td><code>bearerAuth</code></td><td><code>hono/bearer-auth</code></td><td>检查 <code>Authorization: Bearer xxx</code></td></tr>
-  <tr><td><code>jwt</code></td><td><code>hono/jwt</code></td><td>验证 JWT 令牌并解析出载荷（第 20 章）</td></tr>
+  <tr><td><code>jwt</code></td><td><code>hono/jwt</code></td><td>验证 JWT 令牌并解析出载荷（第 21 章）</td></tr>
   <tr><td><code>bodyLimit</code></td><td><code>hono/body-limit</code></td><td>限制请求体大小</td></tr>
   <tr><td><code>ipRestriction</code></td><td><code>hono/ip-restriction</code></td><td>按 IP 白名单/黑名单放行</td></tr>
 </table>
@@ -358,8 +358,8 @@ app.get('/x', mw1, mw2, handler)           // 只给这一个路由挂两个中�
 <table>
   <tr><th>中间件</th><th>引入路径</th><th>作用</th></tr>
   <tr><td><code>compress</code></td><td><code>hono/compress</code></td><td>gzip / deflate 压缩响应</td></tr>
-  <tr><td><code>etag</code></td><td><code>hono/etag</code></td><td>内容没变时返回 304，省流量（第 19 章）</td></tr>
-  <tr><td><code>cache</code></td><td><code>hono/cache</code></td><td>用 Cache API 缓存响应（第 19 章）</td></tr>
+  <tr><td><code>etag</code></td><td><code>hono/etag</code></td><td>内容没变时返回 304，省流量（第 20 章）</td></tr>
+  <tr><td><code>cache</code></td><td><code>hono/cache</code></td><td>用 Cache API 缓存响应（第 20 章）</td></tr>
   <tr><td><code>timeout</code></td><td><code>hono/timeout</code></td><td>超时自动中断，避免请求挂死</td></tr>
 </table>
 </div>
@@ -455,7 +455,7 @@ app.use(async (c, next) =&gt; {
 })
 </pre></div>
   <p>另外 <code>import { showRoutes } from 'hono/dev'</code> 然后 <code>showRoutes(app)</code>
-     会把所有注册的路由和中间件打印成一张表，第 29 章会用到。</p>
+     会把所有注册的路由和中间件打印成一张表，第 30 章会用到。</p>
 </div>
 
 <h2 id="summary">小结</h2>

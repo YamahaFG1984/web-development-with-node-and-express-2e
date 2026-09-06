@@ -116,7 +116,7 @@
 
   <rect class="bx-g" x="300" y="238" width="200" height="40" rx="6"/>
   <text class="sm on-g" x="400" y="256" text-anchor="middle">⑥ 标记为 ready</text>
-  <text class="sm on-g" x="400" y="272" text-anchor="middle">投递缩略图任务（第 25 章）</text>
+  <text class="sm on-g" x="400" y="272" text-anchor="middle">投递缩略图任务（第 26 章）</text>
 </svg>
 <figcaption>图 15-2　第 ⑤ 步是最容易被省略的 —— 但没有它，客户端就能撒谎</figcaption>
 </figure>
@@ -331,7 +331,7 @@ app.get('/files/:id', requireLogin, async (c) =&gt; {
   <p>
     上面这个 <code>/files/:id</code> 端点如果被 CDN 缓存了，
     <strong>第二个用户会拿到第一个用户的 302 目标</strong>。<br>
-    必须设 <code>Cache-Control: private, no-store</code>（第 19 章讲过这条铁律）。
+    必须设 <code>Cache-Control: private, no-store</code>（第 20 章讲过这条铁律）。
     签名 URL 的有效期也要短 —— 它一旦被复制出去，在过期前就是有效的。
   </p>
 </div>
@@ -340,7 +340,7 @@ app.get('/files/:id', requireLogin, async (c) =&gt; {
 
 <p>
   原图往往是 4000×3000 的几 MB 大图，而页面上只显示 400px 宽。
-  直接发原图是第 19 章说的「体积」问题里最大的一块。
+  直接发原图是第 20 章说的「体积」问题里最大的一块。
 </p>
 
 <div class="tw">
@@ -382,12 +382,12 @@ export async function processUpload(id: string, env: Bindings) {
   const original = await object.arrayBuffer()
 
   for (const size of SIZES) {
-    // 生成 WebP：体积通常比 JPEG 小 30%（第 19 章）
+    // 生成 WebP：体积通常比 JPEG 小 30%（第 20 章）
     const resized = await resizeImage(original, { width: size.width, format: 'webp' })
     await env.BUCKET.put(`${record.storageKey}/${size.name}.webp`, resized, {
       httpMetadata: {
         contentType: 'image/webp',
-        // 派生图是不可变的：键变了内容才变，可以长缓存（第 19 章的内容指纹思路）
+        // 派生图是不可变的：键变了内容才变，可以长缓存（第 20 章的内容指纹思路）
         cacheControl: 'public, max-age=31536000, immutable',
       },
     })
@@ -476,7 +476,7 @@ export function sniffType(head: Uint8Array): string | null {
   <p>
     把用户文件放在 <code>usercontent-example.net</code>（<strong>不是</strong>你主域名的子域名），
     这样即使某个文件被当作 HTML 执行，它也拿不到你主站的 Cookie，
-    因为同源策略把它隔离开了（第 20 章）。<br>
+    因为同源策略把它隔离开了（第 21 章）。<br>
     <em>GitHub 用 <code>githubusercontent.com</code>、Google 用 <code>googleusercontent.com</code>
     —— 都是这个原因。</em>
   </p>
@@ -546,7 +546,7 @@ app.post('/api/v1/uploads/multipart', requireLogin, async (c) =&gt; {
   <text class="ttl on-g" x="380" y="158" text-anchor="middle">清理策略</text>
   <text class="sm" x="40" y="182">① 定时任务：删除 status=pending 且创建超过 24 小时的记录及其文件</text>
   <text class="sm" x="40" y="204">② 定时任务：删除 attachedTo 为 null 且创建超过 7 天的（用户放弃的草稿）</text>
-  <text class="sm" x="40" y="226">③ 对账：列举桶里的对象，找出数据库里没有记录的 —— 反过来也查一遍（第 26 章的思路）</text>
+  <text class="sm" x="40" y="226">③ 对账：列举桶里的对象，找出数据库里没有记录的 —— 反过来也查一遍（第 27 章的思路）</text>
 </svg>
 <figcaption>图 15-4　没有清理机制的话，存储成本会随时间单调增长，而且你不知道钱花在哪</figcaption>
 </figure>
@@ -602,7 +602,7 @@ export async function cleanupOrphans(env: Bindings) {
 <div class="box key">
   <div class="t">&#9733; 控制成本的三招</div>
   <ol>
-    <li><strong>CDN 缓存。</strong>派生图设 <code>immutable</code> 长缓存（第 19 章），
+    <li><strong>CDN 缓存。</strong>派生图设 <code>immutable</code> 长缓存（第 20 章），
         绝大部分请求根本到不了对象存储。</li>
     <li><strong>该删就删。</strong>孤儿清理 + 生命周期规则。</li>
     <li><strong>按用户配额。</strong>不设上限的话，一个用户就能把你的账单顶穿。</li>
