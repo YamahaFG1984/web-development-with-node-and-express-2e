@@ -634,6 +634,7 @@ export function createCachedVacationRepo(db: DrizzleDb, cache: KVNamespace): Vac
   <li>进程内缓存要设容量上限，否则就是内存泄漏。</li>
   <li>必须监控命中率 —— 否则你不知道这个缓存有没有用。</li>
   <li>能用 TTL 就别用主动失效；把缓存收拢到数据访问层。</li>
+  <li>大模型的提示词缓存是另一套机制（前缀匹配），见第 31 章。</li>
 </ul>
 
 <div class="exercise">

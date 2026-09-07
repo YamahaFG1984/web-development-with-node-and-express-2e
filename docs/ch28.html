@@ -277,7 +277,7 @@ app.post('/api/v1/assistant', zValidator('json', z.object({ prompt: z.string().m
 
     try {
       const result = client.messages.stream({
-        model: 'claude-sonnet-5',
+        model: 'claude-opus-5',
         max_tokens: 1024,
         messages: [{ role: 'user', content: prompt }],
       })
@@ -648,6 +648,7 @@ function subscribe(onMessage) {
   <li>SSE 自带重连和 <code>Last-Event-ID</code> 补发，这是它相对 WebSocket 的最大优势。</li>
   <li>心跳必须有，周期要小于中间代理的超时。</li>
   <li>流式接口一定要处理 <code>onAbort</code>，尤其是按量计费的 AI 调用。</li>
+  <li>大模型集成的完整链路（成本、缓存、注入防护）见第 31 章。</li>
   <li>解析流式数据时要保留不完整的尾巴到下一轮。</li>
   <li>多实例下广播必须走 pub/sub；Cloudflare 上可以用 Durable Objects 绕开这个问题。</li>
   <li>重连必须指数退避加抖动，否则会在服务恢复时把它再打死一次。</li>
