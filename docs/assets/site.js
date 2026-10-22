@@ -1,10 +1,12 @@
 /* ================================================================
    Hono 教程 · 共享脚本：侧边栏、目录、代码高亮、主题
    ================================================================ */
-(function () {
+// 保持经典 <script> 而不是 type="module"：模块脚本在 file:// 下会被浏览器拦截，
+// 而这些页面经常是直接双击打开的。
+(() => {
   'use strict';
 
-  var CHAPTERS = [
+  const CHAPTERS = [
     { n: 1,  t: '认识 Hono',            d: '为什么在 2020 年代要重新学一个 Web 框架', part: '第一部分 · 起步' },
     { n: 2,  t: '准备开发环境',          d: '运行时、包管理器与第一个 fetch 服务器' },
     { n: 3,  t: '用 Hono 节省时间',      d: '把云雀旅行网站跑起来' },
@@ -42,34 +44,35 @@
     { n: 35, t: '更多资源',             d: '文档、社区与继续深入的路线' }
   ];
 
-  var cur = parseInt(document.body.dataset.chapter || '0', 10);
+  const pad = (n) => String(n).padStart(2, '0');
+  const href = (n) => `ch${pad(n)}.html`;
+
+  const cur = Number.parseInt(document.body.dataset.chapter || '0', 10);
 
   /* ---------- 侧边栏 ---------- */
-  var side = document.getElementById('sidebar');
+  const side = document.getElementById('sidebar');
   if (side) {
-    var html = '<a class="brand" href="index.html"><span class="flame">&#128293;</span>' +
+    const brand = '<a class="brand" href="index.html"><span class="flame">&#128293;</span>' +
       '<span>Hono 全栈开发<small>Web 标准时代的服务端框架</small></span></a>';
-    CHAPTERS.forEach(function (c) {
-      if (c.part) html += '<div class="part">' + c.part + '</div>';
-      html += '<a class="ch' + (c.n === cur ? ' active' : '') + '" href="ch' +
-        pad(c.n) + '.html"><span class="n">' + c.n + '</span><span>' + c.t + '</span></a>';
-    });
-    side.innerHTML = html;
-    var active = side.querySelector('a.ch.active');
-    if (active) setTimeout(function () {
-      active.scrollIntoView({ block: 'center' });
-    }, 0);
+    const links = CHAPTERS.map(({ n, t, part }) =>
+      (part ? `<div class="part">${part}</div>` : '') +
+      `<a class="ch${n === cur ? ' active' : ''}" href="${href(n)}"><span class="n">${n}</span><span>${t}</span></a>`
+    );
+    side.innerHTML = brand + links.join('');
+    const active = side.querySelector('a.ch.active');
+    if (active) setTimeout(() => active.scrollIntoView({ block: 'center' }), 0);
   }
 
   /* ---------- 移动端菜单 ---------- */
-  var btn = document.createElement('button');
-  btn.id = 'menu-btn';
-  btn.type = 'button';
+  const btn = Object.assign(document.createElement('button'), {
+    id: 'menu-btn',
+    type: 'button',
+    innerHTML: '&#9776;',
+    onclick: () => document.body.classList.toggle('nav-open')
+  });
   btn.setAttribute('aria-label', '目录');
-  btn.innerHTML = '&#9776;';
-  btn.onclick = function () { document.body.classList.toggle('nav-open'); };
   document.body.appendChild(btn);
-  document.addEventListener('click', function (e) {
+  document.addEventListener('click', (e) => {
     if (document.body.classList.contains('nav-open') &&
         side && !side.contains(e.target) && e.target !== btn) {
       document.body.classList.remove('nav-open');
@@ -77,146 +80,145 @@
   });
 
   /* ---------- 主题切换 ---------- */
-  var tbtn = document.createElement('button');
-  tbtn.id = 'theme-btn';
-  tbtn.type = 'button';
+  const THEME_KEY = 'hono-doc-theme';
+  const tbtn = Object.assign(document.createElement('button'), {
+    id: 'theme-btn',
+    type: 'button',
+    innerHTML: '&#9789;',
+    onclick: () => {
+      const root = document.documentElement;
+      const now = root.getAttribute('data-theme');
+      const dark = now ? now === 'dark'
+        : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const next = dark ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem(THEME_KEY, next); } catch {}
+    }
+  });
   tbtn.setAttribute('aria-label', '切换深浅色');
-  tbtn.innerHTML = '&#9789;';
-  tbtn.onclick = function () {
-    var root = document.documentElement;
-    var now = root.getAttribute('data-theme');
-    var dark = now ? now === 'dark'
-      : window.matchMedia('(prefers-color-scheme: dark)').matches;
-    root.setAttribute('data-theme', dark ? 'light' : 'dark');
-    try { localStorage.setItem('hono-doc-theme', dark ? 'light' : 'dark'); } catch (e) {}
-  };
   document.body.appendChild(tbtn);
   try {
-    var saved = localStorage.getItem('hono-doc-theme');
+    const saved = localStorage.getItem(THEME_KEY);
     if (saved) document.documentElement.setAttribute('data-theme', saved);
-  } catch (e) {}
+  } catch {}
 
   /* ---------- 箭头 marker（全局一次） ---------- */
-  var defs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  defs.setAttribute('width', '0'); defs.setAttribute('height', '0');
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  defs.setAttribute('width', '0');
+  defs.setAttribute('height', '0');
   defs.setAttribute('style', 'position:absolute');
   // 注意：SVG marker 的内容不会从引用它的元素继承 color，
   // 所以这里直接用 CSS 变量填色，而不是 currentColor。
-  defs.innerHTML =
-    '<defs>' +
-    '<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
-    '<path d="M0,0 L10,5 L0,10 z" fill="var(--fg-faint)"/></marker>' +
-    '<marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
-    '<path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>' +
-    '</defs>';
+  const marker = (id, fill) =>
+    `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">` +
+    `<path d="M0,0 L10,5 L0,10 z" fill="${fill}"/></marker>`;
+  defs.innerHTML = `<defs>${marker('ar', 'var(--fg-faint)')}${marker('ar-a', 'var(--accent)')}</defs>`;
   document.body.appendChild(defs);
 
   /* ---------- 章节内目录 ---------- */
-  var main = document.querySelector('main');
-  var slot = document.getElementById('chapter-toc');
+  const main = document.querySelector('main');
+  const slot = document.getElementById('chapter-toc');
   if (slot && main) {
-    var hs = main.querySelectorAll('h2');
+    const hs = [...main.querySelectorAll('h2')];
     if (hs.length > 2) {
-      var t = '<div class="h">本章目录</div><ol>';
-      hs.forEach(function (h, i) {
-        if (!h.id) h.id = 'sec-' + (i + 1);
-        t += '<li><a href="#' + h.id + '">' + h.textContent + '</a></li>';
+      const items = hs.map((h, i) => {
+        if (!h.id) h.id = `sec-${i + 1}`;
+        return `<li><a href="#${h.id}">${h.textContent}</a></li>`;
       });
       slot.className = 'toc';
-      slot.innerHTML = t + '</ol>';
+      slot.innerHTML = `<div class="h">本章目录</div><ol>${items.join('')}</ol>`;
     }
   }
 
   /* ---------- 代码块：语言标签 + 复制 + 高亮 ---------- */
-  var KW = ('const|let|var|function|return|if|else|await|async|import|from|export|default|new|class|' +
+  const KW = ('const|let|var|function|return|if|else|await|async|import|from|export|default|new|class|' +
     'extends|implements|for|while|of|in|do|try|catch|finally|throw|switch|case|break|continue|' +
     'type|interface|enum|as|satisfies|typeof|instanceof|delete|void|yield|public|private|readonly|' +
     'null|undefined|true|false|this|super|static|declare|namespace').split('|');
 
-  var RE_JS = new RegExp(
-    '(\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*)' +                       // 1 注释
-    '|(`(?:\\\\[\\s\\S]|[^\\\\`])*`|\'(?:\\\\[\\s\\S]|[^\\\\\'])*\'|"(?:\\\\[\\s\\S]|[^\\\\"])*")' + // 2 字符串
-    '|\\b(' + KW.join('|') + ')\\b' +                                 // 3 关键字
-    '|\\b([A-Z][A-Za-z0-9_]*)\\b' +                                   // 4 类型/构造器
-    '|\\b(\\d+(?:\\.\\d+)?)\\b' +                                     // 5 数字
-    '|\\b([a-zA-Z_$][\\w$]*)(?=\\()',                                 // 6 函数调用
-    'g');
+  // 每一段用正则字面量写，取 .source 拼起来，省掉字符串里的双重转义
+  const RE_JS = new RegExp([
+    /(\/\*[\s\S]*?\*\/|\/\/[^\n]*)/.source,                                           // 1 注释
+    /(`(?:\\[\s\S]|[^\\`])*`|'(?:\\[\s\S]|[^\\'])*'|"(?:\\[\s\S]|[^\\"])*")/.source,    // 2 字符串
+    String.raw`\b(${KW.join('|')})\b`,                                                // 3 关键字
+    /\b([A-Z][A-Za-z0-9_]*)\b/.source,                                                // 4 类型/构造器
+    /\b(\d+(?:\.\d+)?)\b/.source,                                                     // 5 数字
+    /\b([a-zA-Z_$][\w$]*)(?=\()/.source                                               // 6 函数调用
+  ].join('|'), 'g');
 
-  var RE_SH = /(#[^\n]*)|('(?:\\[\s\S]|[^\\'])*'|"(?:\\[\s\S]|[^\\"])*")|\b(npm|npx|pnpm|yarn|bun|deno|node|git|cd|mkdir|curl|export|wrangler|vitest|docker)\b/g;
+  const RE_SH = /(#[^\n]*)|('(?:\\[\s\S]|[^\\'])*'|"(?:\\[\s\S]|[^\\"])*")|\b(npm|npx|pnpm|yarn|bun|deno|node|git|cd|mkdir|curl|export|wrangler|vitest|docker)\b/g;
 
-  function esc(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  const SH_CLASSES = ['tk-cm', 'tk-st', 'tk-kw'];
+  const JS_CLASSES = ['tk-cm', 'tk-st', 'tk-kw', 'tk-tp', 'tk-nm', 'tk-fn'];
+  // 这些语言没有专门的规则，借用 shell 的注释 / 字符串规则就够了
+  const SH_LIKE = new Set(['bash', 'sh', 'shell', 'text', 'json5', 'toml', 'http']);
+
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   function paint(src, re, classes) {
-    var out = '', last = 0, m;
-    re.lastIndex = 0;
-    while ((m = re.exec(src)) !== null) {
+    let out = '';
+    let last = 0;
+    // 所有分支都至少匹配一个字符，matchAll 不会卡在零宽匹配上
+    for (const m of src.matchAll(re)) {
       out += esc(src.slice(last, m.index));
-      for (var g = 1; g < m.length; g++) {
-        if (m[g] !== undefined) { out += '<span class="' + classes[g - 1] + '">' + esc(m[g]) + '</span>'; break; }
-      }
+      const g = m.findIndex((v, i) => i > 0 && v !== undefined);
+      out += `<span class="${classes[g - 1]}">${esc(m[g])}</span>`;
       last = m.index + m[0].length;
-      if (m[0].length === 0) re.lastIndex++;
     }
     return out + esc(src.slice(last));
   }
 
-  document.querySelectorAll('.code').forEach(function (box) {
-    var pre = box.querySelector('pre');
+  document.querySelectorAll('.code').forEach((box) => {
+    const pre = box.querySelector('pre');
     if (!pre) return;
-    var lang = box.dataset.lang || '';
-    var file = box.dataset.file || '';
-    var bar = document.createElement('div');
+    const { lang = '', file = '' } = box.dataset;
+
+    const bar = document.createElement('div');
     bar.className = 'bar';
-    bar.innerHTML = '<span class="tag">' + esc(file || lang || 'code') + '</span>';
-    var cp = document.createElement('button');
-    cp.className = 'copy'; cp.type = 'button'; cp.textContent = '复制';
-    cp.onclick = function () {
-      var txt = pre.textContent;
-      if (navigator.clipboard) navigator.clipboard.writeText(txt);
-      cp.textContent = '已复制'; setTimeout(function () { cp.textContent = '复制'; }, 1400);
+    bar.innerHTML = `<span class="tag">${esc(file || lang || 'code')}</span>`;
+    const cp = Object.assign(document.createElement('button'), {
+      className: 'copy',
+      type: 'button',
+      textContent: '复制'
+    });
+    cp.onclick = () => {
+      navigator.clipboard?.writeText(pre.textContent);
+      cp.textContent = '已复制';
+      setTimeout(() => { cp.textContent = '复制'; }, 1400);
     };
     bar.appendChild(cp);
     box.insertBefore(bar, pre);
 
-    var code = pre.textContent.replace(/^\n/, '').replace(/\s+$/, '');
-    if (lang === 'bash' || lang === 'sh' || lang === 'shell') {
-      pre.innerHTML = paint(code, RE_SH, ['tk-cm', 'tk-st', 'tk-kw']);
-    } else if (lang === 'text' || lang === 'json5' || lang === 'toml' || lang === 'http') {
-      pre.innerHTML = paint(code, RE_SH, ['tk-cm', 'tk-st', 'tk-kw']);
-    } else {
-      pre.innerHTML = paint(code, RE_JS, ['tk-cm', 'tk-st', 'tk-kw', 'tk-tp', 'tk-nm', 'tk-fn']);
-    }
+    const code = pre.textContent.replace(/^\n/, '').replace(/\s+$/, '');
+    pre.innerHTML = SH_LIKE.has(lang)
+      ? paint(code, RE_SH, SH_CLASSES)
+      : paint(code, RE_JS, JS_CLASSES);
   });
 
   /* ---------- 上一章 / 下一章 ---------- */
-  var pager = document.getElementById('pager');
+  const pager = document.getElementById('pager');
   if (pager && cur) {
-    var prev = CHAPTERS.find(function (c) { return c.n === cur - 1; });
-    var next = CHAPTERS.find(function (c) { return c.n === cur + 1; });
-    var h = '';
-    h += prev ? '<a class="prev" href="ch' + pad(prev.n) + '.html"><span>&larr; 上一章</span>第 ' + prev.n + ' 章 · ' + prev.t + '</a>'
-              : '<a class="prev" href="index.html"><span>&larr; 返回</span>课程首页</a>';
-    h += next ? '<a class="next" href="ch' + pad(next.n) + '.html"><span>下一章 &rarr;</span>第 ' + next.n + ' 章 · ' + next.t + '</a>'
-              : '<a class="next ph" href="#">.</a>';
+    const prev = CHAPTERS.find((c) => c.n === cur - 1);
+    const next = CHAPTERS.find((c) => c.n === cur + 1);
+    const prevLink = prev
+      ? `<a class="prev" href="${href(prev.n)}"><span>&larr; 上一章</span>第 ${prev.n} 章 · ${prev.t}</a>`
+      : '<a class="prev" href="index.html"><span>&larr; 返回</span>课程首页</a>';
+    const nextLink = next
+      ? `<a class="next" href="${href(next.n)}"><span>下一章 &rarr;</span>第 ${next.n} 章 · ${next.t}</a>`
+      : '<a class="next ph" href="#">.</a>';
     pager.className = 'pager';
-    pager.innerHTML = h;
+    pager.innerHTML = prevLink + nextLink;
   }
 
   /* ---------- 首页目录 ---------- */
-  var grid = document.getElementById('toc-grid');
+  const grid = document.getElementById('toc-grid');
   if (grid) {
-    var g = '';
-    CHAPTERS.forEach(function (c) {
-      g += '<a class="toc-card" href="ch' + pad(c.n) + '.html">' +
-        '<div class="n">第 ' + c.n + ' 章</div>' +
-        '<div class="t">' + c.t + '</div>' +
-        '<div class="d">' + c.d + '</div></a>';
-    });
     grid.className = 'toc-grid';
-    grid.innerHTML = g;
+    grid.innerHTML = CHAPTERS.map(({ n, t, d }) =>
+      `<a class="toc-card" href="${href(n)}">` +
+      `<div class="n">第 ${n} 章</div>` +
+      `<div class="t">${t}</div>` +
+      `<div class="d">${d}</div></a>`
+    ).join('');
   }
-
-  function pad(n) { return n < 10 ? '0' + n : '' + n; }
 })();
